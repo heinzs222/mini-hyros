@@ -5,9 +5,9 @@ import { fetchReport, createWebSocket } from "@/lib/api";
 import { daysAgo } from "@/lib/utils";
 import SummaryCards from "@/components/SummaryCards";
 import PerformanceChart from "@/components/PerformanceChart";
-import TrafficValueChart from "@/components/TrafficValueChart";
-import CumulativePerformanceChart from "@/components/CumulativePerformanceChart";
-import PlatformMixChart from "@/components/PlatformMixChart";
+import TrafficValueChart from "../components/TrafficValueChart";
+import CumulativePerformanceChart from "../components/CumulativePerformanceChart";
+import PlatformMixChart from "../components/PlatformMixChart";
 import AttributionTable from "@/components/AttributionTable";
 import TrackingHealth from "@/components/TrackingHealth";
 import PlatformComparisonTable from "@/components/PlatformComparisonTable";
@@ -18,7 +18,6 @@ import FunnelPanel from "@/components/FunnelPanel";
 import JourneyPanel from "@/components/JourneyPanel";
 import CohortPanel from "@/components/CohortPanel";
 import CapiPanel from "@/components/CapiPanel";
-import AiPanel from "@/components/AiPanel";
 import AdNamesPanel from "@/components/AdNamesPanel";
 import {
   BarChart3,
@@ -30,7 +29,6 @@ import {
   Route,
   Grid3x3,
   Send,
-  Brain,
   Tag,
 } from "lucide-react";
 
@@ -307,7 +305,6 @@ export default function DashboardPage() {
             { key: "journey", label: "Journey", icon: <Route size={13} /> },
             { key: "cohort", label: "Cohorts", icon: <Grid3x3 size={13} /> },
             { key: "capi", label: "CAPI Sync", icon: <Send size={13} /> },
-            { key: "ai", label: "AI Insights", icon: <Brain size={13} /> },
             { key: "names", label: "Ad Names", icon: <Tag size={13} /> },
           ].map((tab) => (
             <button
@@ -339,7 +336,6 @@ export default function DashboardPage() {
         {mainTab === "journey" && <JourneyPanel />}
         {mainTab === "cohort" && <CohortPanel />}
         {mainTab === "capi" && <CapiPanel />}
-        {mainTab === "ai" && <AiPanel />}
         {mainTab === "names" && <AdNamesPanel />}
 
         {mainTab === "attribution" && report && (

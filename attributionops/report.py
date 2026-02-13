@@ -434,6 +434,37 @@ def _key_from_attrib_row(row: dict[str, Any], breakdown: str) -> str:
     raise ValueError("invalid breakdown")
 
 
+def _default_row_name_for_breakdown(row: dict[str, Any], breakdown: str, fallback: str) -> str:
+    if breakdown == "ad_account":
+        account_id = str(row.get("account_id") or "").strip()
+        platform = str(row.get("platform") or "").strip()
+        if account_id:
+            return account_id
+        if platform:
+            return f"{platform} account"
+        return fallback
+    if breakdown == "campaign":
+        return str(row.get("campaign_id") or "").strip() or fallback
+    if breakdown == "ad_set":
+        return str(row.get("adset_id") or "").strip() or fallback
+    if breakdown == "ad":
+        return str(row.get("ad_id") or "").strip() or fallback
+    return fallback
+
+
+def _breakdown_key_has_value(key: str, breakdown: str) -> bool:
+    parts = key.split("|") if key else []
+    if breakdown == "ad_account":
+        return len(parts) >= 2 and bool(parts[0].strip() or parts[1].strip())
+    if breakdown == "campaign":
+        return len(parts) >= 3 and bool(parts[2].strip())
+    if breakdown == "ad_set":
+        return len(parts) >= 4 and bool(parts[3].strip())
+    if breakdown == "ad":
+        return len(parts) >= 5 and bool(parts[4].strip())
+    return True
+
+
 def _child_count_map(db_path: str, *, start_date: str, end_date: str, active_tab: TabKey) -> dict[str, int]:
     if active_tab == "ad":
         return {}
@@ -586,7 +617,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             key,
             {
                 "id": key,
-                "name": key,
+                "name": _default_row_name_for_breakdown(r, breakdown, key),
                 "level": inputs.active_tab,
                 "clicks": 0,
                 "cost": 0.0,
@@ -624,6 +655,66 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             },
         )
         by_key[key]["reported"] = (by_key[key]["reported"] or 0.0) + to_float(r.get("reported_value"))
+
+    has_dimension_values = any(_breakdown_key_has_value(str(k), breakdown) for k in by_key.keys())
+
+    # fallback: if spend/orders are missing, still surface campaign/ad-set/ad entities from touchpoints
+    if inputs.active_tab in {"ad_account", "campaign", "ad_set", "ad"} and not has_dimension_values:
+        touchpoint_rows = query(
+            db_path,
+            """
+            SELECT platform, campaign_id, adset_id, ad_id, COUNT(*) AS touches
+            FROM touchpoints
+            WHERE date(substr(ts,1,10)) BETWEEN :start_date AND :end_date
+            GROUP BY platform, campaign_id, adset_id, ad_id;
+            """,
+            {"start_date": inputs.start_date, "end_date": inputs.end_date},
+        ).rows
+
+        for r in touchpoint_rows:
+            platform = str(r.get("platform") or "").strip()
+            campaign_id = str(r.get("campaign_id") or "").strip()
+            adset_id = str(r.get("adset_id") or "").strip()
+            ad_id = str(r.get("ad_id") or "").strip()
+
+            if inputs.active_tab == "ad_account":
+                if not platform:
+                    continue
+                key = f"{platform}|"
+                name = f"{platform} account"
+            elif inputs.active_tab == "campaign":
+                if not campaign_id:
+                    continue
+                key = f"{platform}||{campaign_id}"
+                name = campaign_id
+            elif inputs.active_tab == "ad_set":
+                if not adset_id:
+                    continue
+                key = f"{platform}||{campaign_id}|{adset_id}"
+                name = adset_id
+            else:  # ad
+                if not ad_id:
+                    continue
+                key = f"{platform}||{campaign_id}|{adset_id}|{ad_id}"
+                name = ad_id
+
+            by_key.setdefault(
+                key,
+                {
+                    "id": key,
+                    "name": name,
+                    "level": inputs.active_tab,
+                    "clicks": 0,
+                    "cost": 0.0,
+                    "total_revenue": 0.0,
+                    "revenue": 0.0,
+                    "cogs": 0.0,
+                    "fees": 0.0,
+                    "reported": None,
+                    "_orders": 0.0,
+                },
+            )
+            by_key[key]["clicks"] += to_int(r.get("touches"))
 
     # clicks proxy for non-paid traffic sources (sessions count)
     if inputs.active_tab == "traffic_source":
@@ -687,6 +778,9 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
 
     table_rows = []
     for key, v in by_key.items():
+        if breakdown in {"ad_account", "campaign", "ad_set", "ad"} and not _breakdown_key_has_value(str(key), breakdown):
+            continue
+
         clicks = int(v["clicks"])
         cost = float(v["cost"])
         total_revenue = float(v["total_revenue"])
