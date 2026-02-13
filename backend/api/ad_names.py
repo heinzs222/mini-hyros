@@ -172,8 +172,13 @@ async def resolve_names(
 
 # ── Name resolution helper (used by report endpoints) ───────────────────────
 
-def get_name_map(db_path: str) -> dict[str, str]:
-    """Return a dict of entity_id → name for all known mappings."""
+def get_name_map(db_path: str, entity_type: str = "") -> dict[str, str]:
+    """Return a name map with both platform-aware and raw entity_id keys.
+
+    Keys included per row:
+    - "{platform}|{entity_id}" (preferred, avoids collisions)
+    - "{entity_id}" (fallback for legacy callers)
+    """
     try:
         with connect(db_path) as conn:
             conn.execute("""CREATE TABLE IF NOT EXISTS ad_names (
@@ -182,8 +187,29 @@ def get_name_map(db_path: str) -> dict[str, str]:
                 updated_at TEXT, PRIMARY KEY (platform, entity_type, entity_id)
             )""")
             conn.commit()
-        rows = sql_rows(db_path, "SELECT entity_id, name FROM ad_names")
-        return {r["entity_id"]: r["name"] for r in rows}
+
+        if entity_type:
+            rows = sql_rows(
+                db_path,
+                "SELECT platform, entity_id, name FROM ad_names WHERE entity_type = ?",
+                [entity_type],
+            )
+        else:
+            rows = sql_rows(db_path, "SELECT platform, entity_id, name FROM ad_names")
+
+        out: dict[str, str] = {}
+        for r in rows:
+            platform = str(r.get("platform") or "").strip().lower()
+            entity_id = str(r.get("entity_id") or "").strip()
+            name = str(r.get("name") or "").strip()
+            if not entity_id or not name:
+                continue
+            if platform:
+                out[f"{platform}|{entity_id}"] = name
+            if entity_id not in out:
+                out[entity_id] = name
+
+        return out
     except Exception:
         return {}
 

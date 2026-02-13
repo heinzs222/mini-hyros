@@ -13,6 +13,11 @@ interface Props {
     };
     top_tracking_gaps: Array<{ issue: string; impact: string; fix: string }>;
   };
+  freshness?: {
+    last_event_ts?: string | null;
+    last_spend_ts?: string | null;
+  };
+  wsConnected?: boolean;
 }
 
 function ProgressBar({ value, color }: { value: number; color: string }) {
@@ -26,7 +31,14 @@ function ProgressBar({ value, color }: { value: number; color: string }) {
   );
 }
 
-export default function TrackingHealth({ tracking }: Props) {
+function prettyTs(value: string | null | undefined): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString();
+}
+
+export default function TrackingHealth({ tracking, freshness, wsConnected }: Props) {
   const pct = tracking.tracking_percentage;
   const color =
     pct >= 90 ? "bg-emerald-500" : pct >= 70 ? "bg-yellow-500" : "bg-red-500";
@@ -62,6 +74,23 @@ export default function TrackingHealth({ tracking }: Props) {
             {cb.sessions_with_click_id} / {cb.sessions_total}{" "}
             <span className="text-gray-500">({clickRate.toFixed(0)}%)</span>
           </div>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-lg border border-[var(--card-border)] bg-white/[0.02] p-2.5 text-[11px]">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-gray-500">Last Event</span>
+          <span className="text-gray-300">{prettyTs(freshness?.last_event_ts)}</span>
+        </div>
+        <div className="flex items-center justify-between gap-2 mt-1">
+          <span className="text-gray-500">Last Spend Sync</span>
+          <span className="text-gray-300">{prettyTs(freshness?.last_spend_ts)}</span>
+        </div>
+        <div className="flex items-center justify-between gap-2 mt-1">
+          <span className="text-gray-500">Realtime Feed</span>
+          <span className={wsConnected ? "text-emerald-400" : "text-yellow-400"}>
+            {wsConnected ? "Connected" : "Reconnecting"}
+          </span>
         </div>
       </div>
 

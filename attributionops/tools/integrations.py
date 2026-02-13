@@ -31,7 +31,7 @@ def integrations_status(db_path: str) -> dict[str, object]:
 
     return {
         "connected": True,
-        "mode": "local_dummy",
+        "mode": "local_warehouse",
         "warehouse": {
             "type": "sqlite",
             "db_path": db_path,
@@ -48,7 +48,7 @@ def integrations_status(db_path: str) -> dict[str, object]:
             "reported_value_last_date": _max_date("reported_value", "date"),
         },
         "notes": [
-            "Local-only dummy integrations status (no external platform connections).",
+            "Local warehouse status based on available SQLite tables and timestamps.",
         ],
     }
 

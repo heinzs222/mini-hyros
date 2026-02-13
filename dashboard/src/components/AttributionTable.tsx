@@ -1,6 +1,6 @@
 "use client";
 
-import { formatMoney, formatNumber, profitColor } from "@/lib/utils";
+import { formatMoney, formatNumber, formatPercentValue, formatRatio, profitColor } from "@/lib/utils";
 import { fetchChildren } from "@/lib/api";
 import { ArrowUpDown, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { useState, useCallback } from "react";
@@ -83,6 +83,12 @@ function CellValue({ col, metrics }: { col: Column; metrics: any }) {
       </span>
     );
   }
+  if (col.type === "percent") {
+    return <span>{formatPercentValue(val, 2)}</span>;
+  }
+  if (col.type === "ratio") {
+    return <span>{formatRatio(val, 2)}</span>;
+  }
   if (col.type === "number") return <span>{formatNumber(val)}</span>;
   return <span>{val ?? "—"}</span>;
 }
@@ -96,6 +102,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   const [loadingChildren, setLoadingChildren] = useState<Record<string, boolean>>({});
 
   const metricCols = columns.filter((c) => c.type !== "dimension");
+  const dimensionCol = columns.find((c) => c.type === "dimension");
 
   const filtered = rows.filter((r) =>
     r.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -281,7 +288,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
         <div className="ml-auto">
           <input
             type="text"
-            placeholder="Search..."
+            placeholder="Search by name or ID..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="bg-transparent border border-[var(--card-border)] rounded-lg px-3 py-1 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-brand-500 w-44"
@@ -295,7 +302,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
           <thead>
             <tr className="border-b border-[var(--card-border)]">
               <th className="text-left px-4 py-2 text-gray-500 font-medium sticky left-0 bg-[var(--card)] z-10 min-w-[200px]">
-                Name
+                {dimensionCol?.label || "Name"}
               </th>
               {metricCols.map((col) => (
                 <th

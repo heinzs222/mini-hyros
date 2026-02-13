@@ -69,17 +69,35 @@ def _format_metrics(
     revenue: float,
     cogs: float,
     fees: float,
+    orders: float,
     reported: float | None,
     fixed_cost_allocation: float | None,
 ) -> dict[str, Any]:
+    clicks_i = int(clicks)
+    orders_f = float(orders)
     profit = revenue - cost - cogs - fees
     net_profit = profit if fixed_cost_allocation is None else profit - fixed_cost_allocation
     reported_delta = None if reported is None else (revenue - reported)
+    cpc = safe_div(cost, clicks_i)
+    cpa = safe_div(cost, orders_f)
+    roas = safe_div(revenue, cost)
+    cvr = safe_div(orders_f, clicks_i)
+    aov = safe_div(revenue, orders_f)
+    rpc = safe_div(revenue, clicks_i)
+    margin_pct = safe_div(profit, revenue)
     return {
-        "clicks": int(clicks),
+        "clicks": clicks_i,
+        "orders": round(orders_f, 2),
         "cost": round_money(cost),
+        "cpc": round_money(cpc) if cpc is not None else None,
+        "cpa": round_money(cpa) if cpa is not None else None,
         "total_revenue": round_money(total_revenue),
         "revenue": round_money(revenue),
+        "aov": round_money(aov) if aov is not None else None,
+        "rpc": round_money(rpc) if rpc is not None else None,
+        "roas": round(roas, 2) if roas is not None else None,
+        "cvr": round(cvr * 100.0, 2) if cvr is not None else None,
+        "margin_pct": round(margin_pct * 100.0, 2) if margin_pct is not None else None,
         "profit": round_money(profit),
         "net_profit": round_money(net_profit),
         "reported": round_money(reported) if reported is not None else None,
@@ -96,6 +114,285 @@ def _traffic_source_for_platform(platform: str) -> str:
     if p == "tiktok":
         return "tiktok / paid_social"
     return "unknown / paid"
+
+
+def _platform_label(platform: str) -> str:
+    p = (platform or "").lower()
+    if p == "meta":
+        return "Facebook Ads"
+    if p == "google":
+        return "Google Ads"
+    if p == "tiktok":
+        return "TikTok Ads"
+    return "Unknown"
+
+
+def _normalize_landing_path(raw_url: str) -> str:
+    raw = str(raw_url or "").strip()
+    if not raw:
+        return "/"
+
+    # Strip scheme/domain if full URL is stored.
+    if "://" in raw:
+        after = raw.split("://", 1)[1]
+        if "/" in after:
+            raw = after.split("/", 1)[1]
+            raw = "/" + raw
+        else:
+            raw = "/"
+
+    raw = raw.split("?", 1)[0].split("#", 1)[0].strip()
+    if not raw:
+        return "/"
+    if not raw.startswith("/"):
+        raw = "/" + raw
+    return raw
+
+
+def _funnel_key_from_path(path: str) -> str:
+    clean = _normalize_landing_path(path)
+    parts = [p for p in clean.strip("/").split("/") if p]
+    if not parts:
+        return "/"
+    return "/" + parts[0]
+
+
+def _humanize_funnel_name(funnel_key: str) -> str:
+    if funnel_key == "/":
+        return "Homepage"
+    token = funnel_key.strip("/").replace("-", " ").replace("_", " ").strip()
+    return " ".join(x.capitalize() for x in token.split()) if token else funnel_key
+
+
+def _funnel_name_map(db_path: str) -> dict[str, str]:
+    try:
+        rows = query(
+            db_path,
+            """
+            SELECT entity_id, name
+            FROM ad_names
+            WHERE entity_type = 'funnel';
+            """,
+        ).rows
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for r in rows:
+        entity_id = str(r.get("entity_id") or "").strip()
+        name = str(r.get("name") or "").strip()
+        if entity_id and name:
+            out[entity_id] = name
+    return out
+
+
+def _build_platform_comparison(
+    db_path: str,
+    *,
+    start_date: str,
+    end_date: str,
+    attrib_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    spend_rows = query(
+        db_path,
+        """
+        SELECT
+          platform,
+          SUM(CAST(clicks AS REAL)) AS clicks,
+          SUM(CAST(cost AS REAL)) AS cost
+        FROM spend
+        WHERE date BETWEEN :start_date AND :end_date
+        GROUP BY platform;
+        """,
+        {"start_date": start_date, "end_date": end_date},
+    ).rows
+
+    touch_rows = query(
+        db_path,
+        """
+        SELECT
+          platform,
+          COUNT(DISTINCT session_id) AS touch_clicks
+        FROM touchpoints
+        WHERE date(substr(ts,1,10)) BETWEEN :start_date AND :end_date
+          AND COALESCE(platform, '') <> ''
+        GROUP BY platform;
+        """,
+        {"start_date": start_date, "end_date": end_date},
+    ).rows
+
+    by_platform: dict[str, dict[str, float]] = defaultdict(
+        lambda: {
+            "clicks": 0.0,
+            "touch_clicks": 0.0,
+            "cost": 0.0,
+            "orders": 0.0,
+            "revenue": 0.0,
+            "total_revenue": 0.0,
+            "cogs": 0.0,
+            "fees": 0.0,
+        }
+    )
+
+    for r in spend_rows:
+        p = str(r.get("platform") or "").lower().strip()
+        if not p:
+            continue
+        by_platform[p]["clicks"] += to_float(r.get("clicks"))
+        by_platform[p]["cost"] += to_float(r.get("cost"))
+
+    for r in touch_rows:
+        p = str(r.get("platform") or "").lower().strip()
+        if not p:
+            continue
+        by_platform[p]["touch_clicks"] += to_float(r.get("touch_clicks"))
+
+    for r in attrib_rows:
+        p = str(r.get("platform") or "").lower().strip()
+        if not p:
+            continue
+        by_platform[p]["orders"] += float(str(r.get("orders") or "0") or 0)
+        by_platform[p]["revenue"] += to_float(r.get("revenue"))
+        by_platform[p]["total_revenue"] += to_float(r.get("total_revenue"))
+        by_platform[p]["cogs"] += to_float(r.get("cogs"))
+        by_platform[p]["fees"] += to_float(r.get("fees"))
+
+    rows: list[dict[str, Any]] = []
+    for platform, v in by_platform.items():
+        clicks = int(v["clicks"]) if v["clicks"] > 0 else int(v["touch_clicks"])
+        cost = float(v["cost"])
+        orders = float(v["orders"])
+        revenue = float(v["revenue"])
+        total_revenue = float(v["total_revenue"])
+        cogs = float(v["cogs"])
+        fees = float(v["fees"])
+        profit = revenue - cost - cogs - fees
+
+        roas = safe_div(revenue, cost)
+        cvr = safe_div(orders, clicks)
+        cpa = safe_div(cost, orders)
+        cpc = safe_div(cost, clicks)
+        aov = safe_div(revenue, orders)
+
+        rows.append(
+            {
+                "platform": platform,
+                "label": _platform_label(platform),
+                "clicks": clicks,
+                "orders": round(orders, 2),
+                "cost": round_money(cost),
+                "revenue": round_money(revenue),
+                "total_revenue": round_money(total_revenue),
+                "profit": round_money(profit),
+                "roas": round(roas, 2) if roas is not None else None,
+                "cvr": round(cvr * 100.0, 2) if cvr is not None else None,
+                "cpa": round_money(cpa) if cpa is not None else None,
+                "cpc": round_money(cpc) if cpc is not None else None,
+                "aov": round_money(aov) if aov is not None else None,
+            }
+        )
+
+    total_clicks = sum(int(r["clicks"]) for r in rows)
+    total_revenue = sum(float(r["revenue"] or 0.0) for r in rows)
+    for r in rows:
+        clicks_share = safe_div(float(r["clicks"]), float(total_clicks))
+        revenue_share = safe_div(float(r["revenue"]), float(total_revenue))
+        r["clicks_share"] = round((clicks_share or 0.0) * 100.0, 2)
+        r["revenue_share"] = round((revenue_share or 0.0) * 100.0, 2)
+
+    rows.sort(key=lambda r: (r.get("revenue") or 0.0), reverse=True)
+    return rows
+
+
+def _build_funnel_snapshot(db_path: str, *, start_date: str, end_date: str) -> list[dict[str, Any]]:
+    sessions = query(
+        db_path,
+        """
+        SELECT session_id, ts, customer_key, landing_page
+        FROM sessions
+        WHERE date(substr(ts,1,10)) BETWEEN :start_date AND :end_date;
+        """,
+        {"start_date": start_date, "end_date": end_date},
+    ).rows
+
+    conversions = query(
+        db_path,
+        """
+        SELECT customer_key, type, value
+        FROM conversions
+        WHERE date(substr(ts,1,10)) BETWEEN :start_date AND :end_date
+          AND COALESCE(customer_key, '') <> '';
+        """,
+        {"start_date": start_date, "end_date": end_date},
+    ).rows
+
+    funnel_name_map = _funnel_name_map(db_path)
+
+    visits_by_funnel: dict[str, set[str]] = defaultdict(set)
+    first_funnel_by_customer: dict[str, tuple[str, str]] = {}
+
+    for s in sessions:
+        session_id = str(s.get("session_id") or "")
+        ts = str(s.get("ts") or "")
+        customer_key = str(s.get("customer_key") or "")
+        funnel_id = _funnel_key_from_path(str(s.get("landing_page") or "/"))
+
+        if session_id:
+            visits_by_funnel[funnel_id].add(session_id)
+
+        if customer_key:
+            prev = first_funnel_by_customer.get(customer_key)
+            if prev is None or ts < prev[0]:
+                first_funnel_by_customer[customer_key] = (ts, funnel_id)
+
+    lead_customers: dict[str, set[str]] = defaultdict(set)
+    purchase_customers: dict[str, set[str]] = defaultdict(set)
+    revenue_by_funnel: dict[str, float] = defaultdict(float)
+
+    for c in conversions:
+        customer_key = str(c.get("customer_key") or "")
+        if not customer_key:
+            continue
+        owner = first_funnel_by_customer.get(customer_key)
+        if owner is None:
+            continue
+        funnel_id = owner[1]
+        conv_type = str(c.get("type") or "").lower()
+        value = to_float(c.get("value"))
+
+        if conv_type in ("lead", "formsubmission", "form_submission"):
+            lead_customers[funnel_id].add(customer_key)
+        if conv_type in ("purchase", "payment"):
+            purchase_customers[funnel_id].add(customer_key)
+            revenue_by_funnel[funnel_id] += value
+
+    rows: list[dict[str, Any]] = []
+    all_funnels = set(visits_by_funnel.keys()) | set(lead_customers.keys()) | set(purchase_customers.keys())
+    for funnel_id in all_funnels:
+        visits = len(visits_by_funnel.get(funnel_id, set()))
+        leads = len(lead_customers.get(funnel_id, set()))
+        purchases = len(purchase_customers.get(funnel_id, set()))
+        revenue = float(revenue_by_funnel.get(funnel_id, 0.0))
+
+        lead_rate = safe_div(float(leads), float(visits))
+        purchase_rate = safe_div(float(purchases), float(visits))
+        aov = safe_div(revenue, float(purchases))
+
+        rows.append(
+            {
+                "funnel_id": funnel_id,
+                "funnel_name": funnel_name_map.get(funnel_id) or _humanize_funnel_name(funnel_id),
+                "visits": visits,
+                "leads": leads,
+                "purchases": purchases,
+                "lead_rate": round((lead_rate or 0.0) * 100.0, 2),
+                "purchase_rate": round((purchase_rate or 0.0) * 100.0, 2),
+                "revenue": round_money(revenue),
+                "aov": round_money(aov) if aov is not None else None,
+            }
+        )
+
+    rows.sort(key=lambda r: int(r.get("visits") or 0), reverse=True)
+    return rows[:12]
 
 
 def _key_from_spend_row(row: dict[str, Any], breakdown: str) -> str:
@@ -150,9 +447,26 @@ def _child_count_map(db_path: str, *, start_date: str, end_date: str, active_tab
         {"start_date": start_date, "end_date": end_date},
     ).rows
 
+    touch_raw = query(
+        db_path,
+        """
+        SELECT
+          platform,
+          '' AS account_id,
+          campaign_id,
+          adset_id,
+          ad_id
+        FROM touchpoints
+        WHERE date(substr(ts,1,10)) BETWEEN :start_date AND :end_date;
+        """,
+        {"start_date": start_date, "end_date": end_date},
+    ).rows
+
+    raw_rows = list(spend_raw) + list(touch_raw)
+
     children: dict[str, set[str]] = defaultdict(set)
 
-    for r in spend_raw:
+    for r in raw_rows:
         platform = str(r.get("platform") or "")
         account_id = str(r.get("account_id") or "")
         campaign_id = str(r.get("campaign_id") or "")
@@ -378,6 +692,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         revenue = float(v["revenue"])
         cogs = float(v["cogs"])
         fees = float(v["fees"])
+        orders = float(v["_orders"])
         reported_value = float(v["reported"]) if v["reported"] is not None else None
 
         metrics = _format_metrics(
@@ -387,6 +702,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             revenue=revenue,
             cogs=cogs,
             fees=fees,
+            orders=orders,
             reported=reported_value,
             fixed_cost_allocation=None,
         )
@@ -423,6 +739,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         revenue=float(totals["revenue"]),
         cogs=float(totals["cogs"]),
         fees=float(totals["fees"]),
+        orders=float(totals["_orders"]),
         reported=float(totals["reported"]) if totals["_reported_any"] else None,
         fixed_cost_allocation=None,
     )
@@ -437,7 +754,20 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         "roas": round_money(roas) if roas is not None else None,
         "mer": round_money(mer) if mer is not None else None,
         "cac": round_money(cpa) if cpa is not None else None,
+        "cpa": round_money(cpa) if cpa is not None else None,
     }
+
+    platform_comparison = _build_platform_comparison(
+        db_path,
+        start_date=inputs.start_date,
+        end_date=inputs.end_date,
+        attrib_rows=attrib_rows,
+    )
+    funnel_snapshot = _build_funnel_snapshot(
+        db_path,
+        start_date=inputs.start_date,
+        end_date=inputs.end_date,
+    )
 
     # Charts: day series
     spend_by_day = ads_get_spend(
@@ -481,13 +811,17 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     last_event_ts = health.get("freshness", {}).get("sessions_last_ts") or health.get("freshness", {}).get("orders_last_ts")
     last_spend_ts = integrations.get("ads", {}).get("spend_last_date")
     diagnostics = {
-        "data_freshness": {"last_event_ts": last_event_ts, "last_spend_ts": last_spend_ts, "notes": "Local dummy dataset timestamps."},
+        "data_freshness": {
+            "last_event_ts": last_event_ts,
+            "last_spend_ts": last_spend_ts,
+            "notes": "Computed from local warehouse tables (sessions, touchpoints, orders, spend).",
+        },
         "attribution_notes": [
             f"Model={_format_model_label(inputs.attribution_model)}, lookback_days={inputs.lookback_days}, conversion_type={inputs.conversion_type}.",
             f"Attribution date basis={date_basis} (conversion vs click).",
         ],
         "assumptions": [
-            "This report is computed from synthetic dummy data (not business truth).",
+            "This report is computed from local event, touchpoint, and order tables.",
             "net_profit == profit (no fixed cost allocation provided).",
             "For non-paid sources, clicks may be approximated from sessions.",
         ],
@@ -496,7 +830,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
 
     if inputs.use_date_of_click_attribution:
         diagnostics["assumptions"].append(
-            "reported value is stored by conversion date in the dummy dataset; reported_delta may not be comparable under click-date attribution."
+            "reported value is typically stored by conversion date; reported_delta may not be perfectly comparable under click-date attribution."
         )
 
     if tracking_percentage < 85:
@@ -561,7 +895,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             "filters_applied": {
                 "conversion_type": inputs.conversion_type,
                 "lookback_days": inputs.lookback_days,
-                "data_mode": "local_dummy",
+                "data_mode": "local_warehouse",
             },
         },
         "tracking": tracking,
@@ -570,12 +904,29 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         "table": {
             "active_tab": inputs.active_tab,
             "columns": [
-                {"key": "name", "label": "Campaign", "type": "dimension"},
+                {
+                    "key": "name",
+                    "label": {
+                        "traffic_source": "Source",
+                        "ad_account": "Ad Account",
+                        "campaign": "Campaign",
+                        "ad_set": "Ad Set",
+                        "ad": "Ad",
+                    }.get(inputs.active_tab, "Name"),
+                    "type": "dimension",
+                },
                 {"key": "clicks", "label": "Clicks", "type": "number"},
+                {"key": "orders", "label": "Orders", "type": "number"},
                 {"key": "cost", "label": "Cost", "type": "money"},
+                {"key": "cpc", "label": "CPC", "type": "money"},
+                {"key": "cpa", "label": "CPA", "type": "money"},
+                {"key": "cvr", "label": "CVR", "type": "percent"},
                 {"key": "total_revenue", "label": "Total Revenue", "type": "money"},
                 {"key": "revenue", "label": "Revenue", "type": "money"},
+                {"key": "aov", "label": "AOV", "type": "money"},
+                {"key": "roas", "label": "ROAS", "type": "ratio"},
                 {"key": "profit", "label": "Profit", "type": "money"},
+                {"key": "margin_pct", "label": "Margin", "type": "percent"},
                 {"key": "net_profit", "label": "Net Profit", "type": "money"},
                 {"key": "reported", "label": "Reported", "type": "money"},
                 {"key": "reported_delta", "label": "Rep. Delta", "type": "money"},
@@ -586,6 +937,8 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             "search_hint": "Search by name/id/utm",
         },
         "charts": charts,
+        "platform_comparison": {"rows": platform_comparison},
+        "funnels": {"rows": funnel_snapshot},
         "diagnostics": diagnostics,
         "action_plan": action_plan,
     }

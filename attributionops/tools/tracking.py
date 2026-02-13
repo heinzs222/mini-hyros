@@ -93,7 +93,7 @@ def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int =
 
     return {
         "status": status,
-        "mode": "local_dummy",
+        "mode": "local_warehouse",
         "coverage": {
             "orders_with_source": int(orders_with_source),
             "orders_total": int(orders_total),
@@ -109,7 +109,7 @@ def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int =
         "errors": [],
         "top_tracking_gaps": gaps,
         "notes": [
-            "Local dummy health check computed from SQLite tables (no pixel/CAPI logs available).",
+            "Tracking health computed from live local SQLite warehouse tables.",
         ],
     }
 

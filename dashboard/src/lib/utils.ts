@@ -24,6 +24,16 @@ export function formatPercent(value: number | null | undefined): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+export function formatPercentValue(value: number | null | undefined, digits = 1): string {
+  if (value == null) return "—";
+  return `${Number(value).toFixed(digits)}%`;
+}
+
+export function formatRatio(value: number | null | undefined, digits = 2): string {
+  if (value == null) return "—";
+  return `${Number(value).toFixed(digits)}x`;
+}
+
 export function formatSeconds(value: number | null | undefined): string {
   if (value == null) return "—";
   if (value < 60) return `${value.toFixed(1)}s`;

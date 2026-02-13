@@ -7,6 +7,8 @@ import SummaryCards from "@/components/SummaryCards";
 import PerformanceChart from "@/components/PerformanceChart";
 import AttributionTable from "@/components/AttributionTable";
 import TrackingHealth from "@/components/TrackingHealth";
+import PlatformComparisonTable from "@/components/PlatformComparisonTable";
+import FunnelSnapshotTable from "@/components/FunnelSnapshotTable";
 import LiveFeed from "@/components/LiveFeed";
 import LtvPanel from "@/components/LtvPanel";
 import FunnelPanel from "@/components/FunnelPanel";
@@ -236,13 +238,27 @@ export default function DashboardPage() {
             {/* Summary KPI Cards */}
             <SummaryCards totals={report.summary_totals} />
 
+            {/* Source + Funnel clarity */}
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+              <div className="xl:col-span-2">
+                <PlatformComparisonTable rows={report.platform_comparison?.rows || []} />
+              </div>
+              <div>
+                <FunnelSnapshotTable rows={report.funnels?.rows || []} />
+              </div>
+            </div>
+
             {/* Charts + Sidebar */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2">
                 <PerformanceChart data={report.charts?.time_series || []} />
               </div>
               <div className="space-y-4">
-                <TrackingHealth tracking={report.tracking} />
+                <TrackingHealth
+                  tracking={report.tracking}
+                  freshness={report.diagnostics?.data_freshness}
+                  wsConnected={wsConnected}
+                />
                 <LiveFeed events={liveEvents} connected={wsConnected} />
               </div>
             </div>

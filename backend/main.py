@@ -147,16 +147,25 @@ async def get_report(
     report = build_hyros_like_report(_db(), inputs)
 
     # Resolve IDs to names
-    name_map = get_name_map(_db())
+    entity_type_map = {
+        "campaign": "campaign",
+        "ad_set": "adset",
+        "ad": "ad",
+    }
+    entity_type = entity_type_map.get(active_tab, "")
+    name_map = get_name_map(_db(), entity_type=entity_type) if entity_type else {}
     if name_map:
         for row in report.get("table", {}).get("rows", []):
-            raw_name = row.get("name", "")
-            # Try to resolve the last part of pipe-separated IDs
-            parts = raw_name.split("|")
-            last_part = parts[-1].strip() if parts else raw_name
-            if last_part in name_map:
-                row["name"] = name_map[last_part]
-                row["raw_id"] = raw_name
+            row_id = str(row.get("id", ""))
+            row_name = str(row.get("name", ""))
+            parts = row_id.split("|") if row_id else []
+            platform = parts[0].strip().lower() if parts else ""
+            entity_id = parts[-1].strip() if parts else row_name
+            lookup_key = f"{platform}|{entity_id}" if platform and entity_id else entity_id
+            resolved_name = name_map.get(lookup_key) or name_map.get(entity_id)
+            if resolved_name:
+                row["name"] = resolved_name
+                row["raw_id"] = entity_id
 
     return report
 
@@ -228,8 +237,8 @@ async def get_report_children(
         return {"rows": [], "child_tab": "", "error": "Invalid parent_tab"}
 
     # Query touchpoints for children
-    from attributionops.db import query as _query, sql_rows
-    from attributionops.util import to_float, parse_iso_ts
+    from attributionops.db import sql_rows
+    from attributionops.util import to_float
     from collections import defaultdict
 
     # Build WHERE clause for touchpoints
@@ -245,15 +254,12 @@ async def get_report_children(
     # Determine grouping column for children
     if child_tab == "campaign":
         group_col = "t.campaign_id"
-        name_col = "t.campaign_id"
         child_id_template = "t.platform || '|' || '' || '|' || t.campaign_id"
     elif child_tab == "ad_set":
         group_col = "t.adset_id"
-        name_col = "t.adset_id"
         child_id_template = "t.platform || '|' || '' || '|' || t.campaign_id || '|' || t.adset_id"
     elif child_tab == "ad":
         group_col = "t.ad_id"
-        name_col = "t.ad_id"
         child_id_template = "t.platform || '|' || '' || '|' || t.campaign_id || '|' || t.adset_id || '|' || t.ad_id"
     else:
         return {"rows": [], "child_tab": child_tab}
@@ -327,12 +333,21 @@ async def get_report_children(
         if not ck:
             continue
         attrib = attrib_by_child.get(ck, {})
+        orders = float(attrib.get("orders", 0.0))
         revenue = round(attrib.get("revenue", 0.0), 2)
         total_revenue = round(attrib.get("total_revenue", 0.0), 2)
         cogs = round(attrib.get("cogs", 0.0), 2)
         fees = round(attrib.get("fees", 0.0), 2)
+        clicks = int(tp.get("sessions", 0))
         cost = 0.0  # No spend data in real tracking mode
         profit = round(revenue - cost - cogs - fees, 2)
+        cpc = round((cost / clicks), 2) if clicks > 0 else None
+        cpa = round((cost / orders), 2) if orders > 0 else None
+        cvr = round((orders / clicks) * 100.0, 2) if clicks > 0 else None
+        aov = round((revenue / orders), 2) if orders > 0 else None
+        roas = round((revenue / cost), 2) if cost > 0 else None
+        margin_pct = round((profit / revenue) * 100.0, 2) if revenue > 0 else None
+        rpc = round((revenue / clicks), 2) if clicks > 0 else None
 
         has_grandchildren = child_tab in ("campaign", "ad_set")
 
@@ -341,11 +356,19 @@ async def get_report_children(
             "name": ck if ck else "(empty)",
             "level": child_tab,
             "metrics": {
-                "clicks": int(tp.get("sessions", 0)),
+                "clicks": clicks,
+                "orders": round(orders, 2),
                 "cost": cost,
+                "cpc": cpc,
+                "cpa": cpa,
+                "cvr": cvr,
                 "total_revenue": total_revenue,
                 "revenue": revenue,
+                "aov": aov,
+                "rpc": rpc,
+                "roas": roas,
                 "profit": profit,
+                "margin_pct": margin_pct,
                 "net_profit": profit,
                 "reported": None,
                 "reported_delta": None,
@@ -357,13 +380,23 @@ async def get_report_children(
     rows.sort(key=lambda r: r["metrics"]["revenue"], reverse=True)
 
     # Resolve IDs to names
-    name_map = get_name_map(db_path)
+    child_entity_map = {
+        "campaign": "campaign",
+        "ad_set": "adset",
+        "ad": "ad",
+    }
+    name_map = get_name_map(db_path, entity_type=child_entity_map.get(child_tab, ""))
     if name_map:
         for row in rows:
-            raw_name = row.get("name", "")
-            if raw_name in name_map:
-                row["name"] = name_map[raw_name]
-                row["raw_id"] = raw_name
+            row_id = str(row.get("id", ""))
+            parts = row_id.split("|") if row_id else []
+            platform = parts[0].strip().lower() if parts else ""
+            entity_id = parts[-1].strip() if parts else str(row.get("name", ""))
+            lookup_key = f"{platform}|{entity_id}" if platform and entity_id else entity_id
+            resolved_name = name_map.get(lookup_key) or name_map.get(entity_id)
+            if resolved_name:
+                row["name"] = resolved_name
+                row["raw_id"] = entity_id
 
     return {
         "child_tab": child_tab,

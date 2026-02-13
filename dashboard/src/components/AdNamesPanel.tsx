@@ -14,8 +14,9 @@ interface NameRow {
   updated_at: string;
 }
 
-const PLATFORMS = ["meta", "google", "tiktok"];
-const ENTITY_TYPES = ["campaign", "adset", "ad"];
+const PLATFORMS = ["meta", "google", "tiktok", "ghl"];
+const SYNC_PLATFORMS = ["meta", "google", "tiktok"];
+const ENTITY_TYPES = ["campaign", "adset", "ad", "funnel"];
 
 export default function AdNamesPanel() {
   const [rows, setRows] = useState<NameRow[]>([]);
@@ -122,6 +123,7 @@ export default function AdNamesPanel() {
       campaign: "bg-purple-500/20 text-purple-400",
       adset: "bg-cyan-500/20 text-cyan-400",
       ad: "bg-emerald-500/20 text-emerald-400",
+      funnel: "bg-orange-500/20 text-orange-400",
     };
     return colors[t] || "bg-gray-500/20 text-gray-400";
   };
@@ -134,7 +136,7 @@ export default function AdNamesPanel() {
           <div>
             <h3 className="text-sm font-semibold text-white">Ad Name Mappings</h3>
             <p className="text-[11px] text-gray-500 mt-0.5">
-              Map campaign/adset/ad IDs to human-readable names. Sync from APIs or add manually.
+              Map campaign/adset/ad/funnel IDs to human-readable names. Sync from APIs or add manually.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -174,7 +176,7 @@ export default function AdNamesPanel() {
 
         {/* Sync individual platforms */}
         <div className="flex gap-2 mb-3">
-          {PLATFORMS.map((p) => (
+          {SYNC_PLATFORMS.map((p) => (
             <button
               key={p}
               onClick={() => handleSync(p)}
@@ -189,6 +191,9 @@ export default function AdNamesPanel() {
         {/* Add form */}
         {showAdd && (
           <div className="rounded-lg border border-[var(--card-border)] bg-white/[0.02] p-3 mb-3">
+            <p className="text-[11px] text-gray-500 mb-2">
+              Tip: for funnel names, set <code className="text-gray-300">type=funnel</code> and ID as the first URL segment (e.g. <code className="text-gray-300">/book-call</code>).
+            </p>
             <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
               <select
                 value={newMapping.platform}
