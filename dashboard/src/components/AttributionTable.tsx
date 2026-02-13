@@ -50,6 +50,8 @@ interface Props {
   model?: string;
   lookbackDays?: number;
   useClickDate?: boolean;
+  compareRows?: TableRow[];
+  compareLabel?: string;
 }
 
 const TABS = [
@@ -93,7 +95,31 @@ function CellValue({ col, metrics }: { col: Column; metrics: any }) {
   return <span>{val ?? "—"}</span>;
 }
 
-export default function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate }: Props) {
+function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; currentMetrics: any; compareMetrics: any }) {
+  const current = currentMetrics?.[col.key];
+  const previous = compareMetrics?.[col.key];
+  if (current == null || previous == null) return null;
+
+  const delta = Number(current) - Number(previous);
+  const sign = delta > 0 ? "+" : delta < 0 ? "-" : "";
+  const color = delta > 0 ? "text-emerald-400" : delta < 0 ? "text-red-400" : "text-gray-500";
+
+  if (col.type === "money") {
+    return <div className={`text-[10px] ${color}`}>{`${sign}${formatMoney(Math.abs(delta))}`}</div>;
+  }
+  if (col.type === "number") {
+    return <div className={`text-[10px] ${color}`}>{`${sign}${formatNumber(Math.abs(delta))}`}</div>;
+  }
+  if (col.type === "ratio") {
+    return <div className={`text-[10px] ${color}`}>{`${sign}${Math.abs(delta).toFixed(2)}x`}</div>;
+  }
+  if (col.type === "percent") {
+    return <div className={`text-[10px] ${color}`}>{`${sign}${Math.abs(delta).toFixed(2)} pp`}</div>;
+  }
+  return null;
+}
+
+export default function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "" }: Props) {
   const [sortKey, setSortKey] = useState("profit");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [search, setSearch] = useState("");
@@ -103,6 +129,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
 
   const metricCols = columns.filter((c) => c.type !== "dimension");
   const dimensionCol = columns.find((c) => c.type === "dimension");
+  const compareById = new Map(compareRows.map((r) => [r.id, r]));
 
   const filtered = rows.filter((r) =>
     r.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -202,6 +229,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
     const children = childRows[rowKey] || childRows[row.id] || [];
     const levelColor = LEVEL_COLORS[row.level] || "";
     const levelLabel = LEVEL_LABELS[row.level] || "";
+    const compareRow = depth === 0 ? compareById.get(row.id) : undefined;
 
     return (
       <tbody key={rowKey}>
@@ -244,6 +272,9 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
           {metricCols.map((col) => (
             <td key={col.key} className="text-right px-3 py-2.5 text-gray-300 whitespace-nowrap">
               <CellValue col={col} metrics={row.metrics} />
+              {compareRow && (
+                <DeltaValue col={col} currentMetrics={row.metrics} compareMetrics={compareRow.metrics} />
+              )}
             </td>
           ))}
         </tr>
@@ -266,6 +297,12 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
 
   return (
     <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] overflow-hidden">
+      {compareRows.length > 0 && (
+        <div className="px-4 py-2 border-b border-[var(--card-border)] text-[11px] text-blue-300 bg-blue-500/5">
+          Row deltas shown vs {compareLabel || "comparison"}
+        </div>
+      )}
+
       {/* Tab bar */}
       <div className="flex items-center gap-1 px-4 pt-3 pb-2 border-b border-[var(--card-border)] overflow-x-auto">
         {TABS.map((t) => (

@@ -5,6 +5,9 @@ import { fetchReport, createWebSocket } from "@/lib/api";
 import { daysAgo } from "@/lib/utils";
 import SummaryCards from "@/components/SummaryCards";
 import PerformanceChart from "@/components/PerformanceChart";
+import TrafficValueChart from "@/components/TrafficValueChart";
+import CumulativePerformanceChart from "@/components/CumulativePerformanceChart";
+import PlatformMixChart from "@/components/PlatformMixChart";
 import AttributionTable from "@/components/AttributionTable";
 import TrackingHealth from "@/components/TrackingHealth";
 import PlatformComparisonTable from "@/components/PlatformComparisonTable";
@@ -57,12 +60,36 @@ const PRESETS = [
   { value: "90", label: "Last 90 Days" },
 ];
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+type CompareMode = "none" | "previous_period" | "model";
+
+function shiftIsoDate(dateIso: string, deltaDays: number): string {
+  const date = new Date(`${dateIso}T00:00:00`);
+  date.setDate(date.getDate() + deltaDays);
+  return date.toISOString().slice(0, 10);
+}
+
+function inclusiveSpanDays(startIso: string, endIso: string): number {
+  const start = new Date(`${startIso}T00:00:00`).getTime();
+  const end = new Date(`${endIso}T00:00:00`).getTime();
+  return Math.max(1, Math.round((end - start) / DAY_MS) + 1);
+}
+
+function modelLabel(value: string): string {
+  return MODELS.find((m) => m.value === value)?.label || value;
+}
+
 export default function DashboardPage() {
   const [report, setReport] = useState<any>(null);
+  const [compareReport, setCompareReport] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("traffic_source");
   const [model, setModel] = useState("last_click");
+  const [compareMode, setCompareMode] = useState<CompareMode>("previous_period");
+  const [compareModel, setCompareModel] = useState("first_click");
+  const [compareLabel, setCompareLabel] = useState("");
   const [datePreset, setDatePreset] = useState("30");
   const [useClickDate, setUseClickDate] = useState(false);
   const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
@@ -71,26 +98,68 @@ export default function DashboardPage() {
   const [mainTab, setMainTab] = useState("attribution");
   const wsRef = useRef<WebSocket | null>(null);
   const refreshTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const loadReportRef = useRef<() => Promise<void>>(async () => {});
 
   const loadReport = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const days = parseInt(datePreset);
-      const data = await fetchReport({
-        start_date: daysAgo(days),
-        end_date: daysAgo(0),
+      const days = parseInt(datePreset, 10);
+      const startDate = daysAgo(days);
+      const endDate = daysAgo(0);
+
+      const primaryParams = {
+        start_date: startDate,
+        end_date: endDate,
         model,
         active_tab: activeTab,
         use_click_date: useClickDate,
-      });
+      };
+
+      let comparePromise: Promise<any> | null = null;
+      let nextCompareLabel = "";
+
+      if (compareMode === "previous_period") {
+        const spanDays = inclusiveSpanDays(startDate, endDate);
+        const previousEnd = shiftIsoDate(startDate, -1);
+        const previousStart = shiftIsoDate(previousEnd, -(spanDays - 1));
+        comparePromise = fetchReport({
+          start_date: previousStart,
+          end_date: previousEnd,
+          model,
+          active_tab: activeTab,
+          use_click_date: useClickDate,
+        });
+        nextCompareLabel = `${previousStart} to ${previousEnd}`;
+      } else if (compareMode === "model" && compareModel !== model) {
+        comparePromise = fetchReport({
+          start_date: startDate,
+          end_date: endDate,
+          model: compareModel,
+          active_tab: activeTab,
+          use_click_date: useClickDate,
+        });
+        nextCompareLabel = `${modelLabel(compareModel)} model`;
+      }
+
+      const [data, compareData] = await Promise.all([
+        fetchReport(primaryParams),
+        comparePromise ?? Promise.resolve(null),
+      ]);
+
       setReport(data);
+      setCompareReport(compareData);
+      setCompareLabel(compareData ? nextCompareLabel : "");
     } catch (err: any) {
       setError(err.message || "Failed to load report");
     } finally {
       setLoading(false);
     }
-  }, [activeTab, model, datePreset, useClickDate]);
+  }, [activeTab, model, datePreset, useClickDate, compareMode, compareModel]);
+
+  useEffect(() => {
+    loadReportRef.current = loadReport;
+  }, [loadReport]);
 
   useEffect(() => {
     loadReport();
@@ -112,7 +181,9 @@ export default function DashboardPage() {
       setLiveEvents((prev) => [...prev.slice(-49), data]);
       // Auto-refresh report on new orders
       if (data.type === "new_order") {
-        setTimeout(loadReport, 1000);
+        setTimeout(() => {
+          void loadReportRef.current();
+        }, 1000);
       }
     });
     if (ws) {
@@ -128,6 +199,8 @@ export default function DashboardPage() {
   const handleTabChange = (tab: string) => {
     setActiveTab(tab);
   };
+
+  const activePresetLabel = PRESETS.find((p) => p.value === datePreset)?.label || `${datePreset} Days`;
 
   return (
     <div className="min-h-screen">
@@ -145,41 +218,77 @@ export default function DashboardPage() {
           </div>
 
           {/* Controls */}
-          <div className="flex items-center gap-2 ml-auto">
-            <select
-              value={datePreset}
-              onChange={(e) => setDatePreset(e.target.value)}
-              className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-            >
-              {PRESETS.map((p) => (
-                <option key={p.value} value={p.value}>{p.label}</option>
-              ))}
-            </select>
+          <div className="ml-auto flex flex-wrap items-end gap-2">
+            <div className="min-w-[130px]">
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Period</div>
+              <select
+                value={datePreset}
+                onChange={(e) => setDatePreset(e.target.value)}
+                className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+              >
+                {PRESETS.map((p) => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
+              </select>
+            </div>
 
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-            >
-              {MODELS.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
+            <div className="min-w-[170px]">
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Primary Attribution</div>
+              <select
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+              >
+                {MODELS.map((m) => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </select>
+            </div>
 
-            <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={useClickDate}
-                onChange={(e) => setUseClickDate(e.target.checked)}
-                className="rounded border-gray-600 bg-transparent"
-              />
-              Click Date
-            </label>
+            <div className="min-w-[150px]">
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Compare</div>
+              <select
+                value={compareMode}
+                onChange={(e) => setCompareMode(e.target.value as CompareMode)}
+                className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+              >
+                <option value="none">No Comparison</option>
+                <option value="previous_period">Previous Period</option>
+                <option value="model">Another Model</option>
+              </select>
+            </div>
+
+            {compareMode === "model" && (
+              <div className="min-w-[170px]">
+                <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Comparison Model</div>
+                <select
+                  value={compareModel}
+                  onChange={(e) => setCompareModel(e.target.value)}
+                  className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+                >
+                  {MODELS.map((m) => (
+                    <option key={m.value} value={m.value}>{m.label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="min-w-[140px]">
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Date Basis</div>
+              <select
+                value={useClickDate ? "click" : "conversion"}
+                onChange={(e) => setUseClickDate(e.target.value === "click")}
+                className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+              >
+                <option value="conversion">Conversion Date</option>
+                <option value="click">Click Date</option>
+              </select>
+            </div>
 
             <button
               onClick={loadReport}
               disabled={loading}
-              className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-xs font-medium transition-colors disabled:opacity-50"
+              className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-xs font-medium transition-colors disabled:opacity-50 h-[34px]"
             >
               <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
               Refresh
@@ -235,23 +344,67 @@ export default function DashboardPage() {
 
         {mainTab === "attribution" && report && (
           <>
+            <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)]/70 p-3">
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Model: {modelLabel(model)}</span>
+                <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Window: {activePresetLabel}</span>
+                <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Basis: {useClickDate ? "Click Date" : "Conversion Date"}</span>
+                <span className={`px-2 py-1 rounded ${compareReport ? "bg-blue-500/15 text-blue-300" : "bg-white/5 text-gray-500"}`}>
+                  {compareReport ? `Comparing vs ${compareLabel}` : "Comparison Off"}
+                </span>
+              </div>
+            </div>
+
             {/* Summary KPI Cards */}
-            <SummaryCards totals={report.summary_totals} />
+            <SummaryCards
+              totals={report.summary_totals}
+              compareTotals={compareReport?.summary_totals}
+              compareLabel={compareLabel}
+            />
 
             {/* Source + Funnel clarity */}
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
               <div className="xl:col-span-2">
-                <PlatformComparisonTable rows={report.platform_comparison?.rows || []} />
+                <PlatformComparisonTable
+                  rows={report.platform_comparison?.rows || []}
+                  compareRows={compareReport?.platform_comparison?.rows || []}
+                  compareLabel={compareLabel}
+                />
               </div>
               <div>
-                <FunnelSnapshotTable rows={report.funnels?.rows || []} />
+                <FunnelSnapshotTable
+                  rows={report.funnels?.rows || []}
+                  compareRows={compareReport?.funnels?.rows || []}
+                  compareLabel={compareLabel}
+                />
               </div>
             </div>
 
             {/* Charts + Sidebar */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-2">
-                <PerformanceChart data={report.charts?.time_series || []} />
+              <div className="lg:col-span-2 space-y-6">
+                <PerformanceChart
+                  data={report.charts?.time_series || []}
+                  compareData={compareReport?.charts?.time_series || []}
+                  compareLabel={compareLabel}
+                />
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                  <TrafficValueChart
+                    data={report.charts?.time_series || []}
+                    compareData={compareReport?.charts?.time_series || []}
+                    compareLabel={compareLabel}
+                  />
+                  <CumulativePerformanceChart
+                    data={report.charts?.time_series || []}
+                    compareData={compareReport?.charts?.time_series || []}
+                    compareLabel={compareLabel}
+                  />
+                </div>
+                <PlatformMixChart
+                  rows={report.platform_comparison?.rows || []}
+                  compareRows={compareReport?.platform_comparison?.rows || []}
+                  compareLabel={compareLabel}
+                />
               </div>
               <div className="space-y-4">
                 <TrackingHealth
@@ -268,6 +421,8 @@ export default function DashboardPage() {
               columns={report.table.columns}
               rows={report.table.rows}
               totals={report.table.totals_row}
+              compareRows={compareReport?.table?.rows || []}
+              compareLabel={compareLabel}
               activeTab={activeTab}
               onTabChange={handleTabChange}
               startDate={daysAgo(parseInt(datePreset))}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any, Literal
 
 from attributionops.db import query
@@ -789,7 +790,15 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
 
     spend_day_map = {r["name"]: r for r in spend_by_day}
     attrib_day_map = {r["date"]: r for r in attrib_by_day}
-    all_days = sorted(set(list(spend_day_map.keys()) + list(attrib_day_map.keys())))
+
+    start_d = date.fromisoformat(inputs.start_date)
+    end_d = date.fromisoformat(inputs.end_date)
+    all_days: list[str] = []
+    d = start_d
+    while d <= end_d:
+        all_days.append(d.isoformat())
+        d += timedelta(days=1)
+
     time_series = []
     for day in all_days:
         s = spend_day_map.get(day, {})
@@ -797,10 +806,24 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         cost = to_float(s.get("cost"))
         clicks = to_int(s.get("clicks"))
         revenue = to_float(a.get("revenue"))
+        orders = to_float(a.get("orders"))
         cogs = to_float(a.get("cogs"))
         fees = to_float(a.get("fees"))
         profit = revenue - cost - cogs - fees
-        time_series.append({"date": day, "cost": round_money(cost), "revenue": round_money(revenue), "profit": round_money(profit), "clicks": clicks})
+        roas = safe_div(revenue, cost)
+        cvr = safe_div(orders, clicks)
+        time_series.append(
+            {
+                "date": day,
+                "cost": round_money(cost),
+                "revenue": round_money(revenue),
+                "profit": round_money(profit),
+                "clicks": clicks,
+                "orders": round(orders, 2),
+                "roas": round(roas, 2) if roas is not None else None,
+                "cvr": round(cvr * 100.0, 2) if cvr is not None else None,
+            }
+        )
 
     top_winners = [{"name": r["name"], "profit": r["metrics"]["profit"]} for r in table_rows[:5]]
     top_losers = [{"name": r["name"], "profit": r["metrics"]["profit"]} for r in sorted(table_rows, key=lambda r: (r["metrics"]["profit"] or 0.0))[:5]]
