@@ -1,0 +1,353 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { fetchReport, createWebSocket } from "@/lib/api";
+import { daysAgo } from "@/lib/utils";
+import SummaryCards from "@/components/SummaryCards";
+import PerformanceChart from "@/components/PerformanceChart";
+import AttributionTable from "@/components/AttributionTable";
+import TrackingHealth from "@/components/TrackingHealth";
+import LiveFeed from "@/components/LiveFeed";
+import LtvPanel from "@/components/LtvPanel";
+import FunnelPanel from "@/components/FunnelPanel";
+import JourneyPanel from "@/components/JourneyPanel";
+import CohortPanel from "@/components/CohortPanel";
+import CapiPanel from "@/components/CapiPanel";
+import AiPanel from "@/components/AiPanel";
+import {
+  BarChart3,
+  RefreshCw,
+  Settings,
+  Zap,
+  TrendingUp,
+  Filter,
+  Route,
+  Grid3x3,
+  Send,
+  Brain,
+} from "lucide-react";
+
+interface LiveEvent {
+  type: string;
+  ts: string;
+  order_id?: string;
+  gross?: number;
+  session_id?: string;
+  utm_source?: string;
+  customer_key?: string;
+}
+
+const MODELS = [
+  { value: "last_click", label: "Last Click" },
+  { value: "first_click", label: "First Click" },
+  { value: "linear", label: "Linear" },
+  { value: "time_decay", label: "Time Decay" },
+  { value: "data_driven_proxy", label: "Data-Driven" },
+];
+
+const PRESETS = [
+  { value: "7", label: "Last 7 Days" },
+  { value: "14", label: "Last 14 Days" },
+  { value: "30", label: "Last 30 Days" },
+  { value: "60", label: "Last 60 Days" },
+  { value: "90", label: "Last 90 Days" },
+];
+
+export default function DashboardPage() {
+  const [report, setReport] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState("traffic_source");
+  const [model, setModel] = useState("last_click");
+  const [datePreset, setDatePreset] = useState("30");
+  const [useClickDate, setUseClickDate] = useState(false);
+  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [mainTab, setMainTab] = useState("attribution");
+  const wsRef = useRef<WebSocket | null>(null);
+  const refreshTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const loadReport = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const days = parseInt(datePreset);
+      const data = await fetchReport({
+        start_date: daysAgo(days),
+        end_date: daysAgo(0),
+        model,
+        active_tab: activeTab,
+        use_click_date: useClickDate,
+      });
+      setReport(data);
+    } catch (err: any) {
+      setError(err.message || "Failed to load report");
+    } finally {
+      setLoading(false);
+    }
+  }, [activeTab, model, datePreset, useClickDate]);
+
+  useEffect(() => {
+    loadReport();
+  }, [loadReport]);
+
+  // Auto-refresh every 30s
+  useEffect(() => {
+    if (autoRefresh) {
+      refreshTimerRef.current = setInterval(loadReport, 30_000);
+    }
+    return () => {
+      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
+    };
+  }, [autoRefresh, loadReport]);
+
+  // WebSocket for real-time events
+  useEffect(() => {
+    const ws = createWebSocket((data: LiveEvent) => {
+      setLiveEvents((prev) => [...prev.slice(-49), data]);
+      // Auto-refresh report on new orders
+      if (data.type === "new_order") {
+        setTimeout(loadReport, 1000);
+      }
+    });
+    if (ws) {
+      wsRef.current = ws;
+      ws.onopen = () => setWsConnected(true);
+      ws.onclose = () => setWsConnected(false);
+    }
+    return () => {
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, []);
+
+  const handleTabChange = (tab: string) => {
+    setActiveTab(tab);
+  };
+
+  return (
+    <div className="min-h-screen">
+      {/* Header */}
+      <header className="sticky top-0 z-50 border-b border-[var(--card-border)] bg-[var(--background)]/80 backdrop-blur-xl">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-purple-600 flex items-center justify-center">
+              <Zap size={16} className="text-white" />
+            </div>
+            <div>
+              <h1 className="text-sm font-bold text-white tracking-tight">Mini Hyros</h1>
+              <p className="text-[10px] text-gray-500">Attribution Dashboard</p>
+            </div>
+          </div>
+
+          {/* Controls */}
+          <div className="flex items-center gap-2 ml-auto">
+            <select
+              value={datePreset}
+              onChange={(e) => setDatePreset(e.target.value)}
+              className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+            >
+              {PRESETS.map((p) => (
+                <option key={p.value} value={p.value}>{p.label}</option>
+              ))}
+            </select>
+
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+            >
+              {MODELS.map((m) => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </select>
+
+            <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={useClickDate}
+                onChange={(e) => setUseClickDate(e.target.checked)}
+                className="rounded border-gray-600 bg-transparent"
+              />
+              Click Date
+            </label>
+
+            <button
+              onClick={loadReport}
+              disabled={loading}
+              className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-xs font-medium transition-colors disabled:opacity-50"
+            >
+              <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
+              Refresh
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Tab Navigation */}
+      <nav className="border-b border-[var(--card-border)] bg-[var(--background)]">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 flex gap-1 overflow-x-auto">
+          {[
+            { key: "attribution", label: "Attribution", icon: <BarChart3 size={13} /> },
+            { key: "funnel", label: "Funnel", icon: <Filter size={13} /> },
+            { key: "ltv", label: "LTV", icon: <TrendingUp size={13} /> },
+            { key: "journey", label: "Journey", icon: <Route size={13} /> },
+            { key: "cohort", label: "Cohorts", icon: <Grid3x3 size={13} /> },
+            { key: "capi", label: "CAPI Sync", icon: <Send size={13} /> },
+            { key: "ai", label: "AI Insights", icon: <Brain size={13} /> },
+          ].map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setMainTab(tab.key)}
+              className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
+                mainTab === tab.key
+                  ? "border-brand-500 text-brand-400"
+                  : "border-transparent text-gray-500 hover:text-gray-300"
+              }`}
+            >
+              {tab.icon} {tab.label}
+            </button>
+          ))}
+        </div>
+      </nav>
+
+      {/* Main content */}
+      <main className="max-w-[1600px] mx-auto px-4 sm:px-6 py-6 space-y-6">
+        {error && (
+          <div className="rounded-xl border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-400">
+            {error} — Make sure the backend is running on port 8000.
+          </div>
+        )}
+
+        {/* Feature Tabs */}
+        {mainTab === "funnel" && <FunnelPanel />}
+        {mainTab === "ltv" && <LtvPanel />}
+        {mainTab === "journey" && <JourneyPanel />}
+        {mainTab === "cohort" && <CohortPanel />}
+        {mainTab === "capi" && <CapiPanel />}
+        {mainTab === "ai" && <AiPanel />}
+
+        {mainTab === "attribution" && report && (
+          <>
+            {/* Summary KPI Cards */}
+            <SummaryCards totals={report.summary_totals} />
+
+            {/* Charts + Sidebar */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2">
+                <PerformanceChart data={report.charts?.time_series || []} />
+              </div>
+              <div className="space-y-4">
+                <TrackingHealth tracking={report.tracking} />
+                <LiveFeed events={liveEvents} connected={wsConnected} />
+              </div>
+            </div>
+
+            {/* Attribution Table */}
+            <AttributionTable
+              columns={report.table.columns}
+              rows={report.table.rows}
+              totals={report.table.totals_row}
+              activeTab={activeTab}
+              onTabChange={handleTabChange}
+              startDate={daysAgo(parseInt(datePreset))}
+              endDate={daysAgo(0)}
+              model={model}
+              lookbackDays={30}
+              useClickDate={useClickDate}
+            />
+
+            {/* Top Winners & Losers */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-4">
+                <h3 className="text-sm font-semibold text-emerald-400 mb-3 flex items-center gap-2">
+                  <BarChart3 size={14} /> Top Winners
+                </h3>
+                <div className="space-y-2">
+                  {(report.charts?.top_winners || []).map((w: any, i: number) => (
+                    <div key={i} className="flex items-center justify-between text-xs">
+                      <span className="text-gray-300 truncate max-w-[200px]">{w.name}</span>
+                      <span className="text-emerald-400 font-medium">
+                        ${Number(w.profit).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-4">
+                <h3 className="text-sm font-semibold text-red-400 mb-3 flex items-center gap-2">
+                  <BarChart3 size={14} /> Top Losers
+                </h3>
+                <div className="space-y-2">
+                  {(report.charts?.top_losers || []).map((w: any, i: number) => (
+                    <div key={i} className="flex items-center justify-between text-xs">
+                      <span className="text-gray-300 truncate max-w-[200px]">{w.name}</span>
+                      <span className="text-red-400 font-medium">
+                        ${Number(w.profit).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Action Plan */}
+            {report.action_plan && report.action_plan.length > 0 && (
+              <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-4">
+                <h3 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+                  <Settings size={14} /> Recommended Actions
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {report.action_plan.map((a: any, i: number) => (
+                    <div
+                      key={i}
+                      className="rounded-lg border border-[var(--card-border)] p-3 bg-white/[0.01]"
+                    >
+                      <div className="text-xs font-semibold text-gray-200 mb-1">{a.title}</div>
+                      <div className="text-[11px] text-gray-500 mb-2">{a.why}</div>
+                      <div className="flex gap-2 text-[10px]">
+                        <span className={`px-1.5 py-0.5 rounded ${a.expected_impact === "high" ? "bg-emerald-500/10 text-emerald-400" : "bg-yellow-500/10 text-yellow-400"}`}>
+                          Impact: {a.expected_impact}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
+                          Effort: {a.effort}
+                        </span>
+                      </div>
+                      <ul className="mt-2 space-y-0.5">
+                        {a.steps.map((s: string, j: number) => (
+                          <li key={j} className="text-[11px] text-gray-500 flex gap-1">
+                            <span className="text-gray-600">•</span> {s}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Diagnostics */}
+            {report.diagnostics && (
+              <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-4 text-xs text-gray-500">
+                <h3 className="text-sm font-semibold text-gray-400 mb-2">Diagnostics</h3>
+                <div className="space-y-1">
+                  <p>Model: {report.report_meta?.attribution_model} | Lookback: {report.report_meta?.filters_applied?.lookback_days}d | Date basis: {report.report_meta?.use_date_of_click_attribution ? "Click" : "Conversion"}</p>
+                  <p>Last event: {report.diagnostics.data_freshness?.last_event_ts || "—"} | Last spend: {report.diagnostics.data_freshness?.last_spend_ts || "—"}</p>
+                  {report.diagnostics.anomalies?.map((a: any, i: number) => (
+                    <p key={i} className="text-yellow-500">⚠ {a.what} — {a.likely_cause}</p>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {mainTab === "attribution" && loading && !report && (
+          <div className="flex items-center justify-center py-24">
+            <RefreshCw size={24} className="animate-spin text-brand-500" />
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
