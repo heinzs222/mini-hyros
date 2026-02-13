@@ -52,6 +52,17 @@ def init_db(db_path: str) -> None:
             adset_id TEXT, ad_id TEXT, conversion_type TEXT, reported_value TEXT
         );""")
 
+        conn.execute("""CREATE TABLE IF NOT EXISTS ad_names (
+            platform TEXT,
+            entity_type TEXT,
+            entity_id TEXT,
+            name TEXT,
+            parent_id TEXT,
+            source TEXT DEFAULT 'manual',
+            updated_at TEXT,
+            PRIMARY KEY (platform, entity_type, entity_id)
+        );""")
+
         conn.execute("""CREATE TABLE IF NOT EXISTS video_metrics (
             platform TEXT, date TEXT, campaign_id TEXT, adset_id TEXT,
             ad_id TEXT, creative_id TEXT, video_id TEXT, video_name TEXT,

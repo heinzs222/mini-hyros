@@ -14,6 +14,7 @@ import JourneyPanel from "@/components/JourneyPanel";
 import CohortPanel from "@/components/CohortPanel";
 import CapiPanel from "@/components/CapiPanel";
 import AiPanel from "@/components/AiPanel";
+import AdNamesPanel from "@/components/AdNamesPanel";
 import {
   BarChart3,
   RefreshCw,
@@ -25,6 +26,7 @@ import {
   Grid3x3,
   Send,
   Brain,
+  Tag,
 } from "lucide-react";
 
 interface LiveEvent {
@@ -195,6 +197,7 @@ export default function DashboardPage() {
             { key: "cohort", label: "Cohorts", icon: <Grid3x3 size={13} /> },
             { key: "capi", label: "CAPI Sync", icon: <Send size={13} /> },
             { key: "ai", label: "AI Insights", icon: <Brain size={13} /> },
+            { key: "names", label: "Ad Names", icon: <Tag size={13} /> },
           ].map((tab) => (
             <button
               key={tab.key}
@@ -226,6 +229,7 @@ export default function DashboardPage() {
         {mainTab === "cohort" && <CohortPanel />}
         {mainTab === "capi" && <CapiPanel />}
         {mainTab === "ai" && <AiPanel />}
+        {mainTab === "names" && <AdNamesPanel />}
 
         {mainTab === "attribution" && report && (
           <>

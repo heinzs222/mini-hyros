@@ -195,6 +195,52 @@ export async function fetchInsights() {
   return res.json();
 }
 
+// ── Ad Names ─────────────────────────────────────────────────────────────────
+export async function fetchAdNames(platform = "", entityType = "") {
+  const sp = new URLSearchParams();
+  if (platform) sp.set("platform", platform);
+  if (entityType) sp.set("entity_type", entityType);
+  const res = await fetch(`${API_BASE}/api/ad-names?${sp.toString()}`);
+  if (!res.ok) throw new Error(`Ad names fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function upsertAdName(mapping: {
+  platform: string;
+  entity_type: string;
+  entity_id: string;
+  name: string;
+  parent_id?: string;
+}) {
+  const res = await fetch(`${API_BASE}/api/ad-names`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(mapping),
+  });
+  if (!res.ok) throw new Error(`Ad name upsert failed: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteAdName(mapping: {
+  platform: string;
+  entity_type: string;
+  entity_id: string;
+}) {
+  const res = await fetch(`${API_BASE}/api/ad-names`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(mapping),
+  });
+  if (!res.ok) throw new Error(`Ad name delete failed: ${res.status}`);
+  return res.json();
+}
+
+export async function syncAdNames(platform = "all") {
+  const res = await fetch(`${API_BASE}/api/ad-names/sync?platform=${platform}`, { method: "POST" });
+  if (!res.ok) throw new Error(`Ad names sync failed: ${res.status}`);
+  return res.json();
+}
+
 // ── WebSocket ────────────────────────────────────────────────────────────────
 export function createWebSocket(onMessage: (data: any) => void): WebSocket | null {
   if (typeof window === "undefined") return null;

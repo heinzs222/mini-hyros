@@ -8,6 +8,7 @@ import { useState, useCallback } from "react";
 interface TableRow {
   id: string;
   name: string;
+  raw_id?: string;
   level: string;
   metrics: {
     clicks: number;
@@ -219,9 +220,12 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
               ) : (
                 <span className="w-3" />
               )}
-              <span className="text-gray-200 truncate max-w-[220px]" title={row.name}>
+              <span className="text-gray-200 truncate max-w-[220px]" title={row.raw_id ? `${row.name} (ID: ${row.raw_id})` : row.name}>
                 {row.name}
               </span>
+              {row.raw_id && row.raw_id !== row.name && (
+                <span className="text-[9px] text-gray-600 ml-1 px-1 py-0.5 rounded bg-white/5 font-mono" title={row.raw_id}>ID</span>
+              )}
               {depth > 0 && levelLabel && (
                 <span className="text-[9px] text-gray-600 ml-1 px-1 py-0.5 rounded bg-white/5">{levelLabel}</span>
               )}

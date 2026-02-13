@@ -42,6 +42,7 @@ from api.cohort import router as cohort_router
 from api.refunds import router as refunds_router
 from api.email_sms import router as email_sms_router
 from api.ai_recommendations import router as ai_router
+from api.ad_names import router as ad_names_router, get_name_map
 
 # ── WebSocket manager ──────────────────────────────────────────────────────────
 class ConnectionManager:
@@ -96,6 +97,7 @@ app.include_router(cohort_router, prefix="/api/cohort", tags=["cohort"])
 app.include_router(refunds_router, prefix="/api/refunds", tags=["refunds"])
 app.include_router(email_sms_router, prefix="/api/email-sms", tags=["email-sms"])
 app.include_router(ai_router, prefix="/api/ai", tags=["ai"])
+app.include_router(ad_names_router, prefix="/api/ad-names", tags=["ad-names"])
 
 
 def _db() -> str:
@@ -142,7 +144,21 @@ async def get_report(
         use_date_of_click_attribution=use_click_date,
         active_tab=active_tab,
     )
-    return build_hyros_like_report(_db(), inputs)
+    report = build_hyros_like_report(_db(), inputs)
+
+    # Resolve IDs to names
+    name_map = get_name_map(_db())
+    if name_map:
+        for row in report.get("table", {}).get("rows", []):
+            raw_name = row.get("name", "")
+            # Try to resolve the last part of pipe-separated IDs
+            parts = raw_name.split("|")
+            last_part = parts[-1].strip() if parts else raw_name
+            if last_part in name_map:
+                row["name"] = name_map[last_part]
+                row["raw_id"] = raw_name
+
+    return report
 
 
 @app.get("/api/report/children")
@@ -339,6 +355,15 @@ async def get_report_children(
         })
 
     rows.sort(key=lambda r: r["metrics"]["revenue"], reverse=True)
+
+    # Resolve IDs to names
+    name_map = get_name_map(db_path)
+    if name_map:
+        for row in rows:
+            raw_name = row.get("name", "")
+            if raw_name in name_map:
+                row["name"] = name_map[raw_name]
+                row["raw_id"] = raw_name
 
     return {
         "child_tab": child_tab,
