@@ -634,32 +634,64 @@ async def tracking_setup_page():
 <p>Add this to your GHL funnel's <strong>thank-you / confirmation page</strong> custom code to identify the visitor and track the conversion.</p>
 
 <h3>Identify (link email to visitor)</h3>
+<p>GHL passes contact data via URL params or hidden fields. This script auto-grabs the email:</p>
 <div class="section">
-<pre id="snippet-identify"><code>&lt;!-- Call after you have the user's email (form, checkout, etc.) --&gt;
-&lt;script&gt;
-  hyros.identify("customer@example.com");
+<pre id="snippet-identify"><code>&lt;script&gt;
+  // Auto-detect email from GHL URL params, form fields, or cookies
+  var email = new URLSearchParams(window.location.search).get("email")
+           || new URLSearchParams(window.location.search).get("contact_email")
+           || document.querySelector('input[name="email"]')?.value
+           || "";
+  if (email) hyros.identify(email);
 &lt;/script&gt;</code></pre>
 <button class="copy-btn" onclick="copySnippet('snippet-identify')">Copy</button>
 </div>
 
-<h3>Track a Purchase / Conversion</h3>
+<h3>Track a Purchase / Conversion <span class="tag warn">Dynamic Values</span></h3>
+<p>This script reads the order amount from GHL URL params (<code>?amount=</code>) or a data attribute you set. No hardcoded prices.</p>
 <div class="section">
 <pre id="snippet-conversion"><code>&lt;script&gt;
+  // Read dynamic values from URL params (GHL passes these on redirect)
+  var params = new URLSearchParams(window.location.search);
+  var amount = parseFloat(params.get("amount") || params.get("value") || params.get("total") || "0");
+  var orderId = params.get("order_id") || params.get("invoice_id") || ("order-" + Date.now());
+  var email   = params.get("email") || params.get("contact_email") || "";
+
+  if (email) hyros.identify(email);
+
   hyros.conversion({{
     type: "Purchase",
-    value: 997,                    // order amount
-    order_id: "order-" + Date.now(),
-    email: ""                      // leave empty if auto-detected by GHL form
+    value: amount,                  // pulled from URL ?amount=XX
+    order_id: orderId,
+    email: email
   }});
 &lt;/script&gt;</code></pre>
 <button class="copy-btn" onclick="copySnippet('snippet-conversion')">Copy</button>
 </div>
 
+<p><span class="tag ghl">GHL Tip</span> In your GHL workflow, when redirecting to the thank-you page, append the amount to the URL:</p>
+<div class="section">
+<pre id="snippet-ghl-redirect"><code>https://yourfunnel.com/thank-you?amount={{{{contact.last_payment_amount}}}}&amp;email={{{{contact.email}}}}&amp;order_id={{{{contact.last_payment_id}}}}</code></pre>
+<button class="copy-btn" onclick="copySnippet('snippet-ghl-redirect')">Copy</button>
+</div>
+
+<p><span class="tag">Alternative</span> If you know the fixed price for a specific funnel, you can hardcode it:</p>
+<div class="section">
+<pre id="snippet-conversion-fixed"><code>&lt;script&gt;
+  hyros.conversion({{ type: "Purchase", value: 997 }});
+&lt;/script&gt;</code></pre>
+<button class="copy-btn" onclick="copySnippet('snippet-conversion-fixed')">Copy</button>
+</div>
+
 <h3>Custom Events <span class="badge">OPTIONAL</span></h3>
 <div class="section">
 <pre id="snippet-event"><code>&lt;script&gt;
-  hyros.event("Lead", {{ form: "webinar-signup" }});
-  hyros.event("AddToCart", {{ value: 49.99, product: "Course" }});
+  // Track a lead from a form submission
+  hyros.event("Lead", {{ form: document.title || "form" }});
+
+  // Track with a dynamic value from the page
+  var price = document.querySelector('[data-price]')?.getAttribute('data-price');
+  if (price) hyros.event("AddToCart", {{ value: parseFloat(price) }});
 &lt;/script&gt;</code></pre>
 <button class="copy-btn" onclick="copySnippet('snippet-event')">Copy</button>
 </div>
