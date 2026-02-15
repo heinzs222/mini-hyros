@@ -27,7 +27,7 @@ async function apiFetch(input: string, init: RequestInit = {}) {
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  return fetch(input, { ...init, headers, credentials: "include" });
+  return fetch(input, { ...init, headers });
 }
 
 export async function loginWithPassword(username: string, password: string) {

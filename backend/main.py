@@ -85,9 +85,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AttributionOps – Mini Hyros", version="0.1.0", lifespan=lifespan)
 
+
+def _cors_origins() -> list[str]:
+    raw = os.environ.get("CORS_ALLOW_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    return [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://mini-hyros.vercel.app",
+        "https://mini-hyros.onrender.com",
+    ]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
