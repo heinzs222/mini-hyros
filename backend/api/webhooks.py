@@ -33,6 +33,25 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
 
 
+def _meta_campaign_from_adset(db_path: str, adset_id: str) -> str:
+    """Resolve Meta campaign_id from adset_id using ad_names parent mapping."""
+    adset_id = str(adset_id or "").strip()
+    if not adset_id:
+        return ""
+
+    try:
+        with connect(db_path) as conn:
+            row = conn.execute(
+                """SELECT parent_id FROM ad_names
+                   WHERE platform = 'meta' AND entity_type = 'adset' AND entity_id = ?
+                   LIMIT 1""",
+                (adset_id,),
+            ).fetchone()
+            return str(row[0] if row and row[0] else "").strip()
+    except sqlite3.Error:
+        return ""
+
+
 def _insert_order(db_path: str, order: dict[str, Any]) -> None:
     with connect(db_path) as conn:
         conn.execute(
@@ -232,6 +251,9 @@ async def track_event(request: Request):
         else:
             ad_id = ad_id or h_ad_id
 
+    if platform == "meta" and not campaign_id and adset_id:
+        campaign_id = _meta_campaign_from_adset(db_path, adset_id)
+
     with connect(db_path) as conn:
         conn.execute(
             """INSERT INTO sessions (session_id, ts, utm_source, utm_medium, utm_campaign, utm_content, utm_term, referrer, landing_page, device, gclid, fbclid, ttclid, customer_key)
@@ -428,6 +450,9 @@ async def track_conversion(request: Request):
             campaign_id = campaign_id or h_ad_id
         else:
             ad_id = ad_id or h_ad_id
+
+    if platform == "meta" and not campaign_id and adset_id:
+        campaign_id = _meta_campaign_from_adset(db_path, adset_id)
 
     is_purchase = conv_lower in ("purchase", "payment")
 
