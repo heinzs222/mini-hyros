@@ -197,12 +197,19 @@
   function send(path, data) {
     var url = ENDPOINT + path;
     var payload = JSON.stringify(data);
+    var sent = false;
 
-    // Prefer sendBeacon for page unload resilience, fall back to fetch
+    // Prefer sendBeacon for page unload resilience. If browser policies
+    // block ping/beacon requests (or sendBeacon fails), fall back to fetch.
     if (navigator.sendBeacon) {
-      var blob = new Blob([payload], { type: "application/json" });
-      navigator.sendBeacon(url, blob);
-    } else {
+      try {
+        var blob = new Blob([payload], { type: "application/json" });
+        sent = navigator.sendBeacon(url, blob) === true;
+      } catch (e) {
+        sent = false;
+      }
+    }
+    if (!sent) {
       fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
