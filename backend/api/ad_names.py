@@ -247,27 +247,98 @@ async def sync_names(platform: str = Query(default="all")):
     return results
 
 
+def _meta_api_version() -> str:
+    raw = str(os.environ.get("META_API_VERSION", "v18.0") or "").strip()
+    return raw or "v18.0"
+
+
+def _meta_url(path: str) -> str:
+    return f"https://graph.facebook.com/{_meta_api_version()}/{path.lstrip('/')}"
+
+
+def _meta_error_message(payload: dict[str, Any], status_code: int) -> str:
+    err = payload.get("error") or {}
+    message = str(err.get("message") or "Meta API request failed").strip()
+    code = err.get("code")
+    error_type = err.get("type")
+    fbtrace = err.get("fbtrace_id")
+
+    parts = [message]
+    if error_type:
+        parts.append(f"type={error_type}")
+    if code is not None:
+        parts.append(f"code={code}")
+    if fbtrace:
+        parts.append(f"fbtrace_id={fbtrace}")
+    parts.append(f"status={status_code}")
+    return " | ".join(parts)
+
+
+async def _meta_fetch_all(
+    client: httpx.AsyncClient,
+    account_id: str,
+    access_token: str,
+    endpoint: str,
+    fields: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    next_url: str | None = _meta_url(f"act_{account_id}/{endpoint}")
+    params: dict[str, Any] | None = {
+        "access_token": access_token,
+        "fields": fields,
+        "limit": 500,
+    }
+
+    while next_url:
+        resp = await client.get(next_url, params=params)
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = {}
+
+        if resp.status_code >= 400:
+            raise RuntimeError(_meta_error_message(payload, resp.status_code))
+
+        if payload.get("error"):
+            raise RuntimeError(_meta_error_message(payload, resp.status_code))
+
+        data = payload.get("data")
+        if isinstance(data, list):
+            rows.extend(data)
+
+        next_url = (payload.get("paging") or {}).get("next")
+        params = None
+
+    return rows
+
+
 async def _sync_meta() -> dict:
     """Fetch campaign/adset/ad names from Meta Marketing API."""
     access_token = os.environ.get("META_ACCESS_TOKEN", "")
     ad_account_id = os.environ.get("META_AD_ACCOUNT_ID", "")
+    account_id = str(ad_account_id or "").replace("act_", "").strip()
 
-    if not access_token or not ad_account_id:
+    if not access_token or not account_id:
         return {"synced": 0, "error": "META_ACCESS_TOKEN and META_AD_ACCOUNT_ID required"}
 
     db_path = _db()
     _ensure_table(db_path)
     synced = 0
     now = _now()
+    campaigns: list[dict[str, Any]] = []
+    adsets: list[dict[str, Any]] = []
+    ads: list[dict[str, Any]] = []
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             # Fetch campaigns
-            resp = await client.get(
-                f"https://graph.facebook.com/v18.0/act_{ad_account_id}/campaigns",
-                params={"access_token": access_token, "fields": "id,name,status", "limit": 500},
+            campaigns = await _meta_fetch_all(
+                client=client,
+                account_id=account_id,
+                access_token=access_token,
+                endpoint="campaigns",
+                fields="id,name,status",
             )
-            campaigns = resp.json().get("data", [])
             with connect(db_path) as conn:
                 for c in campaigns:
                     conn.execute(
@@ -279,11 +350,13 @@ async def _sync_meta() -> dict:
                 conn.commit()
 
             # Fetch adsets
-            resp = await client.get(
-                f"https://graph.facebook.com/v18.0/act_{ad_account_id}/adsets",
-                params={"access_token": access_token, "fields": "id,name,campaign_id,status", "limit": 500},
+            adsets = await _meta_fetch_all(
+                client=client,
+                account_id=account_id,
+                access_token=access_token,
+                endpoint="adsets",
+                fields="id,name,campaign_id,status",
             )
-            adsets = resp.json().get("data", [])
             with connect(db_path) as conn:
                 for a in adsets:
                     conn.execute(
@@ -295,11 +368,13 @@ async def _sync_meta() -> dict:
                 conn.commit()
 
             # Fetch ads
-            resp = await client.get(
-                f"https://graph.facebook.com/v18.0/act_{ad_account_id}/ads",
-                params={"access_token": access_token, "fields": "id,name,adset_id,campaign_id,status", "limit": 500},
+            ads = await _meta_fetch_all(
+                client=client,
+                account_id=account_id,
+                access_token=access_token,
+                endpoint="ads",
+                fields="id,name,adset_id,campaign_id,status",
             )
-            ads = resp.json().get("data", [])
             with connect(db_path) as conn:
                 for a in ads:
                     conn.execute(
@@ -313,7 +388,14 @@ async def _sync_meta() -> dict:
     except Exception as e:
         return {"synced": synced, "error": str(e)}
 
-    return {"synced": synced, "campaigns": len(campaigns), "adsets": len(adsets), "ads": len(ads)}
+    return {
+        "synced": synced,
+        "campaigns": len(campaigns),
+        "adsets": len(adsets),
+        "ads": len(ads),
+        "account_id": account_id,
+        "api_version": _meta_api_version(),
+    }
 
 
 async def _sync_google() -> dict:
