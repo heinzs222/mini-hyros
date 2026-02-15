@@ -138,6 +138,9 @@ def _is_public_path(path: str) -> bool:
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
+    if request.method.upper() == "OPTIONS":
+        return await call_next(request)
+
     if not is_auth_enabled() or _is_public_path(request.url.path):
         return await call_next(request)
 

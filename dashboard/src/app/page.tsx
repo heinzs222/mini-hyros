@@ -441,7 +441,7 @@ export default function DashboardPage() {
       <main className="max-w-[1600px] mx-auto px-4 sm:px-6 py-6 space-y-6">
         {error && (
           <div className="rounded-xl border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-400">
-            {error} — Make sure the backend is running on port 8000.
+            {error} — Check API URL, CORS, and backend logs.
           </div>
         )}
 
