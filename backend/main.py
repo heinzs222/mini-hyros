@@ -43,6 +43,7 @@ from api.refunds import router as refunds_router
 from api.email_sms import router as email_sms_router
 from api.ai_recommendations import router as ai_router
 from api.ad_names import router as ad_names_router, get_name_map
+from api.spend_sync import router as spend_sync_router
 
 # ── WebSocket manager ──────────────────────────────────────────────────────────
 class ConnectionManager:
@@ -98,6 +99,7 @@ app.include_router(refunds_router, prefix="/api/refunds", tags=["refunds"])
 app.include_router(email_sms_router, prefix="/api/email-sms", tags=["email-sms"])
 app.include_router(ai_router, prefix="/api/ai", tags=["ai"])
 app.include_router(ad_names_router, prefix="/api/ad-names", tags=["ad-names"])
+app.include_router(spend_sync_router, prefix="/api/spend", tags=["spend"])
 
 
 def _db() -> str:
