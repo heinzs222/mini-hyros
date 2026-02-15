@@ -1,4 +1,59 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const AUTH_TOKEN_KEY = "hyros_auth_token";
+
+function readAuthToken(): string {
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem(AUTH_TOKEN_KEY) || "";
+}
+
+export function setAuthToken(token: string) {
+  if (typeof window === "undefined") return;
+  const cleaned = String(token || "").trim();
+  if (!cleaned) {
+    window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    return;
+  }
+  window.localStorage.setItem(AUTH_TOKEN_KEY, cleaned);
+}
+
+export function clearAuthToken() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+async function apiFetch(input: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers || {});
+  const token = readAuthToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  return fetch(input, { ...init, headers, credentials: "include" });
+}
+
+export async function loginWithPassword(username: string, password: string) {
+  const res = await apiFetch(`${API_BASE}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) throw new Error(`Login failed: ${res.status}`);
+  const data = await res.json();
+  if (data?.token) setAuthToken(String(data.token));
+  return data;
+}
+
+export async function fetchAuthMe() {
+  const res = await apiFetch(`${API_BASE}/api/auth/me`);
+  if (!res.ok) throw new Error(`Auth status failed: ${res.status}`);
+  return res.json();
+}
+
+export async function logout() {
+  const res = await apiFetch(`${API_BASE}/api/auth/logout`, { method: "POST" });
+  clearAuthToken();
+  if (!res.ok) throw new Error(`Logout failed: ${res.status}`);
+  return res.json();
+}
 
 export async function fetchReport(params: {
   start_date?: string;
@@ -17,7 +72,7 @@ export async function fetchReport(params: {
   if (params.active_tab) sp.set("active_tab", params.active_tab);
   if (params.conversion_type) sp.set("conversion_type", params.conversion_type);
   if (params.use_click_date) sp.set("use_click_date", "true");
-  const res = await fetch(`${API_BASE}/api/report?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/report?${sp.toString()}`);
   if (!res.ok) throw new Error(`Report fetch failed: ${res.status}`);
   return res.json();
 }
@@ -41,7 +96,7 @@ export async function fetchChildren(params: {
   if (params.lookback_days) sp.set("lookback_days", String(params.lookback_days));
   if (params.conversion_type) sp.set("conversion_type", params.conversion_type);
   if (params.use_click_date) sp.set("use_click_date", "true");
-  const res = await fetch(`${API_BASE}/api/report/children?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/report/children?${sp.toString()}`);
   if (!res.ok) throw new Error(`Children fetch failed: ${res.status}`);
   return res.json();
 }
@@ -57,7 +112,7 @@ export async function fetchVideoMetrics(params: {
   if (params.end_date) sp.set("end_date", params.end_date);
   if (params.platform) sp.set("platform", params.platform);
   if (params.breakdown) sp.set("breakdown", params.breakdown);
-  const res = await fetch(`${API_BASE}/api/video/metrics?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/video/metrics?${sp.toString()}`);
   if (!res.ok) throw new Error(`Video metrics fetch failed: ${res.status}`);
   return res.json();
 }
@@ -69,57 +124,57 @@ export async function fetchVideoSummary(params: {
   const sp = new URLSearchParams();
   if (params.start_date) sp.set("start_date", params.start_date);
   if (params.end_date) sp.set("end_date", params.end_date);
-  const res = await fetch(`${API_BASE}/api/video/summary?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/video/summary?${sp.toString()}`);
   if (!res.ok) throw new Error(`Video summary fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchConnections() {
-  const res = await fetch(`${API_BASE}/api/connections/status`);
+  const res = await apiFetch(`${API_BASE}/api/connections/status`);
   if (!res.ok) throw new Error(`Connections fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchSetupGuide() {
-  const res = await fetch(`${API_BASE}/api/connections/setup-guide`);
+  const res = await apiFetch(`${API_BASE}/api/connections/setup-guide`);
   if (!res.ok) throw new Error(`Setup guide fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchTracking() {
-  const res = await fetch(`${API_BASE}/api/tracking`);
+  const res = await apiFetch(`${API_BASE}/api/tracking`);
   if (!res.ok) throw new Error(`Tracking fetch failed: ${res.status}`);
   return res.json();
 }
 
 // ── LTV ──────────────────────────────────────────────────────────────────────
 export async function fetchLtvBySource(breakdown = "platform", windows = "30,60,90,365") {
-  const res = await fetch(`${API_BASE}/api/ltv/by-source?breakdown=${breakdown}&windows=${windows}`);
+  const res = await apiFetch(`${API_BASE}/api/ltv/by-source?breakdown=${breakdown}&windows=${windows}`);
   if (!res.ok) throw new Error(`LTV fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchLtvSummary() {
-  const res = await fetch(`${API_BASE}/api/ltv/summary`);
+  const res = await apiFetch(`${API_BASE}/api/ltv/summary`);
   if (!res.ok) throw new Error(`LTV summary fetch failed: ${res.status}`);
   return res.json();
 }
 
 // ── Customer Journey ─────────────────────────────────────────────────────────
 export async function fetchJourneyStats() {
-  const res = await fetch(`${API_BASE}/api/journey/stats`);
+  const res = await apiFetch(`${API_BASE}/api/journey/stats`);
   if (!res.ok) throw new Error(`Journey stats fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchCommonPaths(limit = 10) {
-  const res = await fetch(`${API_BASE}/api/journey/common-paths?limit=${limit}&min_conversions=1`);
+  const res = await apiFetch(`${API_BASE}/api/journey/common-paths?limit=${limit}&min_conversions=1`);
   if (!res.ok) throw new Error(`Common paths fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchCustomerJourney(customerKey: string) {
-  const res = await fetch(`${API_BASE}/api/journey/customer?customer_key=${customerKey}`);
+  const res = await apiFetch(`${API_BASE}/api/journey/customer?customer_key=${customerKey}`);
   if (!res.ok) throw new Error(`Customer journey fetch failed: ${res.status}`);
   return res.json();
 }
@@ -129,52 +184,52 @@ export async function fetchFunnelReport(startDate = "", endDate = "") {
   const sp = new URLSearchParams();
   if (startDate) sp.set("start_date", startDate);
   if (endDate) sp.set("end_date", endDate);
-  const res = await fetch(`${API_BASE}/api/funnel/report?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/funnel/report?${sp.toString()}`);
   if (!res.ok) throw new Error(`Funnel report fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchFunnelBySource(breakdown = "platform") {
-  const res = await fetch(`${API_BASE}/api/funnel/by-source?breakdown=${breakdown}`);
+  const res = await apiFetch(`${API_BASE}/api/funnel/by-source?breakdown=${breakdown}`);
   if (!res.ok) throw new Error(`Funnel by source fetch failed: ${res.status}`);
   return res.json();
 }
 
 // ── Cohort ───────────────────────────────────────────────────────────────────
 export async function fetchCohortAnalysis(granularity = "month") {
-  const res = await fetch(`${API_BASE}/api/cohort/analysis?granularity=${granularity}`);
+  const res = await apiFetch(`${API_BASE}/api/cohort/analysis?granularity=${granularity}`);
   if (!res.ok) throw new Error(`Cohort analysis fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchCohortRetention(granularity = "month") {
-  const res = await fetch(`${API_BASE}/api/cohort/retention?granularity=${granularity}`);
+  const res = await apiFetch(`${API_BASE}/api/cohort/retention?granularity=${granularity}`);
   if (!res.ok) throw new Error(`Cohort retention fetch failed: ${res.status}`);
   return res.json();
 }
 
 // ── CAPI ─────────────────────────────────────────────────────────────────────
 export async function fetchCapiStatus() {
-  const res = await fetch(`${API_BASE}/api/capi/status`);
+  const res = await apiFetch(`${API_BASE}/api/capi/status`);
   if (!res.ok) throw new Error(`CAPI status fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function triggerCapiSync() {
-  const res = await fetch(`${API_BASE}/api/capi/auto-sync`, { method: "POST" });
+  const res = await apiFetch(`${API_BASE}/api/capi/auto-sync`, { method: "POST" });
   if (!res.ok) throw new Error(`CAPI sync failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchCapiLog(limit = 20) {
-  const res = await fetch(`${API_BASE}/api/capi/log?limit=${limit}`);
+  const res = await apiFetch(`${API_BASE}/api/capi/log?limit=${limit}`);
   if (!res.ok) throw new Error(`CAPI log fetch failed: ${res.status}`);
   return res.json();
 }
 
 // ── Refunds ──────────────────────────────────────────────────────────────────
 export async function fetchRefundSummary() {
-  const res = await fetch(`${API_BASE}/api/refunds/summary`);
+  const res = await apiFetch(`${API_BASE}/api/refunds/summary`);
   if (!res.ok) throw new Error(`Refund summary fetch failed: ${res.status}`);
   return res.json();
 }
@@ -184,13 +239,13 @@ export async function fetchRecommendations(startDate = "", endDate = "") {
   const sp = new URLSearchParams();
   if (startDate) sp.set("start_date", startDate);
   if (endDate) sp.set("end_date", endDate);
-  const res = await fetch(`${API_BASE}/api/ai/recommendations?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/ai/recommendations?${sp.toString()}`);
   if (!res.ok) throw new Error(`Recommendations fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchInsights() {
-  const res = await fetch(`${API_BASE}/api/ai/insights`);
+  const res = await apiFetch(`${API_BASE}/api/ai/insights`);
   if (!res.ok) throw new Error(`Insights fetch failed: ${res.status}`);
   return res.json();
 }
@@ -200,7 +255,7 @@ export async function fetchAdNames(platform = "", entityType = "") {
   const sp = new URLSearchParams();
   if (platform) sp.set("platform", platform);
   if (entityType) sp.set("entity_type", entityType);
-  const res = await fetch(`${API_BASE}/api/ad-names?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/ad-names?${sp.toString()}`);
   if (!res.ok) throw new Error(`Ad names fetch failed: ${res.status}`);
   return res.json();
 }
@@ -212,7 +267,7 @@ export async function upsertAdName(mapping: {
   name: string;
   parent_id?: string;
 }) {
-  const res = await fetch(`${API_BASE}/api/ad-names`, {
+  const res = await apiFetch(`${API_BASE}/api/ad-names`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(mapping),
@@ -226,7 +281,7 @@ export async function deleteAdName(mapping: {
   entity_type: string;
   entity_id: string;
 }) {
-  const res = await fetch(`${API_BASE}/api/ad-names`, {
+  const res = await apiFetch(`${API_BASE}/api/ad-names`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(mapping),
@@ -236,7 +291,7 @@ export async function deleteAdName(mapping: {
 }
 
 export async function syncAdNames(platform = "all") {
-  const res = await fetch(`${API_BASE}/api/ad-names/sync?platform=${platform}`, { method: "POST" });
+  const res = await apiFetch(`${API_BASE}/api/ad-names/sync?platform=${platform}`, { method: "POST" });
   if (!res.ok) throw new Error(`Ad names sync failed: ${res.status}`);
   return res.json();
 }
@@ -244,7 +299,9 @@ export async function syncAdNames(platform = "all") {
 // ── WebSocket ────────────────────────────────────────────────────────────────
 export function createWebSocket(onMessage: (data: any) => void): WebSocket | null {
   if (typeof window === "undefined") return null;
-  const wsUrl = API_BASE.replace("http", "ws") + "/ws";
+  const token = readAuthToken();
+  const wsBase = API_BASE.replace("http", "ws") + "/ws";
+  const wsUrl = token ? `${wsBase}?token=${encodeURIComponent(token)}` : wsBase;
   const ws = new WebSocket(wsUrl);
   ws.onmessage = (event) => {
     try {

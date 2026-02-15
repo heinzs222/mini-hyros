@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchReport, createWebSocket } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi } from "@/lib/api";
 import { daysAgo } from "@/lib/utils";
 import SummaryCards from "@/components/SummaryCards";
 import PerformanceChart from "@/components/PerformanceChart";
@@ -30,6 +31,7 @@ import {
   Grid3x3,
   Send,
   Tag,
+  LogOut,
 } from "lucide-react";
 
 interface LiveEvent {
@@ -77,10 +79,14 @@ function modelLabel(value: string): string {
 }
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [report, setReport] = useState<any>(null);
   const [compareReport, setCompareReport] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [authUser, setAuthUser] = useState("");
   const [activeTab, setActiveTab] = useState("campaign");
   const [model, setModel] = useState("last_click");
   const [compareMode, setCompareMode] = useState<CompareMode>("previous_period");
@@ -160,6 +166,10 @@ export default function DashboardPage() {
       setCompareReport(compareData);
       setCompareLabel(compareData ? nextCompareLabel : "");
     } catch (err: any) {
+      if (String(err?.message || "").includes("401")) {
+        router.replace("/login");
+        return;
+      }
       setError(err.message || "Failed to load report");
     } finally {
       setLoading(false);
@@ -174,28 +184,54 @@ export default function DashboardPage() {
     compareModel,
     compareStartDate,
     compareEndDate,
+    router,
   ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const checkAuth = async () => {
+      try {
+        const status = await fetchAuthMe();
+        if (cancelled) return;
+        if (!status?.authenticated) {
+          router.replace("/login");
+          return;
+        }
+        setAuthEnabled(Boolean(status?.auth_enabled));
+        setAuthUser(String(status?.user?.username || ""));
+        setAuthChecked(true);
+      } catch {
+        if (!cancelled) router.replace("/login");
+      }
+    };
+    void checkAuth();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   useEffect(() => {
     loadReportRef.current = loadReport;
   }, [loadReport]);
 
   useEffect(() => {
+    if (!authChecked) return;
     loadReport();
-  }, [loadReport]);
+  }, [loadReport, authChecked]);
 
   // Auto-refresh every 30s
   useEffect(() => {
-    if (autoRefresh) {
+    if (autoRefresh && authChecked) {
       refreshTimerRef.current = setInterval(loadReport, 30_000);
     }
     return () => {
       if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
     };
-  }, [autoRefresh, loadReport]);
+  }, [autoRefresh, loadReport, authChecked]);
 
   // WebSocket for real-time events
   useEffect(() => {
+    if (!authChecked) return;
     const ws = createWebSocket((data: LiveEvent) => {
       setLiveEvents((prev) => [...prev.slice(-49), data]);
       // Auto-refresh report on new orders
@@ -213,7 +249,15 @@ export default function DashboardPage() {
     return () => {
       if (wsRef.current) wsRef.current.close();
     };
-  }, []);
+  }, [authChecked]);
+
+  const handleLogout = async () => {
+    try {
+      await logoutApi();
+    } finally {
+      router.replace("/login");
+    }
+  };
 
   const handleTabChange = (tab: string) => {
     setActiveTab(tab);
@@ -221,6 +265,14 @@ export default function DashboardPage() {
 
   const [windowStart, windowEnd] = normalizeDateRange(primaryStartDate, primaryEndDate);
   const activeWindowLabel = `${windowStart} to ${windowEnd}`;
+
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <RefreshCw size={24} className="animate-spin text-brand-500" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen">
@@ -343,6 +395,17 @@ export default function DashboardPage() {
               <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
               Refresh
             </button>
+
+            {authEnabled && (
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-200 text-xs font-medium transition-colors h-[34px]"
+                title={authUser ? `Logout ${authUser}` : "Logout"}
+              >
+                <LogOut size={12} />
+                Logout
+              </button>
+            )}
           </div>
         </div>
       </header>

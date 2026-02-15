@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -44,6 +44,13 @@ from api.email_sms import router as email_sms_router
 from api.ai_recommendations import router as ai_router
 from api.ad_names import router as ad_names_router, get_name_map
 from api.spend_sync import router as spend_sync_router
+from api.auth import (
+    router as auth_router,
+    is_auth_enabled,
+    extract_request_token,
+    extract_websocket_token,
+    validate_token,
+)
 
 # ── WebSocket manager ──────────────────────────────────────────────────────────
 class ConnectionManager:
@@ -100,6 +107,32 @@ app.include_router(email_sms_router, prefix="/api/email-sms", tags=["email-sms"]
 app.include_router(ai_router, prefix="/api/ai", tags=["ai"])
 app.include_router(ad_names_router, prefix="/api/ad-names", tags=["ad-names"])
 app.include_router(spend_sync_router, prefix="/api/spend", tags=["spend"])
+app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
+
+
+def _is_public_path(path: str) -> bool:
+    p = str(path or "").strip()
+    if p in {"/", "/api/health", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}:
+        return True
+    if p.startswith("/api/auth"):
+        return True
+    if p.startswith("/api/webhooks"):
+        return True
+    if p.startswith("/t/"):
+        return True
+    return False
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if not is_auth_enabled() or _is_public_path(request.url.path):
+        return await call_next(request)
+
+    token = extract_request_token(request)
+    if validate_token(token):
+        return await call_next(request)
+
+    return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
 
 def _db() -> str:
@@ -1009,6 +1042,12 @@ function copySnippet(id) {{
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    if is_auth_enabled():
+        token = extract_websocket_token(ws)
+        if not validate_token(token):
+            await ws.close(code=4401)
+            return
+
     await manager.connect(ws)
     try:
         while True:

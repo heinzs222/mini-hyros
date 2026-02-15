@@ -14,10 +14,26 @@ services:
         value: your-site-token
       - key: META_ACCESS_TOKEN
         sync: false
+      - key: META_AD_ACCOUNT_ID
+        sync: false
+      - key: META_PIXEL_ID
+        sync: false
       - key: GOOGLE_ADS_DEVELOPER_TOKEN
         sync: false
       - key: TIKTOK_ACCESS_TOKEN
         sync: false
+      - key: AUTH_ENABLED
+        value: "false"
+      - key: AUTH_USERNAME
+        sync: false
+      - key: AUTH_PASSWORD
+        sync: false
+      - key: AUTH_SECRET_KEY
+        sync: false
+      - key: AUTH_SESSION_TTL_HOURS
+        value: "12"
+      - key: AUTH_COOKIE_SECURE
+        value: "true"
       - key: SHOPIFY_WEBHOOK_SECRET
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
