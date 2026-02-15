@@ -189,7 +189,12 @@ async def track_event(request: Request):
     now = _iso_ts(datetime.now(UTC))
 
     session_id = str(payload.get("session_id", _sha256(now)))
-    customer_key = str(payload.get("customer_key", ""))
+    customer_key = str(payload.get("customer_key", "")).strip().lower()
+    custom_data = payload.get("custom_data") if isinstance(payload.get("custom_data"), dict) else {}
+    if not customer_key and custom_data.get("email"):
+        customer_key = str(custom_data.get("email", "")).strip().lower()
+    if "@" in customer_key:
+        customer_key = _sha256(customer_key)
     utm_source = str(payload.get("utm_source", ""))
     utm_medium = str(payload.get("utm_medium", ""))
 
@@ -270,12 +275,38 @@ async def track_event(request: Request):
 
     from main import manager
     import asyncio
-    asyncio.create_task(manager.broadcast({
-        "type": "new_session",
-        "session_id": session_id,
-        "utm_source": utm_source,
-        "ts": now,
-    }))
+    event_name = str(payload.get("event", ""))
+    if event_name == "FormSubmit":
+        asyncio.create_task(manager.broadcast({
+            "type": "new_lead",
+            "form_name": str(custom_data.get("form_name", "")),
+            "landing_page": str(payload.get("landing_page", "/")),
+            "utm_source": utm_source,
+            "customer_key": customer_key,
+            "ts": now,
+            "source": "pixel",
+        }))
+    elif event_name == "BookingConfirmed":
+        asyncio.create_task(manager.broadcast({
+            "type": "new_booking",
+            "calendar": str(custom_data.get("calendar", "")),
+            "landing_page": str(payload.get("landing_page", "/")),
+            "utm_source": utm_source,
+            "customer_key": customer_key,
+            "ts": now,
+            "source": "pixel",
+        }))
+    else:
+        msg = {
+            "type": "new_session",
+            "session_id": session_id,
+            "utm_source": utm_source,
+            "landing_page": str(payload.get("landing_page", "/")),
+            "ts": now,
+        }
+        if event_name and event_name != "pageview":
+            msg["event"] = event_name
+        asyncio.create_task(manager.broadcast(msg))
 
     return {"ok": True, "session_id": session_id}
 
@@ -357,6 +388,7 @@ async def track_conversion(request: Request):
     order_id = str(payload.get("order_id", "")) or _sha256(f"px|{payload.get('visitor_id','')}|{now}")
     gross = float(payload.get("value", 0))
     conv_type = str(payload.get("type", "Purchase"))
+    conv_lower = conv_type.strip().lower()
 
     utm_source = str(payload.get("utm_source", ""))
     utm_medium = str(payload.get("utm_medium", ""))
@@ -397,26 +429,39 @@ async def track_conversion(request: Request):
         else:
             ad_id = ad_id or h_ad_id
 
+    is_purchase = conv_lower in ("purchase", "payment")
+
     with connect(db_path) as conn:
-        # Insert order
-        conn.execute(
-            """INSERT OR IGNORE INTO orders (order_id, ts, gross, net, refunds, chargebacks, cogs, fees, customer_key, subscription_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (order_id, now, str(gross), str(gross), "0", "0", "0",
-             str(round(gross * 0.029 + 0.30, 2)), customer_key, ""),
-        )
-        # Insert conversion
+        if is_purchase:
+            conn.execute(
+                """INSERT OR IGNORE INTO orders (order_id, ts, gross, net, refunds, chargebacks, cogs, fees, customer_key, subscription_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    order_id,
+                    now,
+                    str(gross),
+                    str(gross),
+                    "0",
+                    "0",
+                    "0",
+                    str(round(gross * 0.029 + 0.30, 2)),
+                    customer_key,
+                    "",
+                ),
+            )
+
         conn.execute(
             """INSERT OR IGNORE INTO conversions (conversion_id, ts, type, value, order_id, customer_key)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (_sha256(f"pxconv|{order_id}"), now, conv_type, str(gross), order_id, customer_key),
         )
-        # Insert touchpoint for this conversion (so attribution can pick it up)
         conn.execute(
             """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                now, channel, platform,
+                now,
+                channel,
+                platform,
                 campaign_id,
                 adset_id,
                 ad_id,
@@ -424,17 +469,27 @@ async def track_conversion(request: Request):
                 str(payload.get("gclid", "")),
                 str(payload.get("fbclid", "")),
                 str(payload.get("ttclid", "")),
-                customer_key, session_id,
+                customer_key,
+                session_id,
             ),
         )
         conn.commit()
 
     from main import manager
     import asyncio
+    ws_type = "new_order" if is_purchase else "new_conversion"
+    if conv_lower in ("lead", "formsubmission", "form_submission", "signup"):
+        ws_type = "new_lead"
+    elif conv_lower in ("booking", "appointmentbooked", "appointment_booked"):
+        ws_type = "new_booking"
+
     asyncio.create_task(manager.broadcast({
-        "type": "new_order",
+        "type": ws_type,
+        "conversion_type": conv_type,
         "order_id": order_id,
         "gross": gross,
+        "utm_source": utm_source,
+        "landing_page": str(payload.get("landing_page", "")),
         "customer_key": customer_key,
         "ts": now,
         "source": "pixel",

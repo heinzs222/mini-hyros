@@ -102,13 +102,18 @@ async def funnel_by_source(
     """Funnel broken down by traffic source."""
     db_path = _db()
 
-    # Get distinct sources
-    col = breakdown if breakdown in ("platform", "utm_source", "campaign_id") else "platform"
+    breakdown = breakdown or "platform"
 
-    if col in ("utm_source", "platform"):
-        table = "sessions"
+    if breakdown == "utm_source":
+        source_table = "sessions"
+        source_col = "utm_source"
+    elif breakdown in ("platform", "campaign_id"):
+        source_table = "touchpoints"
+        source_col = breakdown
     else:
-        table = "touchpoints"
+        source_table = "touchpoints"
+        source_col = "platform"
+        breakdown = "platform"
 
     date_filter = ""
     params = []
@@ -119,27 +124,45 @@ async def funnel_by_source(
         date_filter += " AND ts <= ?"
         params.append(end_date + "T23:59:59Z")
 
-    sources = db_query(db_path,
-        f"SELECT DISTINCT {col} as source FROM {table} WHERE {col} != '' {date_filter}",
-        params)
+    sources = db_query(
+        db_path,
+        f"SELECT DISTINCT {source_col} as source FROM {source_table} WHERE 1=1 {date_filter}",
+        params,
+    )
 
     results = []
     for src in sources:
-        source_name = src["source"]
-        if not source_name:
-            continue
+        raw_source = str(src.get("source") or "")
+        source_name = raw_source or "direct"
 
-        # Sessions for this source
-        sess = db_query(db_path,
-            f"SELECT COUNT(DISTINCT session_id) as cnt FROM sessions WHERE {col} = ? {date_filter}",
-            [source_name] + params)
-        visit_count = int(sess[0]["cnt"]) if sess else 0
+        if source_table == "sessions":
+            sess = db_query(
+                db_path,
+                f"SELECT COUNT(DISTINCT session_id) as cnt FROM sessions WHERE {source_col} = ? {date_filter}",
+                [raw_source] + params,
+            )
+            visit_count = int(sess[0]["cnt"]) if sess else 0
 
-        # Get customer keys from this source's sessions
-        cust_keys = db_query(db_path,
-            f"SELECT DISTINCT customer_key FROM sessions WHERE {col} = ? AND customer_key != '' {date_filter}",
-            [source_name] + params)
-        ck_set = {c["customer_key"] for c in cust_keys}
+            cust_keys = db_query(
+                db_path,
+                f"SELECT DISTINCT customer_key FROM sessions WHERE {source_col} = ? AND customer_key != '' {date_filter}",
+                [raw_source] + params,
+            )
+        else:
+            sess = db_query(
+                db_path,
+                f"SELECT COUNT(DISTINCT session_id) as cnt FROM touchpoints WHERE {source_col} = ? {date_filter}",
+                [raw_source] + params,
+            )
+            visit_count = int(sess[0]["cnt"]) if sess else 0
+
+            cust_keys = db_query(
+                db_path,
+                f"SELECT DISTINCT customer_key FROM touchpoints WHERE {source_col} = ? AND customer_key != '' {date_filter}",
+                [raw_source] + params,
+            )
+
+        ck_set = {c["customer_key"] for c in cust_keys if c.get("customer_key")}
 
         if not ck_set:
             results.append({

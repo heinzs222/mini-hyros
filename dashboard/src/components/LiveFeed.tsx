@@ -11,6 +11,11 @@ interface LiveEvent {
   session_id?: string;
   utm_source?: string;
   customer_key?: string;
+  form_name?: string;
+  calendar?: string;
+  landing_page?: string;
+  event?: string;
+  conversion_type?: string;
 }
 
 interface Props {
@@ -59,9 +64,20 @@ export default function LiveFeed({ events, connected }: Props) {
               <span className="text-gray-300">
                 Order <span className="text-emerald-400 font-medium">${ev.gross?.toFixed(2)}</span>
               </span>
+            ) : ev.type === "new_lead" ? (
+              <span className="text-gray-300">
+                Lead <span className="text-blue-400">{ev.form_name || ev.landing_page || "(unknown form)"}</span>
+              </span>
+            ) : ev.type === "new_booking" ? (
+              <span className="text-gray-300">
+                Booking <span className="text-cyan-400">{ev.calendar || ev.landing_page || "(unknown)"}</span>
+              </span>
             ) : (
               <span className="text-gray-300">
-                Session from <span className="text-blue-400">{ev.utm_source || "direct"}</span>
+                {ev.event ? "Event" : "Session"} from <span className="text-blue-400">{ev.utm_source || "direct"}</span>
+                {ev.landing_page ? (
+                  <span className="text-gray-500"> — {ev.landing_page}</span>
+                ) : null}
               </span>
             )}
           </div>
