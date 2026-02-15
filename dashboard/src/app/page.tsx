@@ -50,17 +50,9 @@ const MODELS = [
   { value: "data_driven_proxy", label: "Data-Driven" },
 ];
 
-const PRESETS = [
-  { value: "7", label: "Last 7 Days" },
-  { value: "14", label: "Last 14 Days" },
-  { value: "30", label: "Last 30 Days" },
-  { value: "60", label: "Last 60 Days" },
-  { value: "90", label: "Last 90 Days" },
-];
-
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-type CompareMode = "none" | "previous_period" | "model";
+type CompareMode = "none" | "previous_period" | "custom_range" | "model";
 
 function shiftIsoDate(dateIso: string, deltaDays: number): string {
   const date = new Date(`${dateIso}T00:00:00`);
@@ -74,6 +66,12 @@ function inclusiveSpanDays(startIso: string, endIso: string): number {
   return Math.max(1, Math.round((end - start) / DAY_MS) + 1);
 }
 
+function normalizeDateRange(startIso: string, endIso: string): [string, string] {
+  if (!startIso) return [endIso, endIso];
+  if (!endIso) return [startIso, startIso];
+  return startIso <= endIso ? [startIso, endIso] : [endIso, startIso];
+}
+
 function modelLabel(value: string): string {
   return MODELS.find((m) => m.value === value)?.label || value;
 }
@@ -83,12 +81,15 @@ export default function DashboardPage() {
   const [compareReport, setCompareReport] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState("traffic_source");
+  const [activeTab, setActiveTab] = useState("campaign");
   const [model, setModel] = useState("last_click");
   const [compareMode, setCompareMode] = useState<CompareMode>("previous_period");
   const [compareModel, setCompareModel] = useState("first_click");
   const [compareLabel, setCompareLabel] = useState("");
-  const [datePreset, setDatePreset] = useState("30");
+  const [primaryStartDate, setPrimaryStartDate] = useState(daysAgo(30));
+  const [primaryEndDate, setPrimaryEndDate] = useState(daysAgo(0));
+  const [compareStartDate, setCompareStartDate] = useState(daysAgo(60));
+  const [compareEndDate, setCompareEndDate] = useState(daysAgo(31));
   const [useClickDate, setUseClickDate] = useState(false);
   const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
@@ -102,9 +103,7 @@ export default function DashboardPage() {
     try {
       setLoading(true);
       setError(null);
-      const days = parseInt(datePreset, 10);
-      const startDate = daysAgo(days);
-      const endDate = daysAgo(0);
+      const [startDate, endDate] = normalizeDateRange(primaryStartDate, primaryEndDate);
 
       const primaryParams = {
         start_date: startDate,
@@ -129,6 +128,18 @@ export default function DashboardPage() {
           use_click_date: useClickDate,
         });
         nextCompareLabel = `${previousStart} to ${previousEnd}`;
+      } else if (compareMode === "custom_range") {
+        const [customStart, customEnd] = normalizeDateRange(compareStartDate, compareEndDate);
+        if (customStart && customEnd) {
+          comparePromise = fetchReport({
+            start_date: customStart,
+            end_date: customEnd,
+            model,
+            active_tab: activeTab,
+            use_click_date: useClickDate,
+          });
+          nextCompareLabel = `${customStart} to ${customEnd}`;
+        }
       } else if (compareMode === "model" && compareModel !== model) {
         comparePromise = fetchReport({
           start_date: startDate,
@@ -153,7 +164,17 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }, [activeTab, model, datePreset, useClickDate, compareMode, compareModel]);
+  }, [
+    activeTab,
+    model,
+    primaryStartDate,
+    primaryEndDate,
+    useClickDate,
+    compareMode,
+    compareModel,
+    compareStartDate,
+    compareEndDate,
+  ]);
 
   useEffect(() => {
     loadReportRef.current = loadReport;
@@ -198,7 +219,8 @@ export default function DashboardPage() {
     setActiveTab(tab);
   };
 
-  const activePresetLabel = PRESETS.find((p) => p.value === datePreset)?.label || `${datePreset} Days`;
+  const [windowStart, windowEnd] = normalizeDateRange(primaryStartDate, primaryEndDate);
+  const activeWindowLabel = `${windowStart} to ${windowEnd}`;
 
   return (
     <div className="min-h-screen">
@@ -217,17 +239,24 @@ export default function DashboardPage() {
 
           {/* Controls */}
           <div className="ml-auto flex flex-wrap items-end gap-2">
-            <div className="min-w-[130px]">
-              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Period</div>
-              <select
-                value={datePreset}
-                onChange={(e) => setDatePreset(e.target.value)}
-                className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-              >
-                {PRESETS.map((p) => (
-                  <option key={p.value} value={p.value}>{p.label}</option>
-                ))}
-              </select>
+            <div className="min-w-[290px]">
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Primary Range</div>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="date"
+                  value={primaryStartDate}
+                  onChange={(e) => setPrimaryStartDate(e.target.value)}
+                  className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+                  aria-label="Primary start date"
+                />
+                <input
+                  type="date"
+                  value={primaryEndDate}
+                  onChange={(e) => setPrimaryEndDate(e.target.value)}
+                  className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+                  aria-label="Primary end date"
+                />
+              </div>
             </div>
 
             <div className="min-w-[170px]">
@@ -252,9 +281,32 @@ export default function DashboardPage() {
               >
                 <option value="none">No Comparison</option>
                 <option value="previous_period">Previous Period</option>
+                <option value="custom_range">Custom Range</option>
                 <option value="model">Another Model</option>
               </select>
             </div>
+
+            {compareMode === "custom_range" && (
+              <div className="min-w-[290px]">
+                <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Comparison Range</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="date"
+                    value={compareStartDate}
+                    onChange={(e) => setCompareStartDate(e.target.value)}
+                    className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+                    aria-label="Comparison start date"
+                  />
+                  <input
+                    type="date"
+                    value={compareEndDate}
+                    onChange={(e) => setCompareEndDate(e.target.value)}
+                    className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+                    aria-label="Comparison end date"
+                  />
+                </div>
+              </div>
+            )}
 
             {compareMode === "model" && (
               <div className="min-w-[170px]">
@@ -343,7 +395,7 @@ export default function DashboardPage() {
             <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)]/70 p-3">
               <div className="flex flex-wrap items-center gap-2 text-[11px]">
                 <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Model: {modelLabel(model)}</span>
-                <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Window: {activePresetLabel}</span>
+                <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Window: {activeWindowLabel}</span>
                 <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Basis: {useClickDate ? "Click Date" : "Conversion Date"}</span>
                 <span className={`px-2 py-1 rounded ${compareReport ? "bg-blue-500/15 text-blue-300" : "bg-white/5 text-gray-500"}`}>
                   {compareReport ? `Comparing vs ${compareLabel}` : "Comparison Off"}
@@ -421,8 +473,8 @@ export default function DashboardPage() {
               compareLabel={compareLabel}
               activeTab={activeTab}
               onTabChange={handleTabChange}
-              startDate={daysAgo(parseInt(datePreset))}
-              endDate={daysAgo(0)}
+              startDate={windowStart}
+              endDate={windowEnd}
               model={model}
               lookbackDays={30}
               useClickDate={useClickDate}
