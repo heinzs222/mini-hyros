@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
@@ -75,12 +76,26 @@ manager = ConnectionManager()
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
+def _ensure_db_exists(db_path: str) -> None:
+    p = Path(db_path)
+    if p.exists():
+        return
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+    init_script = Path(__file__).resolve().parent.parent / "scripts" / "init_empty_db.py"
+
+    if not init_script.exists():
+        raise FileNotFoundError(f"DB init script not found: {init_script}")
+
+    cmd = [sys.executable, str(init_script), "--sqlite-path", db_path]
+    subprocess.run(cmd, check=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure dummy DB exists
+    # Ensure configured DB exists (create schema if missing)
     db = default_db_path()
-    if not Path(db).exists():
-        print(f"[warn] DB not found at {db} – run generate_dummy_data.py first")
+    _ensure_db_exists(db)
     yield
 
 app = FastAPI(title="AttributionOps – Mini Hyros", version="0.1.0", lifespan=lifespan)
