@@ -37,6 +37,7 @@ interface Props {
   totals: SummaryTotals;
   compareTotals?: SummaryTotals | null;
   compareLabel?: string;
+  showCompareBanner?: boolean;
 }
 
 function deltaColor(delta: number | null | undefined): string {
@@ -107,12 +108,12 @@ function Card({
   );
 }
 
-export default function SummaryCards({ totals, compareTotals, compareLabel }: Props) {
+export default function SummaryCards({ totals, compareTotals, compareLabel, showCompareBanner = true }: Props) {
   const delta = totals.reported_delta;
 
   return (
     <div className="space-y-2">
-      {compareTotals && (
+      {showCompareBanner && compareTotals && (
         <div className="rounded-lg border border-[var(--card-border)] bg-white/[0.02] px-3 py-2 text-[11px] text-gray-400">
           Comparison baseline: {compareLabel || "Selected comparison"}
         </div>

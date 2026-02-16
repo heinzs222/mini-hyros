@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi } from "@/lib/api";
+import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend } from "@/lib/api";
 import { daysAgo } from "@/lib/utils";
 import SummaryCards from "@/components/SummaryCards";
 import PerformanceChart from "@/components/PerformanceChart";
@@ -100,9 +100,13 @@ export default function DashboardPage() {
   const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [syncingSpend, setSyncingSpend] = useState(false);
+  const [lastAutoSyncAt, setLastAutoSyncAt] = useState("");
   const [mainTab, setMainTab] = useState("attribution");
   const wsRef = useRef<WebSocket | null>(null);
   const refreshTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const spendSyncTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const syncingSpendRef = useRef(false);
   const loadReportRef = useRef<() => Promise<void>>(async () => {});
 
   const loadReport = useCallback(async () => {
@@ -187,6 +191,32 @@ export default function DashboardPage() {
     router,
   ]);
 
+  const syncSpendData = useCallback(async () => {
+    if (syncingSpendRef.current) return null;
+
+    const [startDate, endDate] = normalizeDateRange(primaryStartDate, primaryEndDate);
+    syncingSpendRef.current = true;
+    setSyncingSpend(true);
+
+    try {
+      const result = await syncSpend({
+        platform: "meta",
+        start_date: startDate,
+        end_date: endDate,
+      });
+      if (!Array.isArray(result?.errors) || result.errors.length === 0) {
+        setLastAutoSyncAt(new Date().toISOString());
+      }
+      return result;
+    } catch (err) {
+      console.warn("Auto spend sync failed:", err);
+      return null;
+    } finally {
+      syncingSpendRef.current = false;
+      setSyncingSpend(false);
+    }
+  }, [primaryStartDate, primaryEndDate]);
+
   useEffect(() => {
     let cancelled = false;
     const checkAuth = async () => {
@@ -213,6 +243,27 @@ export default function DashboardPage() {
   useEffect(() => {
     loadReportRef.current = loadReport;
   }, [loadReport]);
+
+  useEffect(() => {
+    if (!authChecked) return;
+
+    const runAutoSync = async () => {
+      await syncSpendData();
+      await loadReportRef.current();
+    };
+
+    void runAutoSync();
+    spendSyncTimerRef.current = setInterval(() => {
+      void runAutoSync();
+    }, 10 * 60_000);
+
+    return () => {
+      if (spendSyncTimerRef.current) {
+        clearInterval(spendSyncTimerRef.current);
+        spendSyncTimerRef.current = null;
+      }
+    };
+  }, [authChecked, syncSpendData]);
 
   useEffect(() => {
     if (!authChecked) return;
@@ -324,57 +375,6 @@ export default function DashboardPage() {
               </select>
             </div>
 
-            <div className="min-w-[150px]">
-              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Compare</div>
-              <select
-                value={compareMode}
-                onChange={(e) => setCompareMode(e.target.value as CompareMode)}
-                className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-              >
-                <option value="none">No Comparison</option>
-                <option value="previous_period">Previous Period</option>
-                <option value="custom_range">Custom Range</option>
-                <option value="model">Another Model</option>
-              </select>
-            </div>
-
-            {compareMode === "custom_range" && (
-              <div className="min-w-[290px]">
-                <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Comparison Range</div>
-                <div className="grid grid-cols-2 gap-2">
-                  <input
-                    type="date"
-                    value={compareStartDate}
-                    onChange={(e) => setCompareStartDate(e.target.value)}
-                    className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-                    aria-label="Comparison start date"
-                  />
-                  <input
-                    type="date"
-                    value={compareEndDate}
-                    onChange={(e) => setCompareEndDate(e.target.value)}
-                    className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-                    aria-label="Comparison end date"
-                  />
-                </div>
-              </div>
-            )}
-
-            {compareMode === "model" && (
-              <div className="min-w-[170px]">
-                <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Comparison Model</div>
-                <select
-                  value={compareModel}
-                  onChange={(e) => setCompareModel(e.target.value)}
-                  className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-                >
-                  {MODELS.map((m) => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </select>
-              </div>
-            )}
-
             <div className="min-w-[140px]">
               <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Date Basis</div>
               <select
@@ -388,12 +388,15 @@ export default function DashboardPage() {
             </div>
 
             <button
-              onClick={loadReport}
+              onClick={async () => {
+                await syncSpendData();
+                await loadReport();
+              }}
               disabled={loading}
               className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-xs font-medium transition-colors disabled:opacity-50 h-[34px]"
             >
               <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
-              Refresh
+              Sync + Refresh
             </button>
 
             {authEnabled && (
@@ -406,6 +409,14 @@ export default function DashboardPage() {
                 Logout
               </button>
             )}
+
+            <div className="text-[10px] text-gray-500 pl-1">
+              {syncingSpend
+                ? "Syncing spend..."
+                : lastAutoSyncAt
+                ? `Last spend sync: ${new Date(lastAutoSyncAt).toLocaleTimeString()}`
+                : "Auto-sync active (every 10m)"}
+            </div>
           </div>
         </div>
       </header>
@@ -460,9 +471,6 @@ export default function DashboardPage() {
                 <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Model: {modelLabel(model)}</span>
                 <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Window: {activeWindowLabel}</span>
                 <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Basis: {useClickDate ? "Click Date" : "Conversion Date"}</span>
-                <span className={`px-2 py-1 rounded ${compareReport ? "bg-blue-500/15 text-blue-300" : "bg-white/5 text-gray-500"}`}>
-                  {compareReport ? `Comparing vs ${compareLabel}` : "Comparison Off"}
-                </span>
               </div>
             </div>
 
@@ -471,6 +479,7 @@ export default function DashboardPage() {
               totals={report.summary_totals}
               compareTotals={compareReport?.summary_totals}
               compareLabel={compareLabel}
+              showCompareBanner={false}
             />
 
             {/* Source + Funnel clarity */}
@@ -524,6 +533,67 @@ export default function DashboardPage() {
                   wsConnected={wsConnected}
                 />
                 <LiveFeed events={liveEvents} connected={wsConnected} />
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)]/70 p-3">
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="min-w-[170px]">
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Compare</div>
+                  <select
+                    value={compareMode}
+                    onChange={(e) => setCompareMode(e.target.value as CompareMode)}
+                    className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+                  >
+                    <option value="none">No Comparison</option>
+                    <option value="previous_period">Previous Period</option>
+                    <option value="custom_range">Custom Range</option>
+                    <option value="model">Another Model</option>
+                  </select>
+                </div>
+
+                {compareMode === "custom_range" && (
+                  <div className="min-w-[290px]">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Comparison Range</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="date"
+                        value={compareStartDate}
+                        onChange={(e) => setCompareStartDate(e.target.value)}
+                        className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+                        aria-label="Comparison start date"
+                      />
+                      <input
+                        type="date"
+                        value={compareEndDate}
+                        onChange={(e) => setCompareEndDate(e.target.value)}
+                        className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+                        aria-label="Comparison end date"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {compareMode === "model" && (
+                  <div className="min-w-[170px]">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Comparison Model</div>
+                    <select
+                      value={compareModel}
+                      onChange={(e) => setCompareModel(e.target.value)}
+                      className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+                    >
+                      {MODELS.map((m) => (
+                        <option key={m.value} value={m.value}>{m.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div className="ml-auto text-[11px]">
+                  <span className={`px-2 py-1 rounded ${compareReport ? "bg-blue-500/15 text-blue-300" : "bg-white/5 text-gray-500"}`}>
+                    {compareReport ? `Comparing vs ${compareLabel}` : "Comparison Off"}
+                  </span>
+                </div>
               </div>
             </div>
 

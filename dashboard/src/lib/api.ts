@@ -101,6 +101,23 @@ export async function fetchChildren(params: {
   return res.json();
 }
 
+export async function syncSpend(params: {
+  platform?: string;
+  start_date?: string;
+  end_date?: string;
+} = {}) {
+  const sp = new URLSearchParams();
+  sp.set("platform", params.platform || "meta");
+  if (params.start_date) sp.set("start_date", params.start_date);
+  if (params.end_date) sp.set("end_date", params.end_date);
+
+  const qs = sp.toString();
+  const url = `${API_BASE}/api/spend/sync${qs ? `?${qs}` : ""}`;
+  const res = await apiFetch(url, { method: "POST" });
+  if (!res.ok) throw new Error(`Spend sync failed: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchVideoMetrics(params: {
   start_date?: string;
   end_date?: string;
