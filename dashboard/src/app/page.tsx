@@ -200,7 +200,7 @@ export default function DashboardPage() {
 
     try {
       const result = await syncSpend({
-        platform: "meta",
+        platform: "all",
         start_date: startDate,
         end_date: endDate,
       });
