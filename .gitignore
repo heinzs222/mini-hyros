@@ -29,6 +29,9 @@ data/outbox/
 *.swp
 *.swo
 
+# HAR network traces
+*.har
+
 # OS
 .DS_Store
 Thumbs.db
