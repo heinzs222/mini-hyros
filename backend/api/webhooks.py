@@ -615,3 +615,23 @@ async def track_conversion(request: Request):
     }))
 
     return {"ok": True, "order_id": order_id, "customer_key": customer_key}
+
+
+@router.post("/admin/clear-all")
+async def admin_clear_all(request: Request):
+    """Wipe all tracking data. Protected by AUTH_PASSWORD env var."""
+    payload = await request.json()
+    password = str(payload.get("password", ""))
+    expected = os.environ.get("AUTH_PASSWORD", "").strip()
+    if not expected or password != expected:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    db_path = _db()
+    with connect(db_path) as conn:
+        for table in ["sessions", "touchpoints", "orders", "conversions", "reported_value", "ad_names", "spend"]:
+            try:
+                conn.execute(f"DELETE FROM {table};")
+            except Exception:
+                pass
+        conn.commit()
+    return {"ok": True, "message": "All tracking data cleared"}
