@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+dashboard/.next/
+
+# Data (don't commit large SQLite/CSV to git)
+data/dummy/*.sqlite
+data/dummy/*.csv
+data/dummy/*.json
+data/live/
+data/outbox/
+*.sqlite-shm
+*.sqlite-wal
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
