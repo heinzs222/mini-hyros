@@ -398,17 +398,155 @@ async def _sync_meta() -> dict:
     }
 
 
+async def _google_refresh_access_token(client_id: str, client_secret: str, refresh_token: str) -> str:
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+        )
+        resp.raise_for_status()
+    token = str(resp.json().get("access_token") or "").strip()
+    if not token:
+        raise RuntimeError("Google OAuth token exchange returned no access_token")
+    return token
+
+
+async def _google_gaql(
+    access_token: str,
+    developer_token: str,
+    customer_id: str,
+    query: str,
+    login_customer_id: str = "",
+) -> list[dict]:
+    clean_id = customer_id.replace("-", "").strip()
+    url = f"https://googleads.googleapis.com/v19/customers/{clean_id}/googleAds:search"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "developer-token": developer_token,
+        "Content-Type": "application/json",
+    }
+    if login_customer_id.strip():
+        headers["login-customer-id"] = login_customer_id.replace("-", "").strip()
+
+    rows: list[dict] = []
+    next_page_token = ""
+    async with httpx.AsyncClient(timeout=45) as client:
+        while True:
+            payload: dict = {"query": query, "pageSize": 10000}
+            if next_page_token:
+                payload["pageToken"] = next_page_token
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            rows.extend(data.get("results") or [])
+            next_page_token = str(data.get("nextPageToken") or "").strip()
+            if not next_page_token:
+                break
+    return rows
+
+
 async def _sync_google() -> dict:
-    """Placeholder for Google Ads API sync. Requires google-ads library."""
-    developer_token = os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN", "")
-    customer_id = os.environ.get("GOOGLE_ADS_CUSTOMER_ID", "")
+    """Sync campaign / ad-group / ad names from Google Ads REST API (no google-ads library needed)."""
+    client_id = os.environ.get("GOOGLE_ADS_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("GOOGLE_ADS_CLIENT_SECRET", "").strip()
+    refresh_token = os.environ.get("GOOGLE_ADS_REFRESH_TOKEN", "").strip()
+    developer_token = os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN", "").strip()
+    customer_id = os.environ.get("GOOGLE_ADS_CUSTOMER_ID", "").strip()
+    login_customer_id = os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "").strip()
 
-    if not developer_token or not customer_id:
-        return {"synced": 0, "error": "GOOGLE_ADS_DEVELOPER_TOKEN and GOOGLE_ADS_CUSTOMER_ID required"}
+    if not all([client_id, client_secret, refresh_token, developer_token, customer_id]):
+        return {
+            "synced": 0,
+            "error": (
+                "GOOGLE_ADS_CLIENT_ID, GOOGLE_ADS_CLIENT_SECRET, GOOGLE_ADS_REFRESH_TOKEN, "
+                "GOOGLE_ADS_DEVELOPER_TOKEN, and GOOGLE_ADS_CUSTOMER_ID are required"
+            ),
+        }
 
-    # Google Ads API requires the google-ads Python library and OAuth2.
-    # For now, return a helpful message.
-    return {"synced": 0, "error": "Google Ads API sync requires google-ads library. Use manual mapping or install google-ads package."}
+    db_path = _db()
+    _ensure_table(db_path)
+    now = _now()
+    synced = 0
+
+    try:
+        access_token = await _google_refresh_access_token(client_id, client_secret, refresh_token)
+
+        campaigns = await _google_gaql(
+            access_token, developer_token, customer_id,
+            "SELECT campaign.id, campaign.name FROM campaign WHERE campaign.status != 'REMOVED'",
+            login_customer_id,
+        )
+        adgroups = await _google_gaql(
+            access_token, developer_token, customer_id,
+            "SELECT ad_group.id, ad_group.name, ad_group.campaign FROM ad_group WHERE ad_group.status != 'REMOVED'",
+            login_customer_id,
+        )
+        ads = await _google_gaql(
+            access_token, developer_token, customer_id,
+            "SELECT ad_group_ad.ad.id, ad_group_ad.ad.name, ad_group_ad.ad_group FROM ad_group_ad WHERE ad_group_ad.status != 'REMOVED'",
+            login_customer_id,
+        )
+
+        with connect(db_path) as conn:
+            for r in campaigns:
+                c = r.get("campaign") or {}
+                cid = str(c.get("id") or "").strip()
+                name = str(c.get("name") or "").strip()
+                if cid and name:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at)
+                           VALUES ('google', 'campaign', ?, ?, '', 'api', ?)""",
+                        (cid, name, now),
+                    )
+                    synced += 1
+
+            for r in adgroups:
+                ag = r.get("adGroup") or r.get("ad_group") or {}
+                agid = str(ag.get("id") or "").strip()
+                name = str(ag.get("name") or "").strip()
+                parent = str(ag.get("campaign") or "").split("/")[-1].strip()
+                if agid and name:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at)
+                           VALUES ('google', 'adset', ?, ?, ?, 'api', ?)""",
+                        (agid, name, parent, now),
+                    )
+                    synced += 1
+
+            for r in ads:
+                aga = r.get("adGroupAd") or r.get("ad_group_ad") or {}
+                ad = aga.get("ad") or {}
+                adid = str(ad.get("id") or "").strip()
+                name = str(ad.get("name") or "").strip()
+                parent = str(aga.get("adGroup") or aga.get("ad_group") or "").split("/")[-1].strip()
+                if adid and name:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at)
+                           VALUES ('google', 'ad', ?, ?, ?, 'api', ?)""",
+                        (adid, name, parent, now),
+                    )
+                    synced += 1
+
+            conn.commit()
+
+    except httpx.HTTPStatusError as exc:
+        details = exc.response.text[:600] if exc.response is not None else str(exc)
+        return {"synced": synced, "error": f"Google Ads API error: {details}"}
+    except Exception as exc:
+        return {"synced": synced, "error": str(exc)}
+
+    return {
+        "synced": synced,
+        "campaigns": len(campaigns),
+        "adsets": len(adgroups),
+        "ads": len(ads),
+        "customer_id": customer_id,
+    }
 
 
 async def _sync_tiktok() -> dict:

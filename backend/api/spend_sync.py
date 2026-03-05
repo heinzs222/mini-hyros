@@ -280,7 +280,7 @@ async def _fetch_google_insights(
         f"WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'"
     )
 
-    url = f"https://googleads.googleapis.com/v18/customers/{clean_customer_id}/googleAds:search"
+    url = f"https://googleads.googleapis.com/v19/customers/{clean_customer_id}/googleAds:search"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "developer-token": developer_token,
