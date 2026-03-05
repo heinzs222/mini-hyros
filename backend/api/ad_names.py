@@ -402,74 +402,46 @@ async def _sync_meta() -> dict:
                     synced += 1
                 conn.commit()
 
-            # Fetch ads with comprehensive creative fields to cover all ad types
+            # Fetch ads — only request creative{id} to avoid 400 from nested field expansion
             ads = await _meta_fetch_all(
                 client=client,
                 account_id=account_id,
                 access_token=access_token,
                 endpoint="ads",
-                fields=(
-                    "id,name,adset_id,campaign_id,status,"
-                    "creative{id,thumbnail_url,image_url,object_type,"
-                    "object_story_spec{link_data{picture,image_url},"
-                    "video_data{image_url}}}"
-                ),
+                fields="id,name,adset_id,campaign_id,status,creative{id}",
             )
             with connect(db_path) as conn:
                 for a in ads:
-                    creative = a.get("creative") or {}
-                    oss = creative.get("object_story_spec") or {}
-                    link_data = oss.get("link_data") or {}
-                    video_data = oss.get("video_data") or {}
-                    thumbnail_url = (
-                        creative.get("thumbnail_url")
-                        or creative.get("image_url")
-                        or link_data.get("picture")
-                        or link_data.get("image_url")
-                        or video_data.get("image_url")
-                        or ""
-                    )
-                    obj_type = str(creative.get("object_type") or "").lower()
-                    creative_type = "video" if "video" in obj_type else ("image" if thumbnail_url else "")
                     conn.execute(
-                        """INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at, thumbnail_url, creative_type)
-                           VALUES ('meta', 'ad', ?, ?, ?, 'api', ?, ?, ?)""",
-                        (str(a["id"]), str(a["name"]), str(a.get("adset_id", "")), now,
-                         thumbnail_url, creative_type),
+                        """INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at)
+                           VALUES ('meta', 'ad', ?, ?, ?, 'api', ?)""",
+                        (str(a["id"]), str(a["name"]), str(a.get("adset_id", "")), now),
                     )
                     synced += 1
                 conn.commit()
 
-            # Phase 2: fetch adcreatives directly to fill in missing thumbnails
-            # This is more reliable than relying on nested creative expansion in /ads
+            # Phase 2: fetch adcreatives directly — reliable source for thumbnail_url/image_url
             try:
                 adcreatives = await _meta_fetch_all(
                     client=client,
                     account_id=account_id,
                     access_token=access_token,
                     endpoint="adcreatives",
-                    fields="id,thumbnail_url,image_url,object_type,object_story_spec{link_data{picture},video_data{image_url}}",
+                    fields="id,thumbnail_url,image_url,object_type",
                 )
-                # Build map: creative_id -> thumbnail_url
-                creative_thumb: dict[str, str] = {}
+                # Build map: creative_id -> (thumbnail_url, creative_type)
+                creative_thumb: dict[str, tuple[str, str]] = {}
                 for cr in adcreatives:
                     cr_id = str(cr.get("id") or "")
                     if not cr_id:
                         continue
-                    oss = cr.get("object_story_spec") or {}
-                    link_data = oss.get("link_data") or {}
-                    video_data = oss.get("video_data") or {}
-                    url = (
-                        cr.get("thumbnail_url")
-                        or cr.get("image_url")
-                        or link_data.get("picture")
-                        or video_data.get("image_url")
-                        or ""
-                    )
+                    url = cr.get("image_url") or cr.get("thumbnail_url") or ""
+                    obj_type = str(cr.get("object_type") or "").lower()
+                    ctype = "video" if "video" in obj_type else ("image" if url else "")
                     if url:
-                        creative_thumb[cr_id] = url
+                        creative_thumb[cr_id] = (url, ctype)
 
-                # Build ad_id -> creative_id map from the ads we already fetched
+                # Build ad_id -> creative_id map
                 ad_creative_map: dict[str, str] = {}
                 for a in ads:
                     cr = a.get("creative") or {}
@@ -478,14 +450,15 @@ async def _sync_meta() -> dict:
                     if ad_id and cr_id:
                         ad_creative_map[ad_id] = cr_id
 
-                # Update rows that still have no thumbnail_url
+                # Upsert thumbnail_url + creative_type for each ad
                 with connect(db_path) as conn:
                     for ad_id, cr_id in ad_creative_map.items():
-                        url = creative_thumb.get(cr_id, "")
-                        if url:
+                        if cr_id in creative_thumb:
+                            url, ctype = creative_thumb[cr_id]
                             conn.execute(
-                                "UPDATE ad_names SET thumbnail_url=? WHERE platform='meta' AND entity_type='ad' AND entity_id=? AND (thumbnail_url IS NULL OR thumbnail_url='')",
-                                (url, ad_id),
+                                """UPDATE ad_names SET thumbnail_url=?, creative_type=?
+                                   WHERE platform='meta' AND entity_type='ad' AND entity_id=?""",
+                                (url, ctype, ad_id),
                             )
                     conn.commit()
             except Exception:
