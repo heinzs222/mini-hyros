@@ -243,6 +243,7 @@ async def get_report(
             creative = thumb_map.get(lookup_key) or thumb_map.get(entity_id) or {}
             row["thumbnail_url"] = creative.get("thumbnail_url", "")
             row["creative_type"] = creative.get("creative_type", "")
+            row["video_id"] = creative.get("video_id", "")
 
     return report
 
@@ -543,6 +544,7 @@ async def get_report_children(
             creative = thumb_map.get(lookup_key) or thumb_map.get(entity_id) or {}
             row["thumbnail_url"] = creative.get("thumbnail_url", "")
             row["creative_type"] = creative.get("creative_type", "")
+            row["video_id"] = creative.get("video_id", "")
 
     return {
         "child_tab": child_tab,

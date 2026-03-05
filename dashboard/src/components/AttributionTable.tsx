@@ -4,7 +4,7 @@ import React from "react";
 import { formatMoney, formatNumber, formatPercentValue, formatRatio, profitColor } from "@/lib/utils";
 import { fetchChildren } from "@/lib/api";
 import { ArrowUpDown, ChevronDown, ChevronRight, Loader2, Play, Image as ImageIcon, X, ExternalLink } from "lucide-react";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 
 interface TableRow {
   id: string;
@@ -13,6 +13,7 @@ interface TableRow {
   level: string;
   thumbnail_url?: string;
   creative_type?: string;
+  video_id?: string;
   metrics: {
     clicks: number;
     cost: number;
@@ -129,7 +130,10 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [childRows, setChildRows] = useState<Record<string, TableRow[]>>({});
   const [loadingChildren, setLoadingChildren] = useState<Record<string, boolean>>({});
-  const [lightbox, setLightbox] = useState<{ url: string; type: string; name: string; ad_id: string } | null>(null);
+  const [lightbox, setLightbox] = useState<{ url: string; type: string; name: string; ad_id: string; video_id: string } | null>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoLoading, setVideoLoading] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   const metricCols = columns.filter((c) => c.type !== "dimension");
   const dimensionCol = columns.find((c) => c.type === "dimension");
@@ -230,9 +234,22 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
     if (row.thumbnail_url) {
       const parts = row.id.split("|");
       const ad_id = parts[parts.length - 1] || "";
-      setLightbox({ url: row.thumbnail_url, type: row.creative_type || "", name: row.name, ad_id });
+      setVideoUrl(null);
+      setLightbox({ url: row.thumbnail_url, type: row.creative_type || "", name: row.name, ad_id, video_id: row.video_id || "" });
     }
   }, []);
+
+  const BACKEND = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  useEffect(() => {
+    if (!lightbox?.video_id || lightbox.type !== "video") return;
+    setVideoLoading(true);
+    fetch(`${BACKEND}/api/ad-names/video-url?video_id=${lightbox.video_id}`)
+      .then((r) => r.json())
+      .then((d) => { if (d.video_url) setVideoUrl(d.video_url); })
+      .catch(() => {})
+      .finally(() => setVideoLoading(false));
+  }, [lightbox?.video_id, lightbox?.type, BACKEND]);
 
   // Render a single data row
   const renderRow = (row: TableRow, depth: number, parentKey?: string): React.ReactNode => {
@@ -338,12 +355,35 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
               <X size={18} />
             </button>
           </div>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={lightbox.url}
-            alt={lightbox.name}
-            className="rounded-lg max-h-[80vh] max-w-full object-contain border border-[var(--card-border)]"
-          />
+          {/* Video player for video ads, image for static */}
+          {lightbox.type === "video" && videoUrl ? (
+            <video
+              ref={videoRef}
+              src={videoUrl}
+              controls
+              autoPlay
+              className="rounded-lg max-h-[75vh] max-w-full border border-[var(--card-border)] bg-black"
+              style={{ minWidth: 480 }}
+            />
+          ) : lightbox.type === "video" && videoLoading ? (
+            <div className="flex items-center justify-center rounded-lg border border-[var(--card-border)] bg-black/50" style={{ minWidth: 480, minHeight: 270 }}>
+              <Loader2 size={28} className="text-brand-500 animate-spin" />
+            </div>
+          ) : lightbox.type === "video" && !videoUrl ? (
+            <div className="flex flex-col items-center gap-3 rounded-lg border border-[var(--card-border)] bg-black/50 p-6" style={{ minWidth: 480 }}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={lightbox.url} alt={lightbox.name} className="rounded max-h-48 object-contain" />
+              <span className="text-xs text-gray-500">Video preview unavailable — open in Ads Manager to watch</span>
+            </div>
+          ) : (
+            /* eslint-disable-next-line @next/next/no-img-element */
+            <img
+              src={lightbox.url}
+              alt={lightbox.name}
+              className="rounded-lg max-h-[80vh] max-w-full object-contain border border-[var(--card-border)]"
+              style={{ minWidth: 320 }}
+            />
+          )}
           <div className="flex items-center justify-between px-1">
             {lightbox.type && (
               <span className="text-xs text-gray-500 capitalize">{lightbox.type} creative</span>
@@ -356,7 +396,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
                 className="flex items-center gap-1 text-xs text-brand-400 hover:text-brand-300 transition-colors ml-auto"
                 onClick={(e) => e.stopPropagation()}
               >
-                {lightbox.type === "video" ? "Watch video in Ads Manager" : "View in Ads Manager"}
+                Open in Ads Manager
                 <ExternalLink size={11} />
               </a>
             )}

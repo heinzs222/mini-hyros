@@ -51,6 +51,7 @@ def _ensure_table(db_path: str) -> None:
         for col_sql in [
             "ALTER TABLE ad_names ADD COLUMN thumbnail_url TEXT",
             "ALTER TABLE ad_names ADD COLUMN creative_type TEXT",
+            "ALTER TABLE ad_names ADD COLUMN video_id TEXT",
         ]:
             try:
                 conn.execute(col_sql)
@@ -223,12 +224,12 @@ def get_name_map(db_path: str, entity_type: str = "") -> dict[str, str]:
 
 
 def get_thumbnails_map(db_path: str) -> dict[str, dict[str, str]]:
-    """Return map of platform|entity_id -> {thumbnail_url, creative_type} for ads."""
+    """Return map of platform|entity_id -> {thumbnail_url, creative_type, video_id} for ads."""
     try:
         _ensure_table(db_path)
         rows = sql_rows(
             db_path,
-            "SELECT platform, entity_id, thumbnail_url, creative_type FROM ad_names WHERE entity_type = 'ad'",
+            "SELECT platform, entity_id, thumbnail_url, creative_type, video_id FROM ad_names WHERE entity_type = 'ad'",
         )
         out: dict[str, dict[str, str]] = {}
         for r in rows:
@@ -239,6 +240,7 @@ def get_thumbnails_map(db_path: str) -> dict[str, dict[str, str]]:
             val = {
                 "thumbnail_url": str(r.get("thumbnail_url") or ""),
                 "creative_type": str(r.get("creative_type") or ""),
+                "video_id": str(r.get("video_id") or ""),
             }
             if platform:
                 out[f"{platform}|{entity_id}"] = val
@@ -247,6 +249,27 @@ def get_thumbnails_map(db_path: str) -> dict[str, dict[str, str]]:
         return out
     except Exception:
         return {}
+
+
+# ── Video URL proxy ──────────────────────────────────────────────────────────
+
+@router.get("/video-url")
+async def get_video_url(video_id: str = Query(...)):
+    """Fetch the actual video source URL from Meta for a given video_id."""
+    access_token = os.environ.get("META_ACCESS_TOKEN", "")
+    if not access_token or not video_id:
+        return {"video_url": "", "error": "missing credentials or video_id"}
+    api_version = _meta_api_version()
+    url = f"https://graph.facebook.com/{api_version}/{video_id}"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, params={"access_token": access_token, "fields": "source"})
+            data = resp.json()
+            if resp.status_code >= 400:
+                return {"video_url": "", "error": data.get("error", {}).get("message", "API error")}
+            return {"video_url": data.get("source", ""), "video_id": video_id}
+    except Exception as e:
+        return {"video_url": "", "error": str(e)}
 
 
 # ── API Sync ─────────────────────────────────────────────────────────────────
@@ -428,11 +451,11 @@ async def _sync_meta() -> dict:
                     account_id=account_id,
                     access_token=access_token,
                     endpoint="adcreatives",
-                    fields="id,thumbnail_url,image_url,object_type",
+                    fields="id,thumbnail_url,image_url,object_type,object_story_spec{video_data{video_id}}",
                     limit=200,
                 )
-                # Build map: creative_id -> (thumbnail_url, creative_type)
-                creative_thumb: dict[str, tuple[str, str]] = {}
+                # Build map: creative_id -> (thumbnail_url, creative_type, video_id)
+                creative_thumb: dict[str, tuple[str, str, str]] = {}
                 for cr in adcreatives:
                     cr_id = str(cr.get("id") or "")
                     if not cr_id:
@@ -440,8 +463,9 @@ async def _sync_meta() -> dict:
                     url = cr.get("image_url") or cr.get("thumbnail_url") or ""
                     obj_type = str(cr.get("object_type") or "").lower()
                     ctype = "video" if "video" in obj_type else ("image" if url else "")
-                    if url:
-                        creative_thumb[cr_id] = (url, ctype)
+                    oss = cr.get("object_story_spec") or {}
+                    vid_id = str(oss.get("video_data", {}).get("video_id") or "")
+                    creative_thumb[cr_id] = (url, ctype, vid_id)
 
                 # Build ad_id -> creative_id map
                 ad_creative_map: dict[str, str] = {}
@@ -456,11 +480,11 @@ async def _sync_meta() -> dict:
                 with connect(db_path) as conn:
                     for ad_id, cr_id in ad_creative_map.items():
                         if cr_id in creative_thumb:
-                            url, ctype = creative_thumb[cr_id]
+                            url, ctype, vid_id = creative_thumb[cr_id]
                             conn.execute(
-                                """UPDATE ad_names SET thumbnail_url=?, creative_type=?
+                                """UPDATE ad_names SET thumbnail_url=?, creative_type=?, video_id=?
                                    WHERE platform='meta' AND entity_type='ad' AND entity_id=?""",
-                                (url, ctype, ad_id),
+                                (url, ctype, vid_id or None, ad_id),
                             )
                     conn.commit()
             except Exception:
