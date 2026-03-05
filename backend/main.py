@@ -305,10 +305,12 @@ async def get_report_children(
     from collections import defaultdict
 
     # Build WHERE clause for touchpoints
+    # NOTE: touchpoints table has no account_id column — skip that filter there
+    TP_VALID_COLS = {"platform", "campaign_id", "adset_id", "ad_id"}
     where_parts = ["date(substr(t.ts,1,10)) BETWEEN :start_date AND :end_date"]
     params: dict[str, Any] = {"start_date": start_date, "end_date": end_date}
     for k, v in filters.items():
-        if v:
+        if v and k in TP_VALID_COLS:
             where_parts.append(f"t.{k} = :{k}")
             params[k] = v
     where_sql = " AND ".join(where_parts)
