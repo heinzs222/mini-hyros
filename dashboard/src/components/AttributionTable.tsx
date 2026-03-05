@@ -244,8 +244,9 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
     const compareRow = depth === 0 ? compareById.get(row.id) : undefined;
 
     return (
-      <tbody key={rowKey}>
+      <>
         <tr
+          key={rowKey}
           className={`border-b border-[var(--card-border)] hover:bg-white/[0.02] transition-colors ${
             row.children_available ? "cursor-pointer" : ""
           } ${depth > 0 ? "bg-white/[0.01]" : ""}`}
@@ -309,20 +310,16 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
             </td>
           ))}
         </tr>
-        {/* Render children if expanded */}
-        {isExpanded && children.length > 0 && (
-          <>
-            {children.map((child) => renderRow(child, depth + 1, row.id))}
-          </>
-        )}
+        {/* Render children inline as sibling tr elements */}
+        {isExpanded && children.length > 0 && children.map((child) => renderRow(child, depth + 1, row.id))}
         {isExpanded && children.length === 0 && !isLoading && (
-          <tr className="border-b border-[var(--card-border)]">
+          <tr key={`${rowKey}-empty`} className="border-b border-[var(--card-border)]">
             <td colSpan={metricCols.length + 1} className="px-4 py-2 text-gray-600 text-[11px]" style={{ paddingLeft: (depth + 1) * 20 + 16 }}>
               No child items found
             </td>
           </tr>
         )}
-      </tbody>
+      </>
     );
   };
 
@@ -428,8 +425,8 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
               ))}
             </tr>
           </thead>
-          {sorted.map((row) => renderRow(row, 0))}
           <tbody>
+            {sorted.map((row) => renderRow(row, 0))}
             {/* Totals row */}
             <tr className="border-t-2 border-brand-600/30 bg-white/[0.02] font-semibold">
               <td className="px-4 py-2.5 text-gray-300 sticky left-0 bg-[var(--card)] z-10">
