@@ -451,7 +451,7 @@ async def _sync_meta() -> dict:
                     account_id=account_id,
                     access_token=access_token,
                     endpoint="adcreatives",
-                    fields="id,thumbnail_url,image_url,object_type,object_story_spec{video_data{video_id}}",
+                    fields="id,thumbnail_url,image_url,object_type,video_id",
                     limit=200,
                 )
                 # Build map: creative_id -> (thumbnail_url, creative_type, video_id)
@@ -463,8 +463,7 @@ async def _sync_meta() -> dict:
                     url = cr.get("image_url") or cr.get("thumbnail_url") or ""
                     obj_type = str(cr.get("object_type") or "").lower()
                     ctype = "video" if "video" in obj_type else ("image" if url else "")
-                    oss = cr.get("object_story_spec") or {}
-                    vid_id = str(oss.get("video_data", {}).get("video_id") or "")
+                    vid_id = str(cr.get("video_id") or "")
                     creative_thumb[cr_id] = (url, ctype, vid_id)
 
                 # Build ad_id -> creative_id map
