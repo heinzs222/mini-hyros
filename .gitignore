@@ -23,6 +23,9 @@ data/outbox/
 # Environment
 .env
 
+# OAuth client secret downloads (never commit)
+client_secret_*.json
+
 # IDE
 .vscode/
 .idea/
