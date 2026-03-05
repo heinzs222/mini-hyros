@@ -217,8 +217,9 @@ async def get_report(
     }
     entity_type = entity_type_map.get(active_tab, "")
     name_map = get_name_map(_db(), entity_type=entity_type) if entity_type else {}
+    table_rows = report.get("table", {}).get("rows", [])
     if name_map:
-        for row in report.get("table", {}).get("rows", []):
+        for row in table_rows:
             row_id = str(row.get("id", ""))
             row_name = str(row.get("name", ""))
             parts = row_id.split("|") if row_id else []
@@ -229,6 +230,19 @@ async def get_report(
             if resolved_name:
                 row["name"] = resolved_name
                 row["raw_id"] = entity_id
+
+    # Inject thumbnails for ad-level top-level rows
+    if active_tab == "ad":
+        thumb_map = get_thumbnails_map(_db())
+        for row in table_rows:
+            row_id = str(row.get("id", ""))
+            parts = row_id.split("|") if row_id else []
+            platform = parts[0].strip().lower() if parts else ""
+            entity_id = parts[-1].strip() if parts else ""
+            lookup_key = f"{platform}|{entity_id}" if platform and entity_id else entity_id
+            creative = thumb_map.get(lookup_key) or thumb_map.get(entity_id) or {}
+            row["thumbnail_url"] = creative.get("thumbnail_url", "")
+            row["creative_type"] = creative.get("creative_type", "")
 
     return report
 
