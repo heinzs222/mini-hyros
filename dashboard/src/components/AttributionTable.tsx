@@ -2,7 +2,7 @@
 
 import { formatMoney, formatNumber, formatPercentValue, formatRatio, profitColor } from "@/lib/utils";
 import { fetchChildren } from "@/lib/api";
-import { ArrowUpDown, ChevronDown, ChevronRight, Loader2, Play, Image as ImageIcon, X } from "lucide-react";
+import { ArrowUpDown, ChevronDown, ChevronRight, Loader2, Play, Image as ImageIcon, X, ExternalLink } from "lucide-react";
 import { useState, useCallback } from "react";
 
 interface TableRow {
@@ -128,7 +128,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [childRows, setChildRows] = useState<Record<string, TableRow[]>>({});
   const [loadingChildren, setLoadingChildren] = useState<Record<string, boolean>>({});
-  const [lightbox, setLightbox] = useState<{ url: string; type: string; name: string } | null>(null);
+  const [lightbox, setLightbox] = useState<{ url: string; type: string; name: string; ad_id: string } | null>(null);
 
   const metricCols = columns.filter((c) => c.type !== "dimension");
   const dimensionCol = columns.find((c) => c.type === "dimension");
@@ -226,7 +226,11 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
 
   const openLightbox = useCallback((e: React.MouseEvent, row: TableRow) => {
     e.stopPropagation();
-    if (row.thumbnail_url) setLightbox({ url: row.thumbnail_url, type: row.creative_type || "", name: row.name });
+    if (row.thumbnail_url) {
+      const parts = row.id.split("|");
+      const ad_id = parts[parts.length - 1] || "";
+      setLightbox({ url: row.thumbnail_url, type: row.creative_type || "", name: row.name, ad_id });
+    }
   }, []);
 
   // Render a single data row
@@ -343,9 +347,23 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
             alt={lightbox.name}
             className="rounded-lg max-h-[80vh] max-w-full object-contain border border-[var(--card-border)]"
           />
-          {lightbox.type && (
-            <div className="text-center text-xs text-gray-500 capitalize">{lightbox.type} creative</div>
-          )}
+          <div className="flex items-center justify-between px-1">
+            {lightbox.type && (
+              <span className="text-xs text-gray-500 capitalize">{lightbox.type} creative</span>
+            )}
+            {lightbox.ad_id && (
+              <a
+                href={`https://adsmanager.facebook.com/adsmanager/manage/ads?selected_ad_ids=${lightbox.ad_id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-xs text-brand-400 hover:text-brand-300 transition-colors ml-auto"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {lightbox.type === "video" ? "Watch video in Ads Manager" : "View in Ads Manager"}
+                <ExternalLink size={11} />
+              </a>
+            )}
+          </div>
         </div>
       </div>
     )}
