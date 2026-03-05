@@ -234,7 +234,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   }, []);
 
   // Render a single data row
-  const renderRow = (row: TableRow, depth: number, parentKey?: string) => {
+  const renderRow = (row: TableRow, depth: number, parentKey?: string): React.ReactNode => {
     const rowKey = parentKey ? `${parentKey}>${row.id}` : row.id;
     const isExpanded = expanded[rowKey] || expanded[row.id];
     const isLoading = loadingChildren[rowKey] || loadingChildren[row.id];
