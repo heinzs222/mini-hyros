@@ -1,5 +1,6 @@
 "use client";
 
+import React from "react";
 import { formatMoney, formatNumber, formatPercentValue, formatRatio, profitColor } from "@/lib/utils";
 import { fetchChildren } from "@/lib/api";
 import { ArrowUpDown, ChevronDown, ChevronRight, Loader2, Play, Image as ImageIcon, X, ExternalLink } from "lucide-react";
