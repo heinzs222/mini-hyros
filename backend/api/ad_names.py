@@ -315,13 +315,14 @@ async def _meta_fetch_all(
     access_token: str,
     endpoint: str,
     fields: str,
+    limit: int = 500,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     next_url: str | None = _meta_url(f"act_{account_id}/{endpoint}")
     params: dict[str, Any] | None = {
         "access_token": access_token,
         "fields": fields,
-        "limit": 500,
+        "limit": limit,
     }
 
     while next_url:
@@ -428,6 +429,7 @@ async def _sync_meta() -> dict:
                     access_token=access_token,
                     endpoint="adcreatives",
                     fields="id,thumbnail_url,image_url,object_type",
+                    limit=200,
                 )
                 # Build map: creative_id -> (thumbnail_url, creative_type)
                 creative_thumb: dict[str, tuple[str, str]] = {}
