@@ -244,7 +244,10 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   useEffect(() => {
     if (!lightbox?.video_id || lightbox.type !== "video") return;
     setVideoLoading(true);
-    fetch(`${BACKEND}/api/ad-names/video-url?video_id=${lightbox.video_id}`)
+    const token = typeof window !== "undefined" ? (window.localStorage.getItem("hyros_auth_token") || "") : "";
+    fetch(`${BACKEND}/api/ad-names/video-url?video_id=${lightbox.video_id}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
       .then((r) => r.json())
       .then((d) => { if (d.video_url) setVideoUrl(d.video_url); })
       .catch(() => {})
