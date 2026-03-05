@@ -48,6 +48,14 @@ def _ensure_table(db_path: str) -> None:
             updated_at TEXT,
             PRIMARY KEY (platform, entity_type, entity_id)
         )""")
+        for col_sql in [
+            "ALTER TABLE ad_names ADD COLUMN thumbnail_url TEXT",
+            "ALTER TABLE ad_names ADD COLUMN creative_type TEXT",
+        ]:
+            try:
+                conn.execute(col_sql)
+            except Exception:
+                pass
         conn.commit()
 
 
@@ -214,6 +222,33 @@ def get_name_map(db_path: str, entity_type: str = "") -> dict[str, str]:
         return {}
 
 
+def get_thumbnails_map(db_path: str) -> dict[str, dict[str, str]]:
+    """Return map of platform|entity_id -> {thumbnail_url, creative_type} for ads."""
+    try:
+        _ensure_table(db_path)
+        rows = sql_rows(
+            db_path,
+            "SELECT platform, entity_id, thumbnail_url, creative_type FROM ad_names WHERE entity_type = 'ad'",
+        )
+        out: dict[str, dict[str, str]] = {}
+        for r in rows:
+            platform = str(r.get("platform") or "").strip().lower()
+            entity_id = str(r.get("entity_id") or "").strip()
+            if not entity_id:
+                continue
+            val = {
+                "thumbnail_url": str(r.get("thumbnail_url") or ""),
+                "creative_type": str(r.get("creative_type") or ""),
+            }
+            if platform:
+                out[f"{platform}|{entity_id}"] = val
+            if entity_id not in out:
+                out[entity_id] = val
+        return out
+    except Exception:
+        return {}
+
+
 # ── API Sync ─────────────────────────────────────────────────────────────────
 
 @router.post("/sync")
@@ -367,20 +402,28 @@ async def _sync_meta() -> dict:
                     synced += 1
                 conn.commit()
 
-            # Fetch ads
+            # Fetch ads with creative thumbnail
             ads = await _meta_fetch_all(
                 client=client,
                 account_id=account_id,
                 access_token=access_token,
                 endpoint="ads",
-                fields="id,name,adset_id,campaign_id,status",
+                fields="id,name,adset_id,campaign_id,status,creative{thumbnail_url,image_url,object_type}",
             )
             with connect(db_path) as conn:
                 for a in ads:
+                    creative = a.get("creative") or {}
+                    thumbnail_url = (
+                        creative.get("thumbnail_url")
+                        or creative.get("image_url")
+                        or ""
+                    )
+                    creative_type = str(creative.get("object_type") or "").lower()
                     conn.execute(
-                        """INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at)
-                           VALUES ('meta', 'ad', ?, ?, ?, 'api', ?)""",
-                        (str(a["id"]), str(a["name"]), str(a.get("adset_id", "")), now),
+                        """INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at, thumbnail_url, creative_type)
+                           VALUES ('meta', 'ad', ?, ?, ?, 'api', ?, ?, ?)""",
+                        (str(a["id"]), str(a["name"]), str(a.get("adset_id", "")), now,
+                         thumbnail_url, creative_type),
                     )
                     synced += 1
                 conn.commit()

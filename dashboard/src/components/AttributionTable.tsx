@@ -2,7 +2,7 @@
 
 import { formatMoney, formatNumber, formatPercentValue, formatRatio, profitColor } from "@/lib/utils";
 import { fetchChildren } from "@/lib/api";
-import { ArrowUpDown, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { ArrowUpDown, ChevronDown, ChevronRight, Loader2, Play, Image as ImageIcon, X } from "lucide-react";
 import { useState, useCallback } from "react";
 
 interface TableRow {
@@ -10,6 +10,8 @@ interface TableRow {
   name: string;
   raw_id?: string;
   level: string;
+  thumbnail_url?: string;
+  creative_type?: string;
   metrics: {
     clicks: number;
     cost: number;
@@ -126,6 +128,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [childRows, setChildRows] = useState<Record<string, TableRow[]>>({});
   const [loadingChildren, setLoadingChildren] = useState<Record<string, boolean>>({});
+  const [lightbox, setLightbox] = useState<{ url: string; type: string; name: string } | null>(null);
 
   const metricCols = columns.filter((c) => c.type !== "dimension");
   const dimensionCol = columns.find((c) => c.type === "dimension");
@@ -221,6 +224,11 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
     }
   }, [expanded, childRows, startDate, endDate, model, lookbackDays, useClickDate]);
 
+  const openLightbox = useCallback((e: React.MouseEvent, row: TableRow) => {
+    e.stopPropagation();
+    if (row.thumbnail_url) setLightbox({ url: row.thumbnail_url, type: row.creative_type || "", name: row.name });
+  }, []);
+
   // Render a single data row
   const renderRow = (row: TableRow, depth: number, parentKey?: string) => {
     const rowKey = parentKey ? `${parentKey}>${row.id}` : row.id;
@@ -255,7 +263,26 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
               ) : (
                 <span className="w-3" />
               )}
-              <span className="text-gray-200 truncate max-w-[220px]" title={row.raw_id ? `${row.name} (ID: ${row.raw_id})` : row.name}>
+              {/* Thumbnail for ad-level rows */}
+              {row.level === "ad" && row.thumbnail_url && (
+                <button
+                  onClick={(e) => openLightbox(e, row)}
+                  className="flex-shrink-0 w-8 h-8 rounded overflow-hidden border border-[var(--card-border)] relative group hover:border-brand-500 transition-colors"
+                  title="Preview creative"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={row.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                    {row.creative_type === "video" ? <Play size={10} className="text-white" /> : <ImageIcon size={10} className="text-white" />}
+                  </div>
+                </button>
+              )}
+              {row.level === "ad" && !row.thumbnail_url && (
+                <span className="flex-shrink-0 w-8 h-8 rounded border border-dashed border-[var(--card-border)] flex items-center justify-center">
+                  <ImageIcon size={10} className="text-gray-700" />
+                </span>
+              )}
+              <span className="text-gray-200 truncate max-w-[200px]" title={row.raw_id ? `${row.name} (ID: ${row.raw_id})` : row.name}>
                 {row.name}
               </span>
               {row.raw_id && row.raw_id !== row.name && (
@@ -296,6 +323,32 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   };
 
   return (
+    <>
+    {/* Lightbox */}
+    {lightbox && (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+        onClick={() => setLightbox(null)}
+      >
+        <div className="relative max-w-2xl max-h-[90vh] flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between px-1">
+            <span className="text-sm text-gray-300 truncate max-w-[500px]">{lightbox.name}</span>
+            <button onClick={() => setLightbox(null)} className="text-gray-400 hover:text-white ml-4">
+              <X size={18} />
+            </button>
+          </div>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={lightbox.url}
+            alt={lightbox.name}
+            className="rounded-lg max-h-[80vh] max-w-full object-contain border border-[var(--card-border)]"
+          />
+          {lightbox.type && (
+            <div className="text-center text-xs text-gray-500 capitalize">{lightbox.type} creative</div>
+          )}
+        </div>
+      </div>
+    )}
     <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] overflow-hidden">
       {compareRows.length > 0 && (
         <div className="px-4 py-2 border-b border-[var(--card-border)] text-[11px] text-blue-300 bg-blue-500/5">
@@ -374,5 +427,6 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
         </table>
       </div>
     </div>
+    </>
   );
 }

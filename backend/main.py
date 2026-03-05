@@ -43,7 +43,7 @@ from api.cohort import router as cohort_router
 from api.refunds import router as refunds_router
 from api.email_sms import router as email_sms_router
 from api.ai_recommendations import router as ai_router
-from api.ad_names import router as ad_names_router, get_name_map
+from api.ad_names import router as ad_names_router, get_name_map, get_thumbnails_map
 from api.spend_sync import router as spend_sync_router
 from api.auth import (
     router as auth_router,
@@ -516,6 +516,19 @@ async def get_report_children(
             if resolved_name:
                 row["name"] = resolved_name
                 row["raw_id"] = entity_id
+
+    # Inject thumbnail URLs for ad-level rows
+    if child_tab == "ad":
+        thumb_map = get_thumbnails_map(db_path)
+        for row in rows:
+            row_id = str(row.get("id", ""))
+            parts = row_id.split("|") if row_id else []
+            platform = parts[0].strip().lower() if parts else ""
+            entity_id = parts[-1].strip() if parts else ""
+            lookup_key = f"{platform}|{entity_id}" if platform and entity_id else entity_id
+            creative = thumb_map.get(lookup_key) or thumb_map.get(entity_id) or {}
+            row["thumbnail_url"] = creative.get("thumbnail_url", "")
+            row["creative_type"] = creative.get("creative_type", "")
 
     return {
         "child_tab": child_tab,
