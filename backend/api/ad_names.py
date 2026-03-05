@@ -571,7 +571,10 @@ async def _sync_tiktok() -> dict:
                 params={"advertiser_id": advertiser_id, "page_size": 200},
                 headers=headers,
             )
-            data = resp.json().get("data", {})
+            rj = resp.json()
+            if rj.get("code", 0) != 0:
+                return {"synced": 0, "error": f"TikTok campaigns error {rj.get('code')}: {rj.get('message')}"}
+            data = rj.get("data", {})
             campaigns = data.get("list", [])
             with connect(db_path) as conn:
                 for c in campaigns:
@@ -589,7 +592,10 @@ async def _sync_tiktok() -> dict:
                 params={"advertiser_id": advertiser_id, "page_size": 200},
                 headers=headers,
             )
-            data = resp.json().get("data", {})
+            rj = resp.json()
+            if rj.get("code", 0) != 0:
+                return {"synced": synced, "error": f"TikTok adgroups error {rj.get('code')}: {rj.get('message')}"}
+            data = rj.get("data", {})
             adgroups = data.get("list", [])
             with connect(db_path) as conn:
                 for a in adgroups:
@@ -608,7 +614,10 @@ async def _sync_tiktok() -> dict:
                 params={"advertiser_id": advertiser_id, "page_size": 200},
                 headers=headers,
             )
-            data = resp.json().get("data", {})
+            rj = resp.json()
+            if rj.get("code", 0) != 0:
+                return {"synced": synced, "error": f"TikTok ads error {rj.get('code')}: {rj.get('message')}"}
+            data = rj.get("data", {})
             ads = data.get("list", [])
             with connect(db_path) as conn:
                 for a in ads:

@@ -299,7 +299,7 @@ async def get_report_children(
     else:
         return {"rows": [], "child_tab": "", "error": "Invalid parent_tab"}
 
-    # Query touchpoints for children
+    # Query touchpoints AND spend for children
     from attributionops.db import sql_rows
     from attributionops.util import to_float
     from collections import defaultdict
@@ -311,36 +311,88 @@ async def get_report_children(
         if v:
             where_parts.append(f"t.{k} = :{k}")
             params[k] = v
-
     where_sql = " AND ".join(where_parts)
+
+    # Build WHERE clause for spend (uses date column directly)
+    spend_where_parts = ["s.date BETWEEN :start_date AND :end_date"]
+    spend_params: dict[str, Any] = {"start_date": start_date, "end_date": end_date}
+    for k, v in filters.items():
+        if v:
+            spend_where_parts.append(f"s.{k} = :sp_{k}")
+            spend_params[f"sp_{k}"] = v
+    spend_where_sql = " AND ".join(spend_where_parts)
 
     # Determine grouping column for children
     if child_tab == "campaign":
-        group_col = "t.campaign_id"
-        child_id_template = "t.platform || '|' || '' || '|' || t.campaign_id"
+        tp_group = "t.campaign_id"
+        sp_group = "s.campaign_id"
+        tp_id_tmpl = "t.platform || '|' || '' || '|' || t.campaign_id"
+        sp_id_tmpl = "s.platform || '|' || s.account_id || '|' || s.campaign_id"
     elif child_tab == "ad_set":
-        group_col = "t.adset_id"
-        child_id_template = "t.platform || '|' || '' || '|' || t.campaign_id || '|' || t.adset_id"
+        tp_group = "t.adset_id"
+        sp_group = "s.adset_id"
+        tp_id_tmpl = "t.platform || '|' || '' || '|' || t.campaign_id || '|' || t.adset_id"
+        sp_id_tmpl = "s.platform || '|' || s.account_id || '|' || s.campaign_id || '|' || s.adset_id"
     elif child_tab == "ad":
-        group_col = "t.ad_id"
-        child_id_template = "t.platform || '|' || '' || '|' || t.campaign_id || '|' || t.adset_id || '|' || t.ad_id"
+        tp_group = "t.ad_id"
+        sp_group = "s.ad_id"
+        tp_id_tmpl = "t.platform || '|' || '' || '|' || t.campaign_id || '|' || t.adset_id || '|' || t.ad_id"
+        sp_id_tmpl = "s.platform || '|' || s.account_id || '|' || s.campaign_id || '|' || s.adset_id || '|' || s.ad_id"
     else:
         return {"rows": [], "child_tab": child_tab}
 
     # Get touchpoint sessions grouped by child
     tp_sql = f"""
-        SELECT {group_col} as child_key,
-               {child_id_template} as child_id,
+        SELECT {tp_group} as child_key,
+               {tp_id_tmpl} as child_id,
                t.platform, t.campaign_id, t.adset_id, t.ad_id,
                COUNT(DISTINCT t.session_id) as sessions,
                COUNT(*) as touchpoint_count
         FROM touchpoints t
         WHERE {where_sql}
-          AND COALESCE({group_col}, '') <> ''
-        GROUP BY {group_col}
+          AND COALESCE({tp_group}, '') <> ''
+        GROUP BY {tp_group}
         ORDER BY touchpoint_count DESC
     """
     tp_rows = sql_rows(db_path, tp_sql, params)
+
+    # Get spend data grouped by child — this is the primary source for paid campaigns
+    sp_sql = f"""
+        SELECT {sp_group} as child_key,
+               {sp_id_tmpl} as child_id,
+               s.platform, s.campaign_id, s.adset_id, s.ad_id,
+               SUM(CAST(COALESCE(s.clicks, '0') AS REAL)) as sp_clicks,
+               SUM(CAST(COALESCE(s.cost, '0') AS REAL)) as sp_cost
+        FROM spend s
+        WHERE {spend_where_sql}
+          AND COALESCE({sp_group}, '') <> ''
+        GROUP BY {sp_group}
+        ORDER BY sp_cost DESC
+    """
+    sp_rows = sql_rows(db_path, sp_sql, spend_params)
+
+    # Merge: spend rows are primary; touchpoints add sessions
+    tp_by_key: dict[str, Any] = {str(r.get("child_key", "")): r for r in tp_rows if r.get("child_key")}
+    sp_by_key: dict[str, Any] = {str(r.get("child_key", "")): r for r in sp_rows if r.get("child_key")}
+    all_keys = list(sp_by_key.keys()) + [k for k in tp_by_key if k not in sp_by_key]
+
+    # Build unified row list
+    merged_rows = []
+    for ck in all_keys:
+        sp = sp_by_key.get(ck, {})
+        tp = tp_by_key.get(ck, {})
+        merged_rows.append({
+            "child_key": ck,
+            "child_id": sp.get("child_id") or tp.get("child_id") or ck,
+            "platform": sp.get("platform") or tp.get("platform", ""),
+            "campaign_id": sp.get("campaign_id") or tp.get("campaign_id", ""),
+            "adset_id": sp.get("adset_id") or tp.get("adset_id", ""),
+            "ad_id": sp.get("ad_id") or tp.get("ad_id", ""),
+            "sessions": int(tp.get("sessions") or 0),
+            "sp_clicks": float(sp.get("sp_clicks") or 0),
+            "sp_cost": float(sp.get("sp_cost") or 0),
+        })
+    tp_rows = merged_rows
 
     # Get attributed revenue per child
     # We need to run attribution and filter by the child dimension
@@ -401,8 +453,10 @@ async def get_report_children(
         total_revenue = round(attrib.get("total_revenue", 0.0), 2)
         cogs = round(attrib.get("cogs", 0.0), 2)
         fees = round(attrib.get("fees", 0.0), 2)
-        clicks = int(tp.get("sessions", 0))
-        cost = 0.0  # No spend data in real tracking mode
+        sp_clicks = float(tp.get("sp_clicks") or 0)
+        sp_cost = float(tp.get("sp_cost") or 0)
+        clicks = int(sp_clicks) if sp_clicks > 0 else int(tp.get("sessions", 0))
+        cost = sp_cost
         profit = round(revenue - cost - cogs - fees, 2)
         cpc = round((cost / clicks), 2) if clicks > 0 else None
         cpa = round((cost / orders), 2) if orders > 0 else None
