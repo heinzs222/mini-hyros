@@ -244,9 +244,8 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
     const compareRow = depth === 0 ? compareById.get(row.id) : undefined;
 
     return (
-      <>
+      <React.Fragment key={rowKey}>
         <tr
-          key={rowKey}
           className={`border-b border-[var(--card-border)] hover:bg-white/[0.02] transition-colors ${
             row.children_available ? "cursor-pointer" : ""
           } ${depth > 0 ? "bg-white/[0.01]" : ""}`}
@@ -319,7 +318,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
             </td>
           </tr>
         )}
-      </>
+      </React.Fragment>
     );
   };
 
