@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Request
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 # Add parent dir so we can import attributionops
@@ -178,6 +178,14 @@ def _default_dates() -> tuple[str, str]:
 
 
 # ── REST endpoints ─────────────────────────────────────────────────────────────
+
+@app.get("/")
+async def root(auth_code: str = Query(default=""), state: str = Query(default="")):
+    """Root handler — forwards TikTok OAuth callback to the platform-auth endpoint."""
+    if auth_code:
+        return RedirectResponse(url=f"/api/platform-auth/tiktok/callback?auth_code={auth_code}&state={state}")
+    return {"status": "ok", "service": "mini-hyros"}
+
 
 @app.get("/api/health")
 async def health():

@@ -96,15 +96,18 @@ async def tiktok_connect():
         return {"error": "TIKTOK_APP_ID not set in environment"}
 
     backend_url = os.environ.get("BACKEND_URL", "https://mini-hyros.onrender.com").rstrip("/")
-    redirect_uri = f"{backend_url}/api/platform-auth/tiktok/callback"
+    # Use base URL as redirect_uri — matches TikTok's registered URL.
+    # The root GET / handler forwards auth_code to /api/platform-auth/tiktok/callback.
+    redirect_uri = backend_url
 
+    from urllib.parse import quote
     auth_url = (
         f"{TIKTOK_AUTH_BASE}"
         f"?app_id={app_id}"
         f"&state=tiktok_oauth"
-        f"&redirect_uri={redirect_uri}"
+        f"&redirect_uri={quote(redirect_uri, safe='')}"
     )
-    return {"auth_url": auth_url, "app_id": app_id}
+    return {"auth_url": auth_url, "app_id": app_id, "redirect_uri": redirect_uri}
 
 
 @router.get("/tiktok/callback")
