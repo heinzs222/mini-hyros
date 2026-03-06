@@ -275,10 +275,10 @@ def _broadcast(data: dict) -> None:
 
 # ── GHL event type mapping ────────────────────────────────────────────────────
 # GHL sends a "type" or "event" field. Common ones:
-GHL_CONTACT_EVENTS = {"ContactCreate", "ContactUpdate", "contact.create", "contact.update"}
-GHL_FORM_EVENTS = {"FormSubmission", "form.submission", "form_submission"}
+GHL_CONTACT_EVENTS = {"ContactCreate", "ContactUpdate", "contact.create", "contact.update", "contact_created"}
+GHL_FORM_EVENTS = {"FormSubmission", "form.submission", "form_submission", "form_submitted"}
 GHL_BOOKING_EVENTS = {"AppointmentBooked", "appointment.booked", "appointment_booked",
-                      "CalendarBooking", "calendar.booking"}
+                      "CalendarBooking", "calendar.booking", "appointment_confirmed"}
 GHL_OPPORTUNITY_EVENTS = {"OpportunityCreate", "OpportunityStageUpdate",
                           "opportunity.create", "opportunity.status_change",
                           "opportunity_stage_update", "opportunity_created"}
