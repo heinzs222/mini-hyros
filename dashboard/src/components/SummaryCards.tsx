@@ -121,6 +121,18 @@ function Card({
 export default function SummaryCards({ totals, compareTotals, compareLabel, showCompareBanner = true }: Props) {
   const delta = totals.reported_delta;
 
+  // Compute blended metrics from available fields — works even if backend doesn't return them
+  const _aoRev = totals.all_orders_revenue ?? 0;
+  const _aoCnt = totals.all_orders_count ?? 0;
+  const _cost = totals.cost ?? 0;
+  const _clicks = totals.clicks ?? 0;
+  const _blendedRoas = totals.blended_roas ?? (_cost > 0 && _aoRev > 0 ? Math.round((_aoRev / _cost) * 100) / 100 : null);
+  const _blendedCvr = totals.blended_cvr ?? (_clicks > 0 && _aoCnt > 0 ? Math.round((_aoCnt / _clicks) * 100 * 1000) / 1000 : null);
+  const _blendedAov = totals.blended_aov ?? (_aoCnt > 0 ? Math.round((_aoRev / _aoCnt) * 100) / 100 : null);
+  const _blendedProfit = totals.blended_profit ?? (_aoRev > 0 ? Math.round((_aoRev - _cost) * 100) / 100 : null);
+  const _blendedCpa = totals.blended_cpa ?? (_aoCnt > 0 ? Math.round((_cost / _aoCnt) * 100) / 100 : null);
+  const _mer = totals.mer ?? (_cost > 0 && _aoRev > 0 ? Math.round((_aoRev / _cost) * 100) / 100 : null);
+
   return (
     <div className="space-y-2">
       {showCompareBanner && compareTotals && (
@@ -150,25 +162,25 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
           colorClass="text-emerald-400"
         />
         <Card
-          label={totals.blended_profit != null && totals.revenue === 0 ? "Profit (Blended)" : "Profit"}
-          value={formatMoney(totals.revenue === 0 && totals.blended_profit != null ? totals.blended_profit : totals.profit)}
-          sub={totals.revenue === 0 && totals.blended_profit != null
+          label={_blendedProfit != null && totals.revenue === 0 ? "Profit (Blended)" : "Profit"}
+          value={formatMoney(totals.revenue === 0 && _blendedProfit != null ? _blendedProfit : totals.profit)}
+          sub={totals.revenue === 0 && _blendedProfit != null
             ? `Stripe rev − ad spend`
             : `Margin: ${formatPercentValue(totals.margin_pct)} | Net: ${formatMoney(totals.net_profit)}`}
           delta={moneyDelta(totals.profit, compareTotals?.profit)}
           deltaClass={deltaColor((totals.profit ?? 0) - (compareTotals?.profit ?? 0))}
           icon={<TrendingDown size={14} />}
-          colorClass={profitColor(totals.revenue === 0 && totals.blended_profit != null ? totals.blended_profit : totals.profit)}
+          colorClass={profitColor(totals.revenue === 0 && _blendedProfit != null ? _blendedProfit : totals.profit)}
         />
         <Card
           label={totals.roas ? "ROAS" : "ROAS (Blended)"}
-          value={formatRatio(totals.roas || totals.blended_roas)}
-          sub={`MER: ${formatRatio(totals.mer)}`}
+          value={formatRatio(totals.roas || _blendedRoas)}
+          sub={`MER: ${formatRatio(_mer)}`}
           delta={ratioDelta(totals.roas, compareTotals?.roas)}
           deltaClass={deltaColor((totals.roas ?? 0) - (compareTotals?.roas ?? 0))}
           icon={<Target size={14} />}
           colorClass={
-            (totals.roas || totals.blended_roas || 0) >= 1
+            (totals.roas || _blendedRoas || 0) >= 1
               ? "text-emerald-400"
               : "text-red-400"
           }
@@ -183,22 +195,22 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
         />
         <Card
           label={totals.orders > 0 ? "Orders" : "Orders (Stripe)"}
-          value={formatNumber(totals.orders > 0 ? totals.orders : (totals.all_orders_count ?? 0))}
+          value={formatNumber(totals.orders > 0 ? totals.orders : _aoCnt)}
           sub={totals.orders > 0
             ? `AOV: ${formatMoney(totals.aov)}`
-            : `AOV: ${formatMoney(totals.blended_aov)} · CPA: ${formatMoney(totals.blended_cpa)}`}
+            : `AOV: ${formatMoney(_blendedAov)} · CPA: ${formatMoney(_blendedCpa)}`}
           delta={numberDelta(totals.orders, compareTotals?.orders)}
           deltaClass={deltaColor((totals.orders ?? 0) - (compareTotals?.orders ?? 0))}
           icon={<ShoppingCart size={14} />}
         />
         <Card
           label={totals.cvr ? "CVR" : "CVR (Blended)"}
-          value={formatPercentValue(totals.cvr || totals.blended_cvr)}
-          sub={totals.cvr ? `RPC: ${formatMoney(totals.rpc)}` : `${formatNumber(totals.all_orders_count ?? 0)} orders / ${formatNumber(totals.clicks)} clicks`}
+          value={formatPercentValue(totals.cvr || _blendedCvr)}
+          sub={totals.cvr ? `RPC: ${formatMoney(totals.rpc)}` : `${formatNumber(_aoCnt)} orders / ${formatNumber(_clicks)} clicks`}
           delta={percentPointDelta(totals.cvr, compareTotals?.cvr)}
           deltaClass={deltaColor((totals.cvr ?? 0) - (compareTotals?.cvr ?? 0))}
           icon={<Percent size={14} />}
-          colorClass={(totals.cvr || totals.blended_cvr || 0) >= 1 ? "text-emerald-400" : "text-yellow-400"}
+          colorClass={(totals.cvr || _blendedCvr || 0) >= 1 ? "text-emerald-400" : "text-yellow-400"}
         />
         <Card
           label="Sync Delta"
