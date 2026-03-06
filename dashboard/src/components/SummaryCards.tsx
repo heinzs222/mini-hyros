@@ -36,6 +36,11 @@ type SummaryTotals = {
   reported_delta: number | null;
   all_orders_count?: number;
   all_orders_revenue?: number;
+  blended_roas?: number | null;
+  blended_cvr?: number | null;
+  blended_aov?: number | null;
+  blended_profit?: number | null;
+  blended_cpa?: number | null;
 };
 
 interface Props {
@@ -134,34 +139,36 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
           icon={<DollarSign size={14} />}
         />
         <Card
-          label="Revenue (Attr.)"
-          value={formatMoney(totals.revenue)}
-          sub={totals.all_orders_revenue != null && totals.all_orders_revenue > 0
+          label={totals.revenue > 0 ? "Revenue (Attr.)" : "Revenue (Stripe)"}
+          value={formatMoney(totals.revenue > 0 ? totals.revenue : (totals.all_orders_revenue ?? 0))}
+          sub={totals.revenue > 0
             ? `All Orders: ${formatMoney(totals.all_orders_revenue)} (${totals.all_orders_count ?? 0})`
-            : `Total: ${formatMoney(totals.total_revenue)}`}
-          delta={moneyDelta(totals.revenue, compareTotals?.revenue)}
+            : `${totals.all_orders_count ?? 0} orders · attr: $0`}
+          delta={moneyDelta(totals.revenue > 0 ? totals.revenue : (totals.all_orders_revenue ?? 0), compareTotals?.revenue)}
           deltaClass={deltaColor((totals.revenue ?? 0) - (compareTotals?.revenue ?? 0))}
           icon={<TrendingUp size={14} />}
           colorClass="text-emerald-400"
         />
         <Card
-          label="Profit"
-          value={formatMoney(totals.profit)}
-          sub={`Margin: ${formatPercentValue(totals.margin_pct)} | Net: ${formatMoney(totals.net_profit)}`}
+          label={totals.blended_profit != null && totals.revenue === 0 ? "Profit (Blended)" : "Profit"}
+          value={formatMoney(totals.revenue === 0 && totals.blended_profit != null ? totals.blended_profit : totals.profit)}
+          sub={totals.revenue === 0 && totals.blended_profit != null
+            ? `Stripe rev − ad spend`
+            : `Margin: ${formatPercentValue(totals.margin_pct)} | Net: ${formatMoney(totals.net_profit)}`}
           delta={moneyDelta(totals.profit, compareTotals?.profit)}
           deltaClass={deltaColor((totals.profit ?? 0) - (compareTotals?.profit ?? 0))}
           icon={<TrendingDown size={14} />}
-          colorClass={profitColor(totals.profit)}
+          colorClass={profitColor(totals.revenue === 0 && totals.blended_profit != null ? totals.blended_profit : totals.profit)}
         />
         <Card
-          label="ROAS"
-          value={formatRatio(totals.roas)}
+          label={totals.roas ? "ROAS" : "ROAS (Blended)"}
+          value={formatRatio(totals.roas || totals.blended_roas)}
           sub={`MER: ${formatRatio(totals.mer)}`}
           delta={ratioDelta(totals.roas, compareTotals?.roas)}
           deltaClass={deltaColor((totals.roas ?? 0) - (compareTotals?.roas ?? 0))}
           icon={<Target size={14} />}
           colorClass={
-            totals.roas != null && totals.roas >= 1
+            (totals.roas || totals.blended_roas || 0) >= 1
               ? "text-emerald-400"
               : "text-red-400"
           }
@@ -175,21 +182,23 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
           icon={<MousePointerClick size={14} />}
         />
         <Card
-          label="Orders"
-          value={formatNumber(totals.orders)}
-          sub={`AOV: ${formatMoney(totals.aov)}`}
+          label={totals.orders > 0 ? "Orders" : "Orders (Stripe)"}
+          value={formatNumber(totals.orders > 0 ? totals.orders : (totals.all_orders_count ?? 0))}
+          sub={totals.orders > 0
+            ? `AOV: ${formatMoney(totals.aov)}`
+            : `AOV: ${formatMoney(totals.blended_aov)} · CPA: ${formatMoney(totals.blended_cpa)}`}
           delta={numberDelta(totals.orders, compareTotals?.orders)}
           deltaClass={deltaColor((totals.orders ?? 0) - (compareTotals?.orders ?? 0))}
           icon={<ShoppingCart size={14} />}
         />
         <Card
-          label="CVR"
-          value={formatPercentValue(totals.cvr)}
-          sub={`RPC: ${formatMoney(totals.rpc)}`}
+          label={totals.cvr ? "CVR" : "CVR (Blended)"}
+          value={formatPercentValue(totals.cvr || totals.blended_cvr)}
+          sub={totals.cvr ? `RPC: ${formatMoney(totals.rpc)}` : `${formatNumber(totals.all_orders_count ?? 0)} orders / ${formatNumber(totals.clicks)} clicks`}
           delta={percentPointDelta(totals.cvr, compareTotals?.cvr)}
           deltaClass={deltaColor((totals.cvr ?? 0) - (compareTotals?.cvr ?? 0))}
           icon={<Percent size={14} />}
-          colorClass={totals.cvr != null && totals.cvr >= 2 ? "text-emerald-400" : "text-yellow-400"}
+          colorClass={(totals.cvr || totals.blended_cvr || 0) >= 1 ? "text-emerald-400" : "text-yellow-400"}
         />
         <Card
           label="Sync Delta"

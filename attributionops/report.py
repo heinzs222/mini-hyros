@@ -852,10 +852,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         fixed_cost_allocation=None,
     )
 
-    roas = safe_div(float(totals["revenue"]), float(totals["cost"]))
-    mer = safe_div(float(totals["total_revenue"]), float(totals["cost"]))
+    total_cost = float(totals["cost"])
+    roas = safe_div(float(totals["revenue"]), total_cost)
     conversions_count = float(totals["_orders"])
-    cpa = safe_div(float(totals["cost"]), conversions_count) if conversions_count else None
+    cpa = safe_div(total_cost, conversions_count) if conversions_count else None
 
     # Total all-orders revenue from DB (regardless of attribution)
     try:
@@ -871,6 +871,15 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         all_orders_count = 0
         all_orders_revenue = 0.0
 
+    total_clicks = int(totals["clicks"])
+    # MER = total (Stripe) revenue / total ad spend — always blended
+    mer = safe_div(all_orders_revenue, total_cost)
+    blended_roas = safe_div(all_orders_revenue, total_cost)
+    blended_cvr = safe_div(all_orders_count, total_clicks)
+    blended_aov = safe_div(all_orders_revenue, all_orders_count) if all_orders_count else None
+    blended_profit = round_money(all_orders_revenue - total_cost) if all_orders_revenue else None
+    blended_cpa = safe_div(total_cost, all_orders_count) if all_orders_count else None
+
     summary_totals = {
         **totals_metrics,
         "roas": round_money(roas) if roas is not None else None,
@@ -879,6 +888,11 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         "cpa": round_money(cpa) if cpa is not None else None,
         "all_orders_count": all_orders_count,
         "all_orders_revenue": round_money(all_orders_revenue),
+        "blended_roas": round(blended_roas, 2) if blended_roas is not None else None,
+        "blended_cvr": round(blended_cvr * 100.0, 3) if blended_cvr is not None else None,
+        "blended_aov": round_money(blended_aov) if blended_aov is not None else None,
+        "blended_profit": blended_profit,
+        "blended_cpa": round_money(blended_cpa) if blended_cpa is not None else None,
     }
 
     platform_comparison = _build_platform_comparison(
