@@ -131,7 +131,9 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
   const _blendedAov = totals.blended_aov ?? (_aoCnt > 0 ? Math.round((_aoRev / _aoCnt) * 100) / 100 : null);
   const _blendedProfit = totals.blended_profit ?? (_aoRev > 0 ? Math.round((_aoRev - _cost) * 100) / 100 : null);
   const _blendedCpa = totals.blended_cpa ?? (_aoCnt > 0 ? Math.round((_cost / _aoCnt) * 100) / 100 : null);
-  const _mer = totals.mer ?? (_cost > 0 && _aoRev > 0 ? Math.round((_aoRev / _cost) * 100) / 100 : null);
+  const _mer = (totals.mer != null && totals.mer > 0)
+    ? totals.mer
+    : (_cost > 0 && _aoRev > 0 ? Math.round((_aoRev / _cost) * 100) / 100 : null);
 
   return (
     <div className="space-y-2">
