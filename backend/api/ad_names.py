@@ -52,6 +52,7 @@ def _ensure_table(db_path: str) -> None:
             "ALTER TABLE ad_names ADD COLUMN thumbnail_url TEXT",
             "ALTER TABLE ad_names ADD COLUMN creative_type TEXT",
             "ALTER TABLE ad_names ADD COLUMN video_id TEXT",
+            "ALTER TABLE ad_names ADD COLUMN creative_id TEXT",
         ]:
             try:
                 conn.execute(col_sql)
@@ -272,6 +273,52 @@ async def get_video_url(video_id: str = Query(...)):
         return {"video_url": "", "error": str(e)}
 
 
+# ── Thumbnail proxy ──────────────────────────────────────────────────────────
+
+@router.get("/thumbnail")
+async def get_thumbnail(ad_id: str = Query(...), platform: str = Query(default="meta")):
+    """Return a fresh thumbnail URL for an ad by re-fetching from the platform API.
+    Falls back to the stored URL if re-fetch fails."""
+    db_path = _db()
+    _ensure_table(db_path)
+    rows = sql_rows(
+        db_path,
+        "SELECT thumbnail_url, creative_id, creative_type FROM ad_names WHERE platform=? AND entity_type='ad' AND entity_id=?",
+        (platform, ad_id),
+    )
+    if not rows:
+        return {"thumbnail_url": "", "error": "not found"}
+
+    row = rows[0]
+    stored_url = str(row.get("thumbnail_url") or "")
+    creative_id = str(row.get("creative_id") or "")
+
+    # Try to refresh from Meta API using creative_id
+    access_token = os.environ.get("META_ACCESS_TOKEN", "")
+    if platform == "meta" and creative_id and access_token:
+        api_version = _meta_api_version()
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"https://graph.facebook.com/{api_version}/{creative_id}",
+                    params={"access_token": access_token, "fields": "thumbnail_url,image_url"},
+                )
+                data = resp.json()
+                fresh_url = data.get("image_url") or data.get("thumbnail_url") or ""
+                if fresh_url:
+                    with connect(db_path) as conn:
+                        conn.execute(
+                            "UPDATE ad_names SET thumbnail_url=? WHERE platform='meta' AND entity_type='ad' AND entity_id=?",
+                            (fresh_url, ad_id),
+                        )
+                        conn.commit()
+                    return {"thumbnail_url": fresh_url, "creative_id": creative_id, "refreshed": True}
+        except Exception:
+            pass
+
+    return {"thumbnail_url": stored_url, "creative_id": creative_id, "refreshed": False}
+
+
 # ── API Sync ─────────────────────────────────────────────────────────────────
 
 @router.post("/sync")
@@ -475,15 +522,15 @@ async def _sync_meta() -> dict:
                     if ad_id and cr_id:
                         ad_creative_map[ad_id] = cr_id
 
-                # Upsert thumbnail_url + creative_type for each ad
+                # Upsert thumbnail_url + creative_type + creative_id for each ad
                 with connect(db_path) as conn:
                     for ad_id, cr_id in ad_creative_map.items():
                         if cr_id in creative_thumb:
                             url, ctype, vid_id = creative_thumb[cr_id]
                             conn.execute(
-                                """UPDATE ad_names SET thumbnail_url=?, creative_type=?, video_id=?
+                                """UPDATE ad_names SET thumbnail_url=?, creative_type=?, video_id=?, creative_id=?
                                    WHERE platform='meta' AND entity_type='ad' AND entity_id=?""",
-                                (url, ctype, vid_id or None, ad_id),
+                                (url, ctype, vid_id or None, cr_id, ad_id),
                             )
                     conn.commit()
             except Exception:

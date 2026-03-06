@@ -21,7 +21,7 @@ export function clearAuthToken() {
   window.localStorage.removeItem(AUTH_TOKEN_KEY);
 }
 
-async function apiFetch(input: string, init: RequestInit = {}) {
+export async function apiFetch(input: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers || {});
   const token = readAuthToken();
   if (token) {

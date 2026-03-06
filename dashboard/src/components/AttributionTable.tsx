@@ -2,7 +2,7 @@
 
 import React from "react";
 import { formatMoney, formatNumber, formatPercentValue, formatRatio, profitColor } from "@/lib/utils";
-import { fetchChildren } from "@/lib/api";
+import { fetchChildren, apiFetch } from "@/lib/api";
 import { ArrowUpDown, ChevronDown, ChevronRight, Loader2, Play, Image as ImageIcon, X, ExternalLink } from "lucide-react";
 import { useState, useCallback, useEffect, useRef } from "react";
 
@@ -296,7 +296,24 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
                   title="Preview creative"
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={row.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                  <img
+                    src={row.thumbnail_url}
+                    alt=""
+                    className="w-full h-full object-cover"
+                    onError={async (ev) => {
+                      const img = ev.currentTarget;
+                      if (img.dataset.refreshed) return;
+                      img.dataset.refreshed = "1";
+                      const parts = row.id.split("|");
+                      const ad_id = parts[parts.length - 1];
+                      try {
+                        const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+                        const r = await apiFetch(`${API_BASE}/api/ad-names/thumbnail?ad_id=${ad_id}`);
+                        const d = await r.json();
+                        if (d.thumbnail_url) img.src = d.thumbnail_url;
+                      } catch {}
+                    }}
+                  />
                   <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
                     {row.creative_type === "video" ? <Play size={10} className="text-white" /> : <ImageIcon size={10} className="text-white" />}
                   </div>
