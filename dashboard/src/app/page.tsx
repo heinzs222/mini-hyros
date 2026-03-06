@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend } from "@/lib/api";
+import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncAdNames } from "@/lib/api";
 import { daysAgo } from "@/lib/utils";
 import SummaryCards from "@/components/SummaryCards";
 import PerformanceChart from "@/components/PerformanceChart";
@@ -102,6 +102,8 @@ export default function DashboardPage() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [syncingSpend, setSyncingSpend] = useState(false);
   const [lastAutoSyncAt, setLastAutoSyncAt] = useState("");
+  const [syncErrors, setSyncErrors] = useState<string[]>([]);
+  const [platformFilter, setPlatformFilter] = useState("all");
   const [mainTab, setMainTab] = useState("attribution");
   const wsRef = useRef<WebSocket | null>(null);
   const refreshTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -199,17 +201,18 @@ export default function DashboardPage() {
     setSyncingSpend(true);
 
     try {
-      const result = await syncSpend({
-        platform: "all",
-        start_date: startDate,
-        end_date: endDate,
-      });
-      if (!Array.isArray(result?.errors) || result.errors.length === 0) {
-        setLastAutoSyncAt(new Date().toISOString());
-      }
-      return result;
+      const [spendResult, namesResult] = await Promise.allSettled([
+        syncSpend({ platform: "all", start_date: startDate, end_date: endDate }),
+        syncAdNames("all"),
+      ]);
+      const errors: string[] = [];
+      if (spendResult.status === "rejected") errors.push("Spend: " + spendResult.reason?.message);
+      if (namesResult.status === "rejected") errors.push("Names: " + namesResult.reason?.message);
+      setSyncErrors(errors);
+      setLastAutoSyncAt(new Date().toISOString());
+      return spendResult.status === "fulfilled" ? spendResult.value : null;
     } catch (err) {
-      console.warn("Auto spend sync failed:", err);
+      console.warn("Auto sync failed:", err);
       return null;
     } finally {
       syncingSpendRef.current = false;
@@ -342,81 +345,50 @@ export default function DashboardPage() {
 
           {/* Controls */}
           <div className="ml-auto flex flex-wrap items-end gap-2">
-            <div className="min-w-[290px]">
-              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Primary Range</div>
-              <div className="grid grid-cols-2 gap-2">
-                <input
-                  type="date"
-                  value={primaryStartDate}
-                  onChange={(e) => setPrimaryStartDate(e.target.value)}
-                  className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-                  aria-label="Primary start date"
+            {/* Date range */}
+            <div className="flex items-end gap-1.5">
+              <div>
+                <div className="text-[10px] text-gray-500 mb-1">From</div>
+                <input type="date" value={primaryStartDate} onChange={(e) => setPrimaryStartDate(e.target.value)}
+                  className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500 w-[130px]"
                 />
-                <input
-                  type="date"
-                  value={primaryEndDate}
-                  onChange={(e) => setPrimaryEndDate(e.target.value)}
-                  className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-                  aria-label="Primary end date"
+              </div>
+              <div>
+                <div className="text-[10px] text-gray-500 mb-1">To</div>
+                <input type="date" value={primaryEndDate} onChange={(e) => setPrimaryEndDate(e.target.value)}
+                  className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500 w-[130px]"
                 />
               </div>
             </div>
 
-            <div className="min-w-[170px]">
-              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Primary Attribution</div>
-              <select
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+            {/* Attribution model */}
+            <div>
+              <div className="text-[10px] text-gray-500 mb-1">Model</div>
+              <select value={model} onChange={(e) => setModel(e.target.value)}
+                className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500 w-[130px]"
               >
-                {MODELS.map((m) => (
-                  <option key={m.value} value={m.value}>{m.label}</option>
-                ))}
+                {MODELS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
               </select>
             </div>
 
-            <div className="min-w-[140px]">
-              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Date Basis</div>
-              <select
-                value={useClickDate ? "click" : "conversion"}
-                onChange={(e) => setUseClickDate(e.target.value === "click")}
-                className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-              >
-                <option value="conversion">Conversion Date</option>
-                <option value="click">Click Date</option>
-              </select>
-            </div>
-
+            {/* Sync + Refresh */}
             <button
-              onClick={async () => {
-                await syncSpendData();
-                await loadReport();
-              }}
-              disabled={loading}
-              className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-xs font-medium transition-colors disabled:opacity-50 h-[34px]"
+              onClick={async () => { await syncSpendData(); await loadReport(); }}
+              disabled={syncingSpend}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold transition-colors disabled:opacity-50 h-[34px]"
             >
-              <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
-              Sync + Refresh
+              <RefreshCw size={12} className={syncingSpend ? "animate-spin" : ""} />
+              {syncingSpend ? "Syncing..." : "Sync"}
             </button>
 
             {authEnabled && (
-              <button
-                onClick={handleLogout}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-200 text-xs font-medium transition-colors h-[34px]"
+              <button onClick={handleLogout}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-400 text-xs font-medium transition-colors h-[34px]"
                 title={authUser ? `Logout ${authUser}` : "Logout"}
               >
                 <LogOut size={12} />
-                Logout
               </button>
             )}
-
-            <div className="text-[10px] text-gray-500 pl-1">
-              {syncingSpend
-                ? "Syncing spend..."
-                : lastAutoSyncAt
-                ? `Last spend sync: ${new Date(lastAutoSyncAt).toLocaleTimeString()}`
-                : "Auto-sync active (every 10m)"}
-            </div>
           </div>
         </div>
       </header>
@@ -463,6 +435,24 @@ export default function DashboardPage() {
         {mainTab === "cohort" && <CohortPanel />}
         {mainTab === "capi" && <CapiPanel />}
         {mainTab === "names" && <AdNamesPanel />}
+
+        {/* Sync status bar */}
+        {mainTab === "attribution" && (
+          <div className="flex items-center gap-3 text-[11px]">
+            <span className="text-gray-600">
+              {syncingSpend ? (
+                <span className="text-brand-400 flex items-center gap-1"><RefreshCw size={10} className="animate-spin" /> Syncing all platforms...</span>
+              ) : lastAutoSyncAt ? (
+                <span className="text-gray-500">Last sync: {new Date(lastAutoSyncAt).toLocaleTimeString()} · Auto every 10m</span>
+              ) : (
+                <span className="text-gray-600">Syncing on load...</span>
+              )}
+            </span>
+            {syncErrors.length > 0 && (
+              <span className="text-yellow-500 text-[10px]">⚠ {syncErrors.join(" | ")}</span>
+            )}
+          </div>
+        )}
 
         {mainTab === "attribution" && report && (
           <>
@@ -611,6 +601,8 @@ export default function DashboardPage() {
               model={model}
               lookbackDays={30}
               useClickDate={useClickDate}
+              platformFilter={platformFilter}
+              onPlatformFilterChange={setPlatformFilter}
             />
 
             {/* Top Winners & Losers */}

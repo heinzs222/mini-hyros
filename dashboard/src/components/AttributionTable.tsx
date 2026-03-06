@@ -56,6 +56,19 @@ interface Props {
   useClickDate?: boolean;
   compareRows?: TableRow[];
   compareLabel?: string;
+  platformFilter?: string;
+  onPlatformFilterChange?: (p: string) => void;
+}
+
+const PLATFORM_META: Record<string, { label: string; dot: string }> = {
+  meta:    { label: "Meta",    dot: "bg-blue-500" },
+  tiktok:  { label: "TikTok", dot: "bg-pink-500" },
+  google:  { label: "Google", dot: "bg-yellow-400" },
+};
+
+function platformFromId(id: string): string {
+  const parts = id.split("|");
+  return parts.length > 1 ? parts[0].toLowerCase() : "";
 }
 
 const TABS = [
@@ -123,7 +136,7 @@ function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; curr
   return null;
 }
 
-export default function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "" }: Props) {
+export default function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "", platformFilter = "all", onPlatformFilterChange }: Props) {
   const [sortKey, setSortKey] = useState("profit");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [search, setSearch] = useState("");
@@ -139,10 +152,13 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   const dimensionCol = columns.find((c) => c.type === "dimension");
   const compareById = new Map(compareRows.map((r) => [r.id, r]));
 
-  const filtered = rows.filter((r) =>
-    r.name.toLowerCase().includes(search.toLowerCase()) ||
-    r.id.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = rows.filter((r) => {
+    const matchSearch = r.name.toLowerCase().includes(search.toLowerCase()) || r.id.toLowerCase().includes(search.toLowerCase());
+    const matchPlatform = platformFilter === "all" || platformFromId(r.id) === platformFilter;
+    return matchSearch && matchPlatform;
+  });
+
+  const platformsInData = Array.from(new Set(rows.map((r) => platformFromId(r.id)).filter(Boolean)));
 
   const sorted = [...filtered].sort((a, b) => {
     const av = (a.metrics as any)[sortKey] ?? 0;
@@ -324,6 +340,11 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
                   <ImageIcon size={10} className="text-gray-700" />
                 </span>
               )}
+              {depth === 0 && (() => {
+                const plat = platformFromId(row.id);
+                const pm = plat ? PLATFORM_META[plat] : null;
+                return pm ? <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${pm.dot}`} title={pm.label} /> : null;
+              })()}
               <span className="text-gray-200 truncate max-w-[200px]" title={row.raw_id ? `${row.name} (ID: ${row.raw_id})` : row.name}>
                 {row.name}
               </span>
@@ -450,6 +471,36 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
             {t.label}
           </button>
         ))}
+
+        {/* Platform filter pills — only shown when data has multiple platforms */}
+        {onPlatformFilterChange && platformsInData.length > 0 && (
+          <div className="flex items-center gap-1 ml-3 pl-3 border-l border-[var(--card-border)]">
+            <button
+              onClick={() => onPlatformFilterChange("all")}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors whitespace-nowrap ${
+                platformFilter === "all" ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"
+              }`}
+            >
+              All
+            </button>
+            {platformsInData.map((p) => {
+              const meta = PLATFORM_META[p] || { label: p, dot: "bg-gray-400" };
+              return (
+                <button
+                  key={p}
+                  onClick={() => onPlatformFilterChange(platformFilter === p ? "all" : p)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors whitespace-nowrap ${
+                    platformFilter === p ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"
+                  }`}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${meta.dot}`} />
+                  {meta.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div className="ml-auto">
           <input
             type="text"
