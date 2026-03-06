@@ -1,7 +1,7 @@
 "use client";
 
-import { fetchAdNames, upsertAdName, deleteAdName, syncAdNames } from "@/lib/api";
-import { RefreshCw, Plus, Trash2, Download, Edit2, Check, X } from "lucide-react";
+import { fetchAdNames, upsertAdName, deleteAdName, syncAdNames, fetchTikTokStatus, fetchTikTokConnectUrl, refreshTikTokToken } from "@/lib/api";
+import { RefreshCw, Plus, Trash2, Download, Edit2, Check, X, ExternalLink, Zap } from "lucide-react";
 import { useEffect, useState, useCallback } from "react";
 
 interface NameRow {
@@ -35,6 +35,38 @@ export default function AdNamesPanel() {
     name: "",
     parent_id: "",
   });
+  const [tiktokStatus, setTiktokStatus] = useState<any>(null);
+  const [tiktokConnecting, setTiktokConnecting] = useState(false);
+
+  const loadTikTokStatus = useCallback(async () => {
+    try {
+      const s = await fetchTikTokStatus();
+      setTiktokStatus(s);
+    } catch {}
+  }, []);
+
+  useEffect(() => { loadTikTokStatus(); }, [loadTikTokStatus]);
+
+  const handleTikTokConnect = async () => {
+    setTiktokConnecting(true);
+    try {
+      const data = await fetchTikTokConnectUrl();
+      if (data.auth_url) window.open(data.auth_url, "_blank", "width=600,height=700");
+      else alert(data.error || "Could not get TikTok auth URL");
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setTiktokConnecting(false);
+    }
+  };
+
+  const handleTikTokRefresh = async () => {
+    try {
+      const r = await refreshTikTokToken();
+      alert(r.refreshed ? "Token refreshed!" : (r.error || "Refresh failed"));
+      await loadTikTokStatus();
+    } catch (e: any) { alert(e.message); }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -171,6 +203,37 @@ export default function AdNamesPanel() {
                 {r.error && ` — ${r.error}`}
               </span>
             ))}
+          </div>
+        )}
+
+        {/* TikTok OAuth connection status */}
+        {tiktokStatus && (
+          <div className={`flex items-center justify-between rounded-lg px-3 py-2 mb-3 text-xs ${
+            tiktokStatus.connected ? "bg-emerald-500/10 border border-emerald-500/20" : "bg-yellow-500/10 border border-yellow-500/20"
+          }`}>
+            <div className="flex items-center gap-2">
+              <span className={`w-1.5 h-1.5 rounded-full ${tiktokStatus.connected ? "bg-emerald-400" : "bg-yellow-400"}`} />
+              <span className={tiktokStatus.connected ? "text-emerald-300" : "text-yellow-300"}>
+                TikTok: {tiktokStatus.connected ? `Connected (${tiktokStatus.source})` : "Not connected"}
+              </span>
+              {tiktokStatus.advertiser_id && (
+                <span className="text-gray-500">· {tiktokStatus.advertiser_id}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5">
+              {tiktokStatus.connected && tiktokStatus.has_refresh_token && (
+                <button onClick={handleTikTokRefresh} className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 text-gray-400 text-[10px] transition-colors">
+                  <RefreshCw size={9} /> Refresh
+                </button>
+              )}
+              <button
+                onClick={handleTikTokConnect}
+                disabled={tiktokConnecting}
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-pink-500/20 hover:bg-pink-500/30 text-pink-300 text-[10px] transition-colors disabled:opacity-50"
+              >
+                <Zap size={9} /> {tiktokStatus.connected ? "Re-authorize" : "Connect TikTok"}
+              </button>
+            </div>
           </div>
         )}
 

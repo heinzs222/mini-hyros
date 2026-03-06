@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from attributionops.config import default_db_path
 from attributionops.db import connect
+from api.platform_auth import get_tiktok_token, get_tiktok_advertiser_id
 
 router = APIRouter()
 UTC = timezone.utc
@@ -585,16 +586,16 @@ def _write_tiktok_spend_rows(
 
 
 async def _sync_tiktok_spend(start_date: str, end_date: str) -> dict[str, Any]:
-    access_token = os.environ.get("TIKTOK_ACCESS_TOKEN", "").strip()
-    advertiser_id = os.environ.get("TIKTOK_ADVERTISER_ID", "").strip()
+    db_path = _db()
+    access_token = get_tiktok_token(db_path).strip()
+    advertiser_id = get_tiktok_advertiser_id(db_path).strip()
 
     if not access_token or not advertiser_id:
         return {
             "synced": 0,
-            "error": "TIKTOK_ACCESS_TOKEN and TIKTOK_ADVERTISER_ID are required",
+            "error": "TikTok not connected. Visit /api/platform-auth/tiktok/connect to authorize.",
         }
 
-    db_path = _db()
     _ensure_spend_table(db_path)
 
     try:

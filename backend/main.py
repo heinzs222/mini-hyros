@@ -45,6 +45,7 @@ from api.email_sms import router as email_sms_router
 from api.ai_recommendations import router as ai_router
 from api.ad_names import router as ad_names_router, get_name_map, get_thumbnails_map
 from api.spend_sync import router as spend_sync_router
+from api.platform_auth import router as platform_auth_router
 from api.auth import (
     router as auth_router,
     is_auth_enabled,
@@ -132,6 +133,7 @@ app.include_router(email_sms_router, prefix="/api/email-sms", tags=["email-sms"]
 app.include_router(ai_router, prefix="/api/ai", tags=["ai"])
 app.include_router(ad_names_router, prefix="/api/ad-names", tags=["ad-names"])
 app.include_router(spend_sync_router, prefix="/api/spend", tags=["spend"])
+app.include_router(platform_auth_router, prefix="/api/platform-auth", tags=["platform-auth"])
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 
 
@@ -144,6 +146,8 @@ def _is_public_path(path: str) -> bool:
     if p.startswith("/api/webhooks"):
         return True
     if p.startswith("/t/"):
+        return True
+    if p.startswith("/api/platform-auth") and p.endswith("/callback"):
         return True
     return False
 

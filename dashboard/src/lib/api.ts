@@ -313,6 +313,25 @@ export async function syncAdNames(platform = "all") {
   return res.json();
 }
 
+// ── Platform Auth ─────────────────────────────────────────────────────────────
+export async function fetchTikTokStatus() {
+  const res = await apiFetch(`${API_BASE}/api/platform-auth/tiktok/status`);
+  if (!res.ok) throw new Error(`TikTok status failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchTikTokConnectUrl() {
+  const res = await apiFetch(`${API_BASE}/api/platform-auth/tiktok/connect`);
+  if (!res.ok) throw new Error(`TikTok connect failed: ${res.status}`);
+  return res.json();
+}
+
+export async function refreshTikTokToken() {
+  const res = await apiFetch(`${API_BASE}/api/platform-auth/tiktok/refresh`, { method: "POST" });
+  if (!res.ok) throw new Error(`TikTok refresh failed: ${res.status}`);
+  return res.json();
+}
+
 // ── WebSocket ────────────────────────────────────────────────────────────────
 export function createWebSocket(onMessage: (data: any) => void): WebSocket | null {
   if (typeof window === "undefined") return null;

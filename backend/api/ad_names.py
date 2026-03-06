@@ -655,11 +655,13 @@ async def _sync_google() -> dict:
 
 async def _sync_tiktok() -> dict:
     """Fetch campaign/adgroup/ad names from TikTok Marketing API."""
-    access_token = os.environ.get("TIKTOK_ACCESS_TOKEN", "")
-    advertiser_id = os.environ.get("TIKTOK_ADVERTISER_ID", "")
+    from api.platform_auth import get_tiktok_token, get_tiktok_advertiser_id
+    db_path_for_token = _db()
+    access_token = get_tiktok_token(db_path_for_token)
+    advertiser_id = get_tiktok_advertiser_id(db_path_for_token)
 
     if not access_token or not advertiser_id:
-        return {"synced": 0, "error": "TIKTOK_ACCESS_TOKEN and TIKTOK_ADVERTISER_ID required"}
+        return {"synced": 0, "error": "TikTok not connected. Visit /api/platform-auth/tiktok/connect to authorize."}
 
     db_path = _db()
     _ensure_table(db_path)
