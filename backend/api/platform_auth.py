@@ -101,11 +101,13 @@ async def tiktok_connect():
     redirect_uri = backend_url
 
     from urllib.parse import quote
+    scopes = "campaign.read,adgroup.read,ad.read,report.read"
     auth_url = (
         f"{TIKTOK_AUTH_BASE}"
         f"?app_id={app_id}"
         f"&state=tiktok_oauth"
         f"&redirect_uri={quote(redirect_uri, safe='')}"
+        f"&scope={quote(scopes, safe='')}"
     )
     return {"auth_url": auth_url, "app_id": app_id, "redirect_uri": redirect_uri}
 
