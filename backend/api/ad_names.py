@@ -702,9 +702,9 @@ async def _sync_google() -> dict:
 
 async def _sync_tiktok() -> dict:
     """Fetch campaign/adgroup/ad names from TikTok Marketing API."""
-    from api.platform_auth import get_tiktok_token, get_tiktok_advertiser_id
+    from api.platform_auth import get_or_refresh_tiktok_token, get_tiktok_advertiser_id
     db_path_for_token = _db()
-    access_token = get_tiktok_token(db_path_for_token)
+    access_token = await get_or_refresh_tiktok_token(db_path_for_token)
     advertiser_id = get_tiktok_advertiser_id(db_path_for_token)
 
     if not access_token or not advertiser_id:

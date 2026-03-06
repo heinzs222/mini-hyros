@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +61,58 @@ def get_tiktok_token(db_path: str) -> str:
     rows = sql_rows(db_path, "SELECT access_token FROM platform_tokens WHERE platform='tiktok'")
     if rows and rows[0].get("access_token"):
         return str(rows[0]["access_token"])
+    return os.environ.get("TIKTOK_ACCESS_TOKEN", "")
+
+
+async def get_or_refresh_tiktok_token(db_path: str) -> str:
+    """Return a valid TikTok access token, auto-refreshing if expired or expiring soon.
+    Falls back to env token if no DB token exists. Re-auth is only needed once per year."""
+    _ensure_tokens_table(db_path)
+    rows = sql_rows(
+        db_path,
+        "SELECT access_token, refresh_token, advertiser_id, expires_at FROM platform_tokens WHERE platform='tiktok'",
+    )
+
+    if rows and rows[0].get("access_token"):
+        r = rows[0]
+        access_token = str(r["access_token"])
+        refresh_token = str(r.get("refresh_token") or "")
+        advertiser_id = str(r.get("advertiser_id") or os.environ.get("TIKTOK_ADVERTISER_ID", ""))
+        expires_at_str = str(r.get("expires_at") or "")
+
+        # Check if token is expired or expiring within the next hour
+        should_refresh = False
+        if expires_at_str:
+            try:
+                expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+                should_refresh = expires_at <= datetime.now(UTC) + timedelta(hours=1)
+            except Exception:
+                pass
+
+        if should_refresh and refresh_token:
+            app_id = os.environ.get("TIKTOK_APP_ID", "").strip()
+            secret = os.environ.get("TIKTOK_SECRET", "").strip()
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    resp = await client.post(
+                        TIKTOK_REFRESH_URL,
+                        json={"app_id": app_id, "secret": secret, "refresh_token": refresh_token},
+                        headers={"Content-Type": "application/json"},
+                    )
+                    data = resp.json()
+                if int(data.get("code") or 0) == 0:
+                    token_data = data.get("data") or {}
+                    new_access = str(token_data.get("access_token") or "")
+                    new_refresh = str(token_data.get("refresh_token") or refresh_token)
+                    if new_access:
+                        _save_tiktok_token(db_path, new_access, new_refresh, advertiser_id)
+                        return new_access
+            except Exception:
+                pass  # Fall through to return current token
+
+        return access_token
+
+    # No DB token — fall back to env
     return os.environ.get("TIKTOK_ACCESS_TOKEN", "")
 
 
