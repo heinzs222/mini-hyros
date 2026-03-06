@@ -10,6 +10,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -473,68 +474,32 @@ async def _sync_meta() -> dict:
                     synced += 1
                 conn.commit()
 
-            # Fetch ads — only request creative{id} to avoid 400 from nested field expansion
+            # Fetch ads with inline creative thumbnail data
             ads = await _meta_fetch_all(
                 client=client,
                 account_id=account_id,
                 access_token=access_token,
                 endpoint="ads",
-                fields="id,name,adset_id,campaign_id,status,creative{id}",
+                fields="id,name,adset_id,campaign_id,status,creative{id,thumbnail_url,image_url,object_type,video_id}",
             )
             with connect(db_path) as conn:
                 for a in ads:
+                    cr = a.get("creative") or {}
+                    cr_id = str(cr.get("id") or "")
+                    thumb = str(cr.get("image_url") or cr.get("thumbnail_url") or "")
+                    obj_type = str(cr.get("object_type") or "").lower()
+                    ctype = "video" if "video" in obj_type else ("image" if thumb else "")
+                    vid_id = str(cr.get("video_id") or "")
                     conn.execute(
-                        """INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at)
-                           VALUES ('meta', 'ad', ?, ?, ?, 'api', ?)""",
-                        (str(a["id"]), str(a["name"]), str(a.get("adset_id", "")), now),
+                        """INSERT OR REPLACE INTO ad_names
+                           (platform, entity_type, entity_id, name, parent_id, source, updated_at,
+                            thumbnail_url, creative_type, video_id, creative_id)
+                           VALUES ('meta', 'ad', ?, ?, ?, 'api', ?, ?, ?, ?, ?)""",
+                        (str(a["id"]), str(a["name"]), str(a.get("adset_id", "")), now,
+                         thumb or None, ctype or None, vid_id or None, cr_id or None),
                     )
                     synced += 1
                 conn.commit()
-
-            # Phase 2: fetch adcreatives directly — reliable source for thumbnail_url/image_url
-            try:
-                adcreatives = await _meta_fetch_all(
-                    client=client,
-                    account_id=account_id,
-                    access_token=access_token,
-                    endpoint="adcreatives",
-                    fields="id,thumbnail_url,image_url,object_type,video_id",
-                    limit=200,
-                )
-                # Build map: creative_id -> (thumbnail_url, creative_type, video_id)
-                creative_thumb: dict[str, tuple[str, str, str]] = {}
-                for cr in adcreatives:
-                    cr_id = str(cr.get("id") or "")
-                    if not cr_id:
-                        continue
-                    url = cr.get("image_url") or cr.get("thumbnail_url") or ""
-                    obj_type = str(cr.get("object_type") or "").lower()
-                    ctype = "video" if "video" in obj_type else ("image" if url else "")
-                    vid_id = str(cr.get("video_id") or "")
-                    creative_thumb[cr_id] = (url, ctype, vid_id)
-
-                # Build ad_id -> creative_id map
-                ad_creative_map: dict[str, str] = {}
-                for a in ads:
-                    cr = a.get("creative") or {}
-                    cr_id = str(cr.get("id") or "")
-                    ad_id = str(a.get("id") or "")
-                    if ad_id and cr_id:
-                        ad_creative_map[ad_id] = cr_id
-
-                # Upsert thumbnail_url + creative_type + creative_id for each ad
-                with connect(db_path) as conn:
-                    for ad_id, cr_id in ad_creative_map.items():
-                        if cr_id in creative_thumb:
-                            url, ctype, vid_id = creative_thumb[cr_id]
-                            conn.execute(
-                                """UPDATE ad_names SET thumbnail_url=?, creative_type=?, video_id=?, creative_id=?
-                                   WHERE platform='meta' AND entity_type='ad' AND entity_id=?""",
-                                (url, ctype, vid_id or None, cr_id, ad_id),
-                            )
-                    conn.commit()
-            except Exception:
-                pass  # Phase 2 is best-effort
 
     except Exception as e:
         return {"synced": synced, "error": str(e)}
@@ -761,10 +726,14 @@ async def _sync_tiktok() -> dict:
                     synced += 1
                 conn.commit()
 
-            # Fetch ads
+            # Fetch ads with creative fields for thumbnails
             resp = await client.get(
                 "https://business-api.tiktok.com/open_api/v1.3/ad/get/",
-                params={"advertiser_id": advertiser_id, "page_size": 200},
+                params={
+                    "advertiser_id": advertiser_id,
+                    "page_size": 200,
+                    "fields": '["ad_id","ad_name","adgroup_id","video_id","image_ids","ad_format"]',
+                },
                 headers=headers,
             )
             rj = resp.json()
@@ -772,13 +741,65 @@ async def _sync_tiktok() -> dict:
                 return {"synced": synced, "error": f"TikTok ads error {rj.get('code')}: {rj.get('message')}"}
             data = rj.get("data", {})
             ads = data.get("list", [])
+
+            # Collect video IDs and image IDs to bulk-fetch thumbnail URLs
+            video_ids = list({str(a.get("video_id") or "") for a in ads if a.get("video_id")})
+            image_ids = list({str(ids[0]) for a in ads for ids in [a.get("image_ids") or []] if ids})
+
+            video_thumb_map: dict[str, str] = {}
+            image_thumb_map: dict[str, str] = {}
+
+            # Fetch video cover URLs in batches of 20
+            for i in range(0, len(video_ids), 20):
+                batch = video_ids[i:i+20]
+                try:
+                    vr = await client.get(
+                        "https://business-api.tiktok.com/open_api/v1.3/video/info/",
+                        params={"advertiser_id": advertiser_id, "video_ids": json.dumps(batch)},
+                        headers=headers,
+                    )
+                    vdata = vr.json().get("data") or {}
+                    for v in (vdata.get("list") or []):
+                        vid = str(v.get("video_id") or "")
+                        cover = str(v.get("cover_url") or v.get("poster_url") or "")
+                        if vid and cover:
+                            video_thumb_map[vid] = cover
+                except Exception:
+                    pass
+
+            # Fetch image URLs in batches of 20
+            for i in range(0, len(image_ids), 20):
+                batch = image_ids[i:i+20]
+                try:
+                    ir = await client.get(
+                        "https://business-api.tiktok.com/open_api/v1.3/image/info/",
+                        params={"advertiser_id": advertiser_id, "image_ids": json.dumps(batch)},
+                        headers=headers,
+                    )
+                    idata = ir.json().get("data") or {}
+                    for img in (idata.get("list") or []):
+                        iid = str(img.get("image_id") or "")
+                        url = str(img.get("url") or img.get("image_url") or "")
+                        if iid and url:
+                            image_thumb_map[iid] = url
+                except Exception:
+                    pass
+
             with connect(db_path) as conn:
                 for a in ads:
+                    ad_id = str(a.get("ad_id", ""))
+                    vid_id = str(a.get("video_id") or "")
+                    img_ids = a.get("image_ids") or []
+                    first_img_id = str(img_ids[0]) if img_ids else ""
+                    thumb = video_thumb_map.get(vid_id) or image_thumb_map.get(first_img_id) or ""
+                    ctype = "video" if vid_id else ("image" if first_img_id else "")
                     conn.execute(
-                        """INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at)
-                           VALUES ('tiktok', 'ad', ?, ?, ?, 'api', ?)""",
-                        (str(a.get("ad_id", "")), str(a.get("ad_name", "")),
-                         str(a.get("adgroup_id", "")), now),
+                        """INSERT OR REPLACE INTO ad_names
+                           (platform, entity_type, entity_id, name, parent_id, source, updated_at,
+                            thumbnail_url, creative_type, video_id)
+                           VALUES ('tiktok', 'ad', ?, ?, ?, 'api', ?, ?, ?, ?)""",
+                        (ad_id, str(a.get("ad_name", "")), str(a.get("adgroup_id", "")), now,
+                         thumb or None, ctype or None, vid_id or None),
                     )
                     synced += 1
                 conn.commit()
