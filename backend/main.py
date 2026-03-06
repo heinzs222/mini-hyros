@@ -223,6 +223,36 @@ async def get_report(
     )
     report = build_hyros_like_report(_db(), inputs)
 
+    # Inject blended metrics directly from DB (independent of attributionops cache)
+    try:
+        _row = db_query(
+            _db(),
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(gross),0) AS rev FROM orders "
+            "WHERE substr(ts,1,10) BETWEEN :s AND :e",
+            {"s": start_date, "e": end_date},
+        ).rows
+        _ao = _row[0] if _row else {}
+        _ao_cnt = int(_ao.get("cnt") or 0)
+        _ao_rev = float(_ao.get("rev") or 0.0)
+    except Exception:
+        _ao_cnt = 0
+        _ao_rev = 0.0
+    _st = report.get("summary_totals", {})
+    _cost = float(_st.get("cost") or 0.0)
+    _clicks = int(_st.get("clicks") or 0)
+    def _d(a, b): return (a / b) if b else None
+    report["summary_totals"] = {
+        **_st,
+        "all_orders_count": _ao_cnt,
+        "all_orders_revenue": round(_ao_rev, 2),
+        "mer": round(_d(_ao_rev, _cost), 2) if _d(_ao_rev, _cost) is not None else None,
+        "blended_roas": round(_d(_ao_rev, _cost), 2) if _d(_ao_rev, _cost) is not None else None,
+        "blended_cvr": round(_d(_ao_cnt, _clicks) * 100.0, 3) if _d(_ao_cnt, _clicks) is not None else None,
+        "blended_aov": round(_d(_ao_rev, _ao_cnt), 2) if _ao_cnt else None,
+        "blended_profit": round(_ao_rev - _cost, 2) if _ao_rev else None,
+        "blended_cpa": round(_d(_cost, _ao_cnt), 2) if _ao_cnt else None,
+    }
+
     # Resolve IDs to names
     entity_type_map = {
         "campaign": "campaign",
