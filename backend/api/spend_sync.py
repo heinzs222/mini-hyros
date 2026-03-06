@@ -458,57 +458,117 @@ def _tiktok_value(row: dict[str, Any], key: str) -> Any:
     return ""
 
 
-async def _fetch_tiktok_report(
+async def _fetch_tiktok_report_level(
+    client: httpx.AsyncClient,
     access_token: str,
     advertiser_id: str,
     start_date: str,
     end_date: str,
+    data_level: str,
+    dimensions: list[str],
 ) -> list[dict[str, Any]]:
+    """Fetch one level of TikTok spend report (campaign, adgroup, or ad)."""
     url = "https://business-api.tiktok.com/open_api/v1.3/report/integrated/get/"
     headers = {"Access-Token": access_token, "Content-Type": "application/json"}
-    dimensions = ["stat_time_day", "campaign_id", "adgroup_id", "ad_id"]
     metrics = ["spend", "impressions", "clicks"]
     page = 1
     page_size = 1000
     total_page = 1
     rows: list[dict[str, Any]] = []
 
-    async with httpx.AsyncClient(timeout=45) as client:
-        while True:
-            params = {
-                "advertiser_id": advertiser_id,
-                "service_type": "AUCTION",
-                "report_type": "BASIC",
-                "data_level": "AUCTION_AD",
-                "start_date": start_date,
-                "end_date": end_date,
-                "dimensions": json.dumps(dimensions, separators=(",", ":")),
-                "metrics": json.dumps(metrics, separators=(",", ":")),
-                "page": str(page),
-                "page_size": str(page_size),
-            }
-            resp = await client.get(url, params=params, headers=headers)
-            resp.raise_for_status()
-            payload = resp.json()
+    while True:
+        params = {
+            "advertiser_id": advertiser_id,
+            "service_type": "AUCTION",
+            "report_type": "BASIC",
+            "data_level": data_level,
+            "start_date": start_date,
+            "end_date": end_date,
+            "dimensions": json.dumps(dimensions, separators=(",", ":")),
+            "metrics": json.dumps(metrics, separators=(",", ":")),
+            "page": str(page),
+            "page_size": str(page_size),
+        }
+        resp = await client.get(url, params=params, headers=headers)
+        resp.raise_for_status()
+        payload = resp.json()
 
-            code = int(payload.get("code") or 0)
-            if code != 0:
-                raise RuntimeError(f"TikTok API error ({code}): {payload.get('message') or payload.get('request_id')}")
+        code = int(payload.get("code") or 0)
+        if code != 0:
+            raise RuntimeError(f"TikTok API error ({code}): {payload.get('message') or payload.get('request_id')}")
 
-            data = payload.get("data") or {}
-            batch = data.get("list") or []
-            rows.extend(batch)
+        data = payload.get("data") or {}
+        batch = data.get("list") or []
+        rows.extend(batch)
 
-            page_info = data.get("page_info") or {}
-            reported_page = int(page_info.get("page") or page)
-            total_page = int(page_info.get("total_page") or total_page)
+        page_info = data.get("page_info") or {}
+        reported_page = int(page_info.get("page") or page)
+        total_page = int(page_info.get("total_page") or total_page)
 
-            if reported_page >= total_page:
-                break
-
-            page = reported_page + 1
+        if reported_page >= total_page:
+            break
+        page = reported_page + 1
 
     return rows
+
+
+async def _fetch_tiktok_report(
+    access_token: str,
+    advertiser_id: str,
+    start_date: str,
+    end_date: str,
+) -> list[dict[str, Any]]:
+    """Fetch TikTok spend at ad level. Each data_level uses its own valid dimensions."""
+    async with httpx.AsyncClient(timeout=45) as client:
+        # AUCTION_AD only allows ad_id + time as dimensions (not campaign_id/adgroup_id)
+        ad_rows = await _fetch_tiktok_report_level(
+            client, access_token, advertiser_id, start_date, end_date,
+            data_level="AUCTION_AD",
+            dimensions=["ad_id", "stat_time_day"],
+        )
+
+        # Also fetch campaign level so we have campaign_id → spend mapping
+        # to enrich ad rows with campaign_id via ad_names lookup
+        campaign_rows = await _fetch_tiktok_report_level(
+            client, access_token, advertiser_id, start_date, end_date,
+            data_level="AUCTION_CAMPAIGN",
+            dimensions=["campaign_id", "stat_time_day"],
+        )
+
+    # If ad-level rows came back, return them (preferred — more granular)
+    if ad_rows:
+        return ad_rows
+
+    # Fall back to campaign-level if ad-level returned nothing
+    return campaign_rows
+
+
+def _build_tiktok_ad_parent_map(db_path: str) -> dict[str, dict[str, str]]:
+    """Build {ad_id: {campaign_id, adset_id}} lookup from ad_names table."""
+    ad_map: dict[str, dict[str, str]] = {}
+    adset_map: dict[str, str] = {}  # adset_id → campaign_id
+
+    try:
+        with connect(db_path) as conn:
+            adsets = conn.execute(
+                "SELECT entity_id, parent_id FROM ad_names WHERE platform='tiktok' AND entity_type='adset'"
+            ).fetchall()
+            for row in adsets:
+                if row[0] and row[1]:
+                    adset_map[str(row[0])] = str(row[1])
+
+            ads = conn.execute(
+                "SELECT entity_id, parent_id FROM ad_names WHERE platform='tiktok' AND entity_type='ad'"
+            ).fetchall()
+            for row in ads:
+                ad_id = str(row[0])
+                adset_id = str(row[1]) if row[1] else ""
+                campaign_id = adset_map.get(adset_id, "")
+                ad_map[ad_id] = {"adset_id": adset_id, "campaign_id": campaign_id}
+    except Exception:
+        pass
+
+    return ad_map
 
 
 def _write_tiktok_spend_rows(
@@ -521,6 +581,9 @@ def _write_tiktok_spend_rows(
     clean_advertiser_id = advertiser_id.strip()
     synced_at = _now()
     inserted = 0
+
+    # Build lookup for ad_id → campaign_id/adset_id from ad_names
+    ad_parent_map = _build_tiktok_ad_parent_map(db_path)
 
     with connect(db_path) as conn:
         deleted = conn.execute(
@@ -538,9 +601,17 @@ def _write_tiktok_spend_rows(
             if not day:
                 continue
 
+            ad_id = str(_tiktok_value(r, "ad_id")).strip()
             campaign_id = str(_tiktok_value(r, "campaign_id")).strip()
             adset_id = str(_tiktok_value(r, "adgroup_id") or _tiktok_value(r, "adset_id")).strip()
-            ad_id = str(_tiktok_value(r, "ad_id")).strip()
+
+            # If campaign_id/adset_id missing (ad-level report), look up from ad_names
+            if ad_id and (not campaign_id or not adset_id):
+                parent = ad_parent_map.get(ad_id, {})
+                if not campaign_id:
+                    campaign_id = parent.get("campaign_id", "")
+                if not adset_id:
+                    adset_id = parent.get("adset_id", "")
             clicks = str(int(_num(_tiktok_value(r, "clicks"), 0.0)))
             impressions = str(int(_num(_tiktok_value(r, "impressions"), 0.0)))
             spend = _fmt_decimal(_num(_tiktok_value(r, "spend"), 0.0))
