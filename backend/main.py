@@ -189,7 +189,7 @@ async def root(auth_code: str = Query(default=""), state: str = Query(default=""
     return {"status": "ok", "service": "mini-hyros"}
 
 
-@app.get("/api/health")
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok", "db": _db()}
 
