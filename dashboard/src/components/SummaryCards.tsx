@@ -14,9 +14,12 @@ import {
 
 type SummaryTotals = {
   clicks: number;
+  impressions?: number;
   orders: number;
   cost: number;
   cpc: number | null;
+  cpm?: number | null;
+  ctr?: number | null;
   cpa: number | null;
   cvr: number | null;
   revenue: number;
@@ -31,6 +34,8 @@ type SummaryTotals = {
   cac: number | null;
   reported: number | null;
   reported_delta: number | null;
+  all_orders_count?: number;
+  all_orders_revenue?: number;
 };
 
 interface Props {
@@ -131,7 +136,9 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
         <Card
           label="Revenue (Attr.)"
           value={formatMoney(totals.revenue)}
-          sub={`Total: ${formatMoney(totals.total_revenue)}`}
+          sub={totals.all_orders_revenue != null && totals.all_orders_revenue > 0
+            ? `All Orders: ${formatMoney(totals.all_orders_revenue)} (${totals.all_orders_count ?? 0})`
+            : `Total: ${formatMoney(totals.total_revenue)}`}
           delta={moneyDelta(totals.revenue, compareTotals?.revenue)}
           deltaClass={deltaColor((totals.revenue ?? 0) - (compareTotals?.revenue ?? 0))}
           icon={<TrendingUp size={14} />}
@@ -162,7 +169,7 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
         <Card
           label="Clicks"
           value={formatNumber(totals.clicks)}
-          sub={`Orders: ${formatNumber(totals.orders)} | CVR: ${formatPercentValue(totals.cvr)}`}
+          sub={totals.impressions ? `Impr: ${formatNumber(totals.impressions)} | CTR: ${formatPercentValue(totals.ctr ?? null)}` : `Orders: ${formatNumber(totals.orders)} | CVR: ${formatPercentValue(totals.cvr)}`}
           delta={numberDelta(totals.clicks, compareTotals?.clicks)}
           deltaClass={deltaColor((totals.clicks ?? 0) - (compareTotals?.clicks ?? 0))}
           icon={<MousePointerClick size={14} />}

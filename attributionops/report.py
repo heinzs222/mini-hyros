@@ -73,8 +73,10 @@ def _format_metrics(
     orders: float,
     reported: float | None,
     fixed_cost_allocation: float | None,
+    impressions: int = 0,
 ) -> dict[str, Any]:
     clicks_i = int(clicks)
+    impressions_i = int(impressions)
     orders_f = float(orders)
     profit = revenue - cost - cogs - fees
     net_profit = profit if fixed_cost_allocation is None else profit - fixed_cost_allocation
@@ -86,11 +88,16 @@ def _format_metrics(
     aov = safe_div(revenue, orders_f)
     rpc = safe_div(revenue, clicks_i)
     margin_pct = safe_div(profit, revenue)
+    cpm = safe_div(cost * 1000.0, impressions_i)
+    ctr = safe_div(clicks_i, impressions_i)
     return {
         "clicks": clicks_i,
+        "impressions": impressions_i,
         "orders": round(orders_f, 2),
         "cost": round_money(cost),
         "cpc": round_money(cpc) if cpc is not None else None,
+        "cpm": round_money(cpm) if cpm is not None else None,
+        "ctr": round(ctr * 100.0, 2) if ctr is not None else None,
         "cpa": round_money(cpa) if cpa is not None else None,
         "total_revenue": round_money(total_revenue),
         "revenue": round_money(revenue),
@@ -598,6 +605,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
                 "name": str(r.get("name") or key),
                 "level": inputs.active_tab,
                 "clicks": 0,
+                "impressions": 0,
                 "cost": 0.0,
                 "total_revenue": 0.0,
                 "revenue": 0.0,
@@ -608,6 +616,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             },
         )
         by_key[key]["clicks"] += to_int(r.get("clicks"))
+        by_key[key]["impressions"] = int(by_key[key].get("impressions") or 0) + to_int(r.get("impressions"))
         by_key[key]["cost"] += to_float(r.get("cost"))
 
     # attribution adds components
@@ -782,6 +791,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             continue
 
         clicks = int(v["clicks"])
+        impressions = int(v.get("impressions") or 0)
         cost = float(v["cost"])
         total_revenue = float(v["total_revenue"])
         revenue = float(v["revenue"])
@@ -792,6 +802,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
 
         metrics = _format_metrics(
             clicks=clicks,
+            impressions=impressions,
             cost=cost,
             total_revenue=total_revenue,
             revenue=revenue,
@@ -815,6 +826,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         )
 
         totals["clicks"] += clicks
+        totals["impressions"] = int(totals.get("impressions") or 0) + impressions
         totals["cost"] += cost
         totals["total_revenue"] += total_revenue
         totals["revenue"] += revenue
@@ -829,6 +841,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
 
     totals_metrics = _format_metrics(
         clicks=int(totals["clicks"]),
+        impressions=int(totals.get("impressions") or 0),
         cost=float(totals["cost"]),
         total_revenue=float(totals["total_revenue"]),
         revenue=float(totals["revenue"]),
@@ -844,12 +857,28 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     conversions_count = float(totals["_orders"])
     cpa = safe_div(float(totals["cost"]), conversions_count) if conversions_count else None
 
+    # Total all-orders revenue from DB (regardless of attribution)
+    try:
+        _all_orders = query(
+            db_path,
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(gross),0) AS rev FROM orders WHERE substr(ts,1,10) BETWEEN :s AND :e",
+            {"s": inputs.start_date, "e": inputs.end_date},
+        ).rows
+        _ao = _all_orders[0] if _all_orders else {}
+        all_orders_count = int(_ao.get("cnt") or 0)
+        all_orders_revenue = float(_ao.get("rev") or 0.0)
+    except Exception:
+        all_orders_count = 0
+        all_orders_revenue = 0.0
+
     summary_totals = {
         **totals_metrics,
         "roas": round_money(roas) if roas is not None else None,
         "mer": round_money(mer) if mer is not None else None,
         "cac": round_money(cpa) if cpa is not None else None,
         "cpa": round_money(cpa) if cpa is not None else None,
+        "all_orders_count": all_orders_count,
+        "all_orders_revenue": round_money(all_orders_revenue),
     }
 
     platform_comparison = _build_platform_comparison(
@@ -1032,10 +1061,13 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
                     }.get(inputs.active_tab, "Name"),
                     "type": "dimension",
                 },
+                {"key": "impressions", "label": "Impressions", "type": "number"},
                 {"key": "clicks", "label": "Clicks", "type": "number"},
+                {"key": "ctr", "label": "CTR", "type": "percent"},
                 {"key": "orders", "label": "Orders", "type": "number"},
                 {"key": "cost", "label": "Cost", "type": "money"},
                 {"key": "cpc", "label": "CPC", "type": "money"},
+                {"key": "cpm", "label": "CPM", "type": "money"},
                 {"key": "cpa", "label": "CPA", "type": "money"},
                 {"key": "cvr", "label": "CVR", "type": "percent"},
                 {"key": "total_revenue", "label": "Total Revenue", "type": "money"},
