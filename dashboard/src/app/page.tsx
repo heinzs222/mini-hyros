@@ -78,6 +78,8 @@ function modelLabel(value: string): string {
   return MODELS.find((m) => m.value === value)?.label || value;
 }
 
+const REPORT_CACHE_KEY = "hyros_report_cache";
+
 export default function DashboardPage() {
   const router = useRouter();
   const [report, setReport] = useState<any>(null);
@@ -113,7 +115,14 @@ export default function DashboardPage() {
 
   const loadReport = useCallback(async () => {
     try {
-      setLoading(true);
+      // Show cached data instantly if available
+      const cached = typeof window !== "undefined" ? window.localStorage.getItem(REPORT_CACHE_KEY) : null;
+      if (cached) {
+        try {
+          const { data } = JSON.parse(cached);
+          if (data) { setReport(data); setLoading(false); }
+        } catch {}
+      }
       setError(null);
       const [startDate, endDate] = normalizeDateRange(primaryStartDate, primaryEndDate);
 
@@ -171,6 +180,10 @@ export default function DashboardPage() {
       setReport(data);
       setCompareReport(compareData);
       setCompareLabel(compareData ? nextCompareLabel : "");
+      // Cache for instant display on next login
+      if (data && typeof window !== "undefined") {
+        try { window.localStorage.setItem(REPORT_CACHE_KEY, JSON.stringify({ data, ts: Date.now() })); } catch {}
+      }
     } catch (err: any) {
       if (String(err?.message || "").includes("401")) {
         router.replace("/login");
@@ -196,15 +209,18 @@ export default function DashboardPage() {
   const syncSpendData = useCallback(async () => {
     if (syncingSpendRef.current) return null;
 
-    const [startDate, endDate] = normalizeDateRange(primaryStartDate, primaryEndDate);
+    // Always sync only the last 7 days for background auto-sync.
+    // Historical data is already in DB — no need to re-fetch it every load.
+    const syncEnd = daysAgo(0);
+    const syncStart = daysAgo(7);
     syncingSpendRef.current = true;
     setSyncingSpend(true);
 
     try {
       const [spendResult, namesResult, stripeResult] = await Promise.allSettled([
-        syncSpend({ platform: "all", start_date: startDate, end_date: endDate }),
+        syncSpend({ platform: "all", start_date: syncStart, end_date: syncEnd }),
         syncAdNames("all"),
-        syncStripe({ start_date: startDate, end_date: endDate }),
+        syncStripe({ start_date: syncStart, end_date: syncEnd }),
       ]);
       const errors: string[] = [];
       if (spendResult.status === "rejected") errors.push("Spend: " + spendResult.reason?.message);
@@ -220,7 +236,7 @@ export default function DashboardPage() {
       syncingSpendRef.current = false;
       setSyncingSpend(false);
     }
-  }, [primaryStartDate, primaryEndDate]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -252,14 +268,18 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!authChecked) return;
 
-    const runAutoSync = async () => {
+    const runBackgroundSync = async () => {
       await syncSpendData();
+      // Silently refresh report after sync completes
       await loadReportRef.current();
     };
 
-    void runAutoSync();
+    // Load report immediately from DB, then sync in background
+    void loadReportRef.current();
+    void runBackgroundSync();
+
     spendSyncTimerRef.current = setInterval(() => {
-      void runAutoSync();
+      void runBackgroundSync();
     }, 10 * 60_000);
 
     return () => {
