@@ -184,8 +184,8 @@ export async function fetchJourneyStats() {
   return res.json();
 }
 
-export async function fetchCommonPaths(limit = 10) {
-  const res = await apiFetch(`${API_BASE}/api/journey/common-paths?limit=${limit}&min_conversions=1`);
+export async function fetchCommonPaths(limit = 10, min_conversions = 1) {
+  const res = await apiFetch(`${API_BASE}/api/journey/common-paths?limit=${limit}&min_conversions=${min_conversions}`);
   if (!res.ok) throw new Error(`Common paths fetch failed: ${res.status}`);
   return res.json();
 }
