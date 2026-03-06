@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncAdNames } from "@/lib/api";
+import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncAdNames, syncStripe } from "@/lib/api";
 import { daysAgo } from "@/lib/utils";
 import SummaryCards from "@/components/SummaryCards";
 import PerformanceChart from "@/components/PerformanceChart";
@@ -201,13 +201,15 @@ export default function DashboardPage() {
     setSyncingSpend(true);
 
     try {
-      const [spendResult, namesResult] = await Promise.allSettled([
+      const [spendResult, namesResult, stripeResult] = await Promise.allSettled([
         syncSpend({ platform: "all", start_date: startDate, end_date: endDate }),
         syncAdNames("all"),
+        syncStripe({ start_date: startDate, end_date: endDate }),
       ]);
       const errors: string[] = [];
       if (spendResult.status === "rejected") errors.push("Spend: " + spendResult.reason?.message);
       if (namesResult.status === "rejected") errors.push("Names: " + namesResult.reason?.message);
+      if (stripeResult.status === "rejected") errors.push("Stripe: " + stripeResult.reason?.message);
       setSyncErrors(errors);
       setLastAutoSyncAt(new Date().toISOString());
       return spendResult.status === "fulfilled" ? spendResult.value : null;

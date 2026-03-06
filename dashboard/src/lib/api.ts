@@ -107,7 +107,7 @@ export async function syncSpend(params: {
   end_date?: string;
 } = {}) {
   const sp = new URLSearchParams();
-  sp.set("platform", params.platform || "meta");
+  sp.set("platform", params.platform || "all");
   if (params.start_date) sp.set("start_date", params.start_date);
   if (params.end_date) sp.set("end_date", params.end_date);
 
@@ -310,6 +310,26 @@ export async function deleteAdName(mapping: {
 export async function syncAdNames(platform = "all") {
   const res = await apiFetch(`${API_BASE}/api/ad-names/sync?platform=${platform}`, { method: "POST" });
   if (!res.ok) throw new Error(`Ad names sync failed: ${res.status}`);
+  return res.json();
+}
+
+// ── Stripe ──────────────────────────────────────────────────────────────────
+export async function syncStripe(params: {
+  start_date?: string;
+  end_date?: string;
+} = {}) {
+  const sp = new URLSearchParams();
+  if (params.start_date) sp.set("start_date", params.start_date);
+  if (params.end_date) sp.set("end_date", params.end_date);
+  const url = `${API_BASE}/api/stripe/sync${sp.toString() ? `?${sp.toString()}` : ""}`;
+  const res = await apiFetch(url, { method: "POST" });
+  if (!res.ok) throw new Error(`Stripe sync failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchStripeStatus() {
+  const res = await apiFetch(`${API_BASE}/api/stripe/status`);
+  if (!res.ok) throw new Error(`Stripe status failed: ${res.status}`);
   return res.json();
 }
 
