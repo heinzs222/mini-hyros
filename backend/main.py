@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -148,6 +148,8 @@ def _is_public_path(path: str) -> bool:
     if p.startswith("/api/webhooks"):
         return True
     if p.startswith("/t/"):
+        return True
+    if p.startswith("/v1/lst/"):
         return True
     if p.startswith("/api/platform-auth") and p.endswith("/callback"):
         return True
@@ -702,6 +704,11 @@ async def serve_tracking_script():
         media_type="application/javascript",
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+@app.get("/v1/lst/universal-script")
+async def serve_universal_tracking_script():
+    return await serve_tracking_script()
 
 
 @app.get("/t/hyros-ghl.js")

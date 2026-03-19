@@ -17,11 +17,10 @@
   "use strict";
 
   // ── Config ──────────────────────────────────────────────────────────────────
-  var script = document.currentScript || document.querySelector('script[data-token]');
-  var SITE_TOKEN = (script && script.getAttribute("data-token")) || "";
-  var ENDPOINT = (script && script.getAttribute("data-endpoint")) || 
-                 (script && script.src ? script.src.replace(/\/t\/hyros\.js.*$/, "") : "") ||
-                 window.location.origin;
+  var script = document.currentScript || document.querySelector('script[data-token]') || document.querySelector('script[src*="/t/hyros.js"]') || document.querySelector('script[src*="/v1/lst/universal-script"]');
+  var scriptUrl = script && script.src ? new URL(script.src, window.location.href) : null;
+  var SITE_TOKEN = (script && script.getAttribute("data-token")) || (scriptUrl ? (scriptUrl.searchParams.get("ph") || scriptUrl.searchParams.get("site_token") || "") : "");
+  var ENDPOINT = (script && script.getAttribute("data-endpoint")) || (scriptUrl ? scriptUrl.origin : "") || window.location.origin;
 
   var COOKIE_VISITOR = "_hyros_vid";
   var COOKIE_SESSION = "_hyros_sid";
@@ -33,14 +32,23 @@
   function setCookie(name, value, days) {
     var d = new Date();
     d.setTime(d.getTime() + days * 86400000);
+    var secure = window.location.protocol === "https:" ? ";Secure" : "";
     document.cookie = name + "=" + encodeURIComponent(value) +
       ";expires=" + d.toUTCString() +
-      ";path=/;SameSite=Lax;Secure";
+      ";path=/;SameSite=Lax" + secure;
   }
 
   function getCookie(name) {
     var match = document.cookie.match(new RegExp("(^| )" + name + "=([^;]+)"));
     return match ? decodeURIComponent(match[2]) : "";
+  }
+
+  function setStoredValue(name, value) {
+    try { window.localStorage.setItem(name, value); } catch (e) {}
+  }
+
+  function getStoredValue(name) {
+    try { return window.localStorage.getItem(name) || ""; } catch (e) { return ""; }
   }
 
   function setSessionCookie(name, value) {
@@ -368,6 +376,309 @@
     });
   };
 
+  function normalizeEmail(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function normalizePhone(value) {
+    return String(value || "").replace(/[^\d+]/g, "");
+  }
+
+  function parseAmount(value) {
+    if (typeof value === "number") {
+      return isFinite(value) ? value : 0;
+    }
+    var parsed = parseFloat(String(value || "").replace(/[^0-9.-]/g, ""));
+    return isFinite(parsed) ? parsed : 0;
+  }
+
+  function findEmailInRoot(root) {
+    if (!root || !root.querySelectorAll) return "";
+    var preferred = root.querySelectorAll('input[type="email"], input[name*="email"], input[name*="Email"], input[id*="email"], input[id*="Email"], input[autocomplete="email"]');
+    for (var i = 0; i < preferred.length; i++) {
+      var email = normalizeEmail(preferred[i].value);
+      if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return email;
+    }
+    var allInputs = root.querySelectorAll("input, textarea");
+    for (var j = 0; j < allInputs.length; j++) {
+      var value = normalizeEmail(allInputs[j].value);
+      if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return value;
+    }
+    return normalizeEmail(getCookie("_hyros_email"));
+  }
+
+  function findPhoneInRoot(root) {
+    if (!root || !root.querySelectorAll) return "";
+    var inputs = root.querySelectorAll('input[type="tel"], input[name*="phone"], input[name*="Phone"], input[id*="phone"], input[id*="Phone"], input[autocomplete="tel"]');
+    for (var i = 0; i < inputs.length; i++) {
+      var phone = normalizePhone(inputs[i].value);
+      if (phone.replace(/\D/g, "").length >= 7) return phone;
+    }
+    return "";
+  }
+
+  function findNameInRoot(root) {
+    if (!root || !root.querySelectorAll) return "";
+    var nameInputs = root.querySelectorAll('input[name*="name"], input[name*="Name"], input[id*="name"], input[id*="Name"]');
+    var parts = [];
+    for (var i = 0; i < nameInputs.length; i++) {
+      if (nameInputs[i].value) parts.push(String(nameInputs[i].value).trim());
+    }
+    return parts.join(" ").trim();
+  }
+
+  function resolveElementName(el) {
+    if (!el || !el.getAttribute) return document.title || "Form";
+    return el.getAttribute("data-form-name") || el.getAttribute("data-calendar-name") || el.getAttribute("data-form-id") || el.getAttribute("data-calendar-id") || el.getAttribute("name") || el.getAttribute("id") || document.title || "Form";
+  }
+
+  function resolveOrderId(root) {
+    var params = new URLSearchParams(window.location.search);
+    var candidates = [
+      params.get("order_id"),
+      params.get("order"),
+      params.get("transaction_id"),
+      params.get("transaction"),
+      params.get("payment_intent"),
+      root && root.getAttribute ? root.getAttribute("data-order-id") : "",
+      root && root.getAttribute ? root.getAttribute("data-transaction-id") : "",
+      root && root.querySelector ? ((root.querySelector('[data-order-id], [data-transaction-id], .order-number, .transaction-id') || {}).textContent || "") : "",
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+      var value = String(candidates[i] || "").trim();
+      if (value) return value;
+    }
+    return "";
+  }
+
+  function resolveOrderValue(root) {
+    var params = new URLSearchParams(window.location.search);
+    var direct = parseAmount(params.get("value") || params.get("amount") || params.get("total"));
+    if (direct > 0) return direct;
+    if (root && root.getAttribute) {
+      var attrValue = parseAmount(root.getAttribute("data-price") || root.getAttribute("data-total") || root.getAttribute("data-value"));
+      if (attrValue > 0) return attrValue;
+    }
+    if (root && root.querySelector) {
+      var priceEl = root.querySelector('[data-price], [data-total], .price, .total, .order-total, [class*="price"], [class*="total"]');
+      if (priceEl) {
+        var textValue = parseAmount(priceEl.getAttribute && (priceEl.getAttribute("data-price") || priceEl.getAttribute("data-total")) || priceEl.textContent || "");
+        if (textValue > 0) return textValue;
+      }
+      var hiddenValue = root.querySelector('input[name="amount"], input[name="price"], input[name="total"], input[name="value"]');
+      if (hiddenValue && hiddenValue.value) {
+        var hiddenAmount = parseAmount(hiddenValue.value);
+        if (hiddenAmount > 0) return hiddenAmount;
+      }
+    }
+    return 0;
+  }
+
+  function resolvePurchaseFromDataLayer() {
+    if (!Array.isArray(window.dataLayer)) return null;
+    for (var i = window.dataLayer.length - 1; i >= 0; i--) {
+      var item = window.dataLayer[i];
+      if (!item || typeof item !== "object") continue;
+      var ecommerce = item.ecommerce || {};
+      var purchase = ecommerce.purchase || {};
+      var actionField = purchase.actionField || purchase;
+      var orderId = actionField.id || ecommerce.transaction_id || item.transaction_id || "";
+      var value = parseAmount(actionField.revenue || purchase.value || ecommerce.value || item.value || "");
+      var email = normalizeEmail(item.email || ecommerce.email || purchase.email || "");
+      var currency = String(actionField.currency || ecommerce.currency || item.currency || "USD");
+      if (String(item.event || "").toLowerCase() === "purchase" || orderId || value > 0) {
+        return { order_id: String(orderId || ""), value: value, email: email, currency: currency };
+      }
+    }
+    return null;
+  }
+
+  function resolvePurchaseFromShopify() {
+    var checkout = window.Shopify && window.Shopify.checkout;
+    if (!checkout) return null;
+    return {
+      order_id: String(checkout.order_id || checkout.order_number || ""),
+      value: parseAmount(checkout.total_price || checkout.total_price_amount || checkout.subtotal_price || ""),
+      email: normalizeEmail(checkout.email || ""),
+      currency: String(checkout.currency || "USD"),
+    };
+  }
+
+  function resolvePurchaseData(root) {
+    var dataLayerPurchase = resolvePurchaseFromDataLayer();
+    if (dataLayerPurchase && (dataLayerPurchase.order_id || dataLayerPurchase.value > 0 || dataLayerPurchase.email)) {
+      return dataLayerPurchase;
+    }
+    var shopifyPurchase = resolvePurchaseFromShopify();
+    if (shopifyPurchase && (shopifyPurchase.order_id || shopifyPurchase.value > 0 || shopifyPurchase.email)) {
+      return shopifyPurchase;
+    }
+    return {
+      order_id: resolveOrderId(root),
+      value: resolveOrderValue(root),
+      email: findEmailInRoot(root || document),
+      currency: String((new URLSearchParams(window.location.search)).get("currency") || "USD"),
+    };
+  }
+
+  function markOnce(key) {
+    if (!key) return true;
+    var storageKey = "_hyros_once_" + key;
+    if (getStoredValue(storageKey)) return false;
+    setStoredValue(storageKey, String(Date.now()));
+    return true;
+  }
+
+  function hookIdentityInputs() {
+    var inputs = document.querySelectorAll('input[type="email"], input[name*="email"], input[name*="Email"], input[id*="email"], input[id*="Email"], input[autocomplete="email"]');
+    inputs.forEach(function (input) {
+      if (input._hyrosIdentifyHooked) return;
+      input._hyrosIdentifyHooked = true;
+      var capture = function () {
+        var email = normalizeEmail(input.value);
+        if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          window.hyros.identify(email);
+        }
+      };
+      input.addEventListener("change", capture);
+      input.addEventListener("blur", capture);
+    });
+  }
+
+  function hookForms() {
+    var forms = document.querySelectorAll('form, [data-form-id], .hl-form, #inline-form, .form-builder');
+    forms.forEach(function (form) {
+      if (form.matches && form.matches('.order-form, .payment-form, [data-product-id], #order-form, .hl-order-form, .checkout-form, form[action*="checkout"], form[action*="payment"], form[id*="checkout"], form[class*="checkout"], [data-calendar-id], .hl-calendar, .calendar-widget')) return;
+      if (form.querySelector && !form.querySelector('input[type="email"], input[name*="email"], input[name*="Email"], input[id*="email"], input[id*="Email"], input[type="tel"], input[name*="phone"], input[name*="Phone"], input[id*="phone"], input[id*="Phone"]')) return;
+      if (form._hyrosHooked) return;
+      form._hyrosHooked = true;
+      form.addEventListener("submit", function () {
+        var email = findEmailInRoot(form);
+        var phone = findPhoneInRoot(form);
+        var name = findNameInRoot(form);
+        if (!email && !phone) return;
+        if (email) {
+          window.hyros.identify(email);
+        }
+        window.hyros.event("FormSubmit", {
+          form_name: resolveElementName(form),
+          email: email,
+          phone: phone,
+          name: name,
+          page: window.location.pathname,
+        });
+        if (email) {
+          window.hyros.conversion({
+            type: "Lead",
+            value: 0,
+            order_id: "lead-" + Date.now(),
+            email: email,
+          });
+        }
+      });
+    });
+  }
+
+  function hookBookings() {
+    var buttons = document.querySelectorAll('.calendar-widget button[type="submit"], .hl-calendar button[type="submit"], [data-calendar-id] button[type="submit"], .booking-confirm-btn, #confirm-booking');
+    buttons.forEach(function (btn) {
+      if (btn._hyrosHooked) return;
+      btn._hyrosHooked = true;
+      btn.addEventListener("click", function () {
+        var container = btn.closest("form") || btn.closest("[data-calendar-id]") || btn.parentElement || document;
+        var email = findEmailInRoot(container);
+        if (email) {
+          window.hyros.identify(email);
+        }
+        window.hyros.event("BookingConfirmed", {
+          calendar: resolveElementName(container),
+          email: email,
+          page: window.location.pathname,
+        });
+        window.hyros.conversion({
+          type: "Booking",
+          value: 0,
+          order_id: "booking-" + Date.now(),
+          email: email,
+        });
+      });
+    });
+  }
+
+  function hookCheckoutForms() {
+    var forms = document.querySelectorAll('.order-form, .payment-form, [data-product-id], #order-form, .hl-order-form, .checkout-form, form[action*="checkout"], form[action*="payment"], form[id*="checkout"], form[class*="checkout"]');
+    forms.forEach(function (form) {
+      if (form._hyrosPayHooked) return;
+      form._hyrosPayHooked = true;
+      form.addEventListener("submit", function () {
+        var email = findEmailInRoot(form);
+        if (email) {
+          window.hyros.identify(email);
+        }
+        window.hyros.event("CheckoutSubmit", {
+          order_id: resolveOrderId(form),
+          value: resolveOrderValue(form),
+          email: email,
+          page: window.location.pathname,
+        });
+      });
+    });
+  }
+
+  function detectThankYouPage() {
+    var url = window.location.href.toLowerCase();
+    var path = window.location.pathname.toLowerCase();
+    var title = (document.title || "").toLowerCase();
+    var isThankYou = path.indexOf("thank") > -1 || path.indexOf("thankyou") > -1 || path.indexOf("thank-you") > -1 || path.indexOf("confirmation") > -1 || path.indexOf("success") > -1 || path.indexOf("order-confirmed") > -1 || path.indexOf("order-received") > -1 || url.indexOf("thank") > -1 || title.indexOf("thank you") > -1 || title.indexOf("order confirmed") > -1 || title.indexOf("booking confirmed") > -1;
+    if (!isThankYou) return;
+    var purchase = resolvePurchaseData(document);
+    var email = normalizeEmail(purchase.email || findEmailInRoot(document) || getCookie("_hyros_email"));
+    if (email) {
+      window.hyros.identify(email);
+    }
+    window.hyros.event("ThankYouPage", {
+      page: window.location.pathname,
+      email: email,
+      order_id: purchase.order_id || "",
+      value: purchase.value || 0,
+    });
+    var bookingLike = path.indexOf("booking") > -1 || title.indexOf("booking") > -1 || title.indexOf("appointment") > -1;
+    var purchaseLike = purchase.value > 0 || !!purchase.order_id || path.indexOf("order") > -1 || title.indexOf("receipt") > -1 || title.indexOf("payment") > -1;
+    var dedupeKey = purchase.order_id || (window.location.pathname + "|" + (purchase.value || 0) + "|" + (email || ""));
+    if (bookingLike && markOnce("booking|" + dedupeKey)) {
+      window.hyros.conversion({
+        type: "Booking",
+        value: 0,
+        order_id: purchase.order_id || ("booking-ty-" + Date.now()),
+        email: email,
+      });
+      return;
+    }
+    if (purchaseLike && markOnce("purchase|" + dedupeKey)) {
+      window.hyros.conversion({
+        type: "Purchase",
+        value: purchase.value || 0,
+        order_id: purchase.order_id || ("order-ty-" + Date.now()),
+        email: email,
+        currency: purchase.currency || "USD",
+      });
+    }
+  }
+
+  function initAutoCapture() {
+    hookIdentityInputs();
+    hookForms();
+    hookBookings();
+    hookCheckoutForms();
+    detectThankYouPage();
+  }
+
+  function startObserver() {
+    if (startObserver._started || !document.body) return;
+    startObserver._started = true;
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
   // Expose IDs for debugging
   window.hyros.visitorId = visitorId;
   window.hyros.sessionId = sessionId;
@@ -377,15 +688,41 @@
 
   // ── Auto-fire pageview ──────────────────────────────────────────────────────
   trackPageview();
+  initAutoCapture();
+
+  var observer = new MutationObserver(function (mutations) {
+    var shouldRehook = false;
+    for (var i = 0; i < mutations.length; i++) {
+      if (mutations[i].addedNodes.length > 0) {
+        shouldRehook = true;
+        break;
+      }
+    }
+    if (shouldRehook) {
+      setTimeout(initAutoCapture, 100);
+    }
+  });
+
+  startObserver();
+  document.addEventListener("DOMContentLoaded", function () {
+    initAutoCapture();
+    startObserver();
+  });
 
   // Track on SPA navigations (pushState / popstate)
   var _pushState = history.pushState;
   history.pushState = function () {
     _pushState.apply(history, arguments);
-    setTimeout(trackPageview, 50);
+    setTimeout(function () {
+      trackPageview();
+      initAutoCapture();
+    }, 50);
   };
   window.addEventListener("popstate", function () {
-    setTimeout(trackPageview, 50);
+    setTimeout(function () {
+      trackPageview();
+      initAutoCapture();
+    }, 50);
   });
 
 })();

@@ -8,6 +8,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ from fastapi import APIRouter, Query, HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
-from attributionops.db import sql_rows as db_query
+from attributionops.db import connect, sql_rows as db_query
 
 router = APIRouter()
 UTC = timezone.utc
@@ -26,6 +27,11 @@ UTC = timezone.utc
 
 def _db() -> str:
     return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+
+
+def _table_columns(db_path: str, table: str) -> set[str]:
+    with connect(db_path) as conn:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
 @router.get("/customer")
@@ -39,9 +45,16 @@ async def customer_journey(
         raise HTTPException(400, "customer_key is required")
 
     # Get all sessions
-    sessions = db_query(db_path, """
-        SELECT session_id, ts, utm_source, utm_medium, utm_campaign, utm_content,
-               landing_page, device, referrer, gclid, fbclid, ttclid
+    session_cols = _table_columns(db_path, "sessions")
+    session_select = [
+        "session_id", "ts", "utm_source", "utm_medium", "utm_campaign", "utm_content",
+        "landing_page", "device", "referrer", "gclid", "fbclid", "ttclid",
+    ]
+    for optional_col in ("visitor_id", "event_name", "page_title", "custom_data_json"):
+        if optional_col in session_cols:
+            session_select.append(optional_col)
+    sessions = db_query(db_path, f"""
+        SELECT {", ".join(session_select)}
         FROM sessions WHERE customer_key = ?
         ORDER BY ts
     """, [customer_key])
@@ -72,20 +85,49 @@ async def customer_journey(
     timeline = []
 
     for s in sessions:
+        details = {
+            "session_id": s["session_id"],
+            "utm_source": s.get("utm_source", ""),
+            "utm_medium": s.get("utm_medium", ""),
+            "utm_campaign": s.get("utm_campaign", ""),
+            "landing_page": s.get("landing_page", ""),
+            "device": s.get("device", ""),
+            "referrer": s.get("referrer", ""),
+            "has_gclid": bool(s.get("gclid")),
+            "has_fbclid": bool(s.get("fbclid")),
+            "has_ttclid": bool(s.get("ttclid")),
+        }
+        if s.get("visitor_id"):
+            details["visitor_id"] = s.get("visitor_id", "")
+        if s.get("event_name"):
+            details["event_name"] = s.get("event_name", "")
+        if s.get("page_title"):
+            details["page_title"] = s.get("page_title", "")
+        if s.get("custom_data_json"):
+            try:
+                details["custom_data"] = json.loads(s.get("custom_data_json") or "{}")
+            except json.JSONDecodeError:
+                details["custom_data"] = {}
         timeline.append({
             "type": "session",
             "ts": s["ts"],
+            "details": details
+        })
+
+    for t in touchpoints:
+        timeline.append({
+            "type": "touchpoint",
+            "ts": t["ts"],
             "details": {
-                "session_id": s["session_id"],
-                "utm_source": s.get("utm_source", ""),
-                "utm_medium": s.get("utm_medium", ""),
-                "utm_campaign": s.get("utm_campaign", ""),
-                "landing_page": s.get("landing_page", ""),
-                "device": s.get("device", ""),
-                "referrer": s.get("referrer", ""),
-                "has_gclid": bool(s.get("gclid")),
-                "has_fbclid": bool(s.get("fbclid")),
-                "has_ttclid": bool(s.get("ttclid")),
+                "channel": t.get("channel", ""),
+                "platform": t.get("platform", ""),
+                "campaign_id": t.get("campaign_id", ""),
+                "adset_id": t.get("adset_id", ""),
+                "ad_id": t.get("ad_id", ""),
+                "session_id": t.get("session_id", ""),
+                "has_gclid": bool(t.get("gclid")),
+                "has_fbclid": bool(t.get("fbclid")),
+                "has_ttclid": bool(t.get("ttclid")),
             }
         })
 

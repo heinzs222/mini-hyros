@@ -52,6 +52,84 @@ def _meta_campaign_from_adset(db_path: str, adset_id: str) -> str:
         return ""
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return set()
+    return {str(row[1]) for row in rows}
+
+
+def _ensure_tracking_schema(db_path: str) -> None:
+    with connect(db_path) as conn:
+        session_cols = _table_columns(conn, "sessions")
+        if "visitor_id" not in session_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN visitor_id TEXT")
+        if "event_name" not in session_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN event_name TEXT")
+        if "page_title" not in session_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN page_title TEXT")
+        if "custom_data_json" not in session_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN custom_data_json TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_visitor_id ON sessions(visitor_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_customer_key ON sessions(customer_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_touchpoints_session_id ON touchpoints(session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_touchpoints_customer_key ON touchpoints(customer_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_customer_key ON orders(customer_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_conversions_customer_key ON conversions(customer_key)")
+        conn.commit()
+
+
+def _lookup_customer_key(db_path: str, visitor_id: str = "", session_id: str = "") -> str:
+    with connect(db_path) as conn:
+        if visitor_id:
+            row = conn.execute(
+                """SELECT customer_key FROM sessions
+                   WHERE visitor_id = ? AND COALESCE(customer_key, '') != ''
+                   ORDER BY ts DESC LIMIT 1""",
+                (visitor_id,),
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0]).strip()
+        if session_id:
+            row = conn.execute(
+                """SELECT customer_key FROM sessions
+                   WHERE session_id = ? AND COALESCE(customer_key, '') != ''
+                   ORDER BY ts DESC LIMIT 1""",
+                (session_id,),
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0]).strip()
+    return ""
+
+
+def _backfill_customer_key(conn: sqlite3.Connection, customer_key: str, visitor_id: str = "", session_id: str = "") -> None:
+    if not customer_key:
+        return
+    if visitor_id:
+        conn.execute(
+            "UPDATE sessions SET customer_key = ? WHERE COALESCE(customer_key, '') = '' AND visitor_id = ?",
+            (customer_key, visitor_id),
+        )
+        conn.execute(
+            """UPDATE touchpoints SET customer_key = ?
+               WHERE COALESCE(customer_key, '') = '' AND session_id IN (
+                   SELECT DISTINCT session_id FROM sessions WHERE visitor_id = ?
+               )""",
+            (customer_key, visitor_id),
+        )
+    if session_id:
+        conn.execute(
+            "UPDATE sessions SET customer_key = ? WHERE COALESCE(customer_key, '') = '' AND session_id = ?",
+            (customer_key, session_id),
+        )
+        conn.execute(
+            "UPDATE touchpoints SET customer_key = ? WHERE COALESCE(customer_key, '') = '' AND session_id = ?",
+            (customer_key, session_id),
+        )
+
+
 def _insert_order(db_path: str, order: dict[str, Any]) -> None:
     with connect(db_path) as conn:
         conn.execute(
@@ -205,17 +283,23 @@ async def track_event(request: Request):
     """
     payload = await request.json()
     db_path = _db()
+    _ensure_tracking_schema(db_path)
     now = _iso_ts(datetime.now(UTC))
 
     session_id = str(payload.get("session_id", _sha256(now)))
+    visitor_id = str(payload.get("visitor_id", "")).strip()
     customer_key = str(payload.get("customer_key", "")).strip().lower()
     custom_data = payload.get("custom_data") if isinstance(payload.get("custom_data"), dict) else {}
     if not customer_key and custom_data.get("email"):
         customer_key = str(custom_data.get("email", "")).strip().lower()
     if "@" in customer_key:
         customer_key = _sha256(customer_key)
+    if not customer_key:
+        customer_key = _lookup_customer_key(db_path, visitor_id=visitor_id, session_id=session_id)
     utm_source = str(payload.get("utm_source", ""))
     utm_medium = str(payload.get("utm_medium", ""))
+    event_name = str(payload.get("event", "")).strip() or "pageview"
+    custom_data_json = json.dumps(custom_data, separators=(",", ":"), sort_keys=True) if custom_data else ""
 
     # Determine platform from UTM or custom params
     detected_platform = str(payload.get("detected_platform", ""))
@@ -256,11 +340,14 @@ async def track_event(request: Request):
 
     with connect(db_path) as conn:
         conn.execute(
-            """INSERT INTO sessions (session_id, ts, utm_source, utm_medium, utm_campaign, utm_content, utm_term, referrer, landing_page, device, gclid, fbclid, ttclid, customer_key)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO sessions (session_id, visitor_id, ts, event_name, page_title, utm_source, utm_medium, utm_campaign, utm_content, utm_term, referrer, landing_page, device, gclid, fbclid, ttclid, customer_key, custom_data_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
+                visitor_id,
                 now,
+                event_name,
+                str(payload.get("page_title", "")),
                 utm_source,
                 utm_medium,
                 campaign_id,
@@ -273,6 +360,7 @@ async def track_event(request: Request):
                 str(payload.get("fbclid", "")),
                 str(payload.get("ttclid", "")),
                 customer_key,
+                custom_data_json,
             ),
         )
         conn.execute(
@@ -297,7 +385,6 @@ async def track_event(request: Request):
 
     from main import manager
     import asyncio
-    event_name = str(payload.get("event", ""))
     if event_name == "FormSubmit":
         asyncio.create_task(manager.broadcast({
             "type": "new_lead",
@@ -351,30 +438,10 @@ async def identify_visitor(request: Request):
 
     customer_key = _sha256(email)
     db_path = _db()
+    _ensure_tracking_schema(db_path)
 
     with connect(db_path) as conn:
-        # Back-fill all sessions from this visitor that had no customer_key
-        conn.execute(
-            """UPDATE sessions SET customer_key = ?
-               WHERE customer_key = '' AND session_id IN (
-                   SELECT session_id FROM sessions WHERE session_id = ?
-                   UNION
-                   SELECT session_id FROM sessions
-                   WHERE customer_key = '' AND session_id IN (
-                       SELECT session_id FROM touchpoints WHERE customer_key = ''
-                   )
-               )""",
-            (customer_key, session_id),
-        )
-        # Back-fill touchpoints for this visitor
-        conn.execute(
-            """UPDATE touchpoints SET customer_key = ?
-               WHERE customer_key = '' AND session_id IN (
-                   SELECT session_id FROM sessions WHERE customer_key = ?
-                   UNION SELECT ?
-               )""",
-            (customer_key, customer_key, session_id),
-        )
+        _backfill_customer_key(conn, customer_key, visitor_id=visitor_id, session_id=session_id)
         conn.commit()
 
     from main import manager
@@ -398,7 +465,9 @@ async def track_conversion(request: Request):
     """
     payload = await request.json()
     db_path = _db()
+    _ensure_tracking_schema(db_path)
     now = _iso_ts(datetime.now(UTC))
+    visitor_id = str(payload.get("visitor_id", "")).strip()
 
     email = str(payload.get("customer_key", "")).strip().lower()
     customer_key = _sha256(email) if email and "@" in email else (email if email else "")
@@ -437,6 +506,8 @@ async def track_conversion(request: Request):
         channel = "email"
 
     session_id = str(payload.get("session_id", _sha256(now)))
+    if not customer_key:
+        customer_key = _lookup_customer_key(db_path, visitor_id=visitor_id, session_id=session_id)
 
     # Map custom params to standard fields (backend-side fallback)
     h_ad_id = str(payload.get("h_ad_id", ""))
@@ -457,6 +528,7 @@ async def track_conversion(request: Request):
     is_purchase = conv_lower in ("purchase", "payment")
 
     with connect(db_path) as conn:
+        _backfill_customer_key(conn, customer_key, visitor_id=visitor_id, session_id=session_id)
         if is_purchase:
             conn.execute(
                 """INSERT OR IGNORE INTO orders (order_id, ts, gross, net, refunds, chargebacks, cogs, fees, customer_key, subscription_id)

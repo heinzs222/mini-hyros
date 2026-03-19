@@ -23,10 +23,12 @@ def init_db(db_path: str) -> None:
         );""")
 
         conn.execute("""CREATE TABLE sessions (
-            session_id TEXT, ts TEXT, utm_source TEXT, utm_medium TEXT,
+            session_id TEXT, visitor_id TEXT, ts TEXT, event_name TEXT, page_title TEXT,
+            utm_source TEXT, utm_medium TEXT,
             utm_campaign TEXT, utm_content TEXT, utm_term TEXT,
             referrer TEXT, landing_page TEXT, device TEXT,
-            gclid TEXT, fbclid TEXT, ttclid TEXT, customer_key TEXT
+            gclid TEXT, fbclid TEXT, ttclid TEXT, customer_key TEXT,
+            custom_data_json TEXT
         );""")
 
         conn.execute("""CREATE TABLE touchpoints (
@@ -46,6 +48,14 @@ def init_db(db_path: str) -> None:
             conversion_id TEXT, ts TEXT, type TEXT, value TEXT,
             order_id TEXT, customer_key TEXT
         );""")
+
+        conn.execute("CREATE INDEX idx_sessions_session_id ON sessions(session_id);")
+        conn.execute("CREATE INDEX idx_sessions_visitor_id ON sessions(visitor_id);")
+        conn.execute("CREATE INDEX idx_sessions_customer_key ON sessions(customer_key);")
+        conn.execute("CREATE INDEX idx_touchpoints_session_id ON touchpoints(session_id);")
+        conn.execute("CREATE INDEX idx_touchpoints_customer_key ON touchpoints(customer_key);")
+        conn.execute("CREATE INDEX idx_orders_customer_key ON orders(customer_key);")
+        conn.execute("CREATE INDEX idx_conversions_customer_key ON conversions(customer_key);")
 
         conn.execute("""CREATE TABLE reported_value (
             platform TEXT, date TEXT, account_id TEXT, campaign_id TEXT,
