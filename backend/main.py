@@ -112,6 +112,24 @@ def _cors_origins() -> list[str]:
     return ["*"]
 
 
+def _apply_cors_headers(response: JSONResponse, request: Request) -> JSONResponse:
+    """Attach CORS headers to responses emitted by custom middleware.
+
+    Starlette's CORSMiddleware cannot decorate a response if an outer custom
+    middleware returns before the request reaches the inner app. Auth failures
+    must still be readable by browser clients on the Vercel dashboard origin.
+    """
+    origin = str(request.headers.get("origin") or "").strip()
+    if not origin:
+        return response
+
+    allowed = _cors_origins()
+    if "*" in allowed or origin in allowed:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+    return response
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
@@ -168,7 +186,7 @@ async def auth_middleware(request: Request, call_next):
     if validate_token(token):
         return await call_next(request)
 
-    return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return _apply_cors_headers(JSONResponse(status_code=401, content={"detail": "Unauthorized"}), request)
 
 
 def _db() -> str:
