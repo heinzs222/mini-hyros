@@ -118,6 +118,26 @@ export async function syncSpend(params: {
   return res.json();
 }
 
+export async function importSpendCsv(payload: {
+  platform?: string;
+  account_id?: string;
+  csv_text: string;
+  replace?: boolean;
+}) {
+  const res = await apiFetch(`${API_BASE}/api/spend/import_csv`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      platform: payload.platform || "google",
+      account_id: payload.account_id || "",
+      csv_text: payload.csv_text,
+      replace: payload.replace !== false,
+    }),
+  });
+  if (!res.ok) throw new Error(`Spend import failed: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchVideoMetrics(params: {
   start_date?: string;
   end_date?: string;

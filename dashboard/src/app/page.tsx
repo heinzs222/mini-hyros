@@ -20,8 +20,10 @@ import JourneyPanel from "@/components/JourneyPanel";
 import CohortPanel from "@/components/CohortPanel";
 import CapiPanel from "@/components/CapiPanel";
 import AdNamesPanel from "@/components/AdNamesPanel";
+import SpendImportPanel from "@/components/SpendImportPanel";
 import {
   BarChart3,
+  DollarSign,
   RefreshCw,
   Settings,
   Zap,
@@ -227,13 +229,12 @@ export default function DashboardPage() {
     router,
   ]);
 
-  const syncSpendData = useCallback(async () => {
+  const syncSpendData = useCallback(async (range?: { start_date?: string; end_date?: string }) => {
     if (syncingSpendRef.current) return null;
 
-    // Always sync only the last 7 days for background auto-sync.
-    // Historical data is already in DB — no need to re-fetch it every load.
-    const syncEnd = daysAgo(0);
-    const syncStart = daysAgo(7);
+    // Background auto-sync stays short. Manual sync uses the selected report window.
+    const syncEnd = range?.end_date || daysAgo(0);
+    const syncStart = range?.start_date || daysAgo(7);
     syncingSpendRef.current = true;
     setSyncingSpend(true);
 
@@ -245,8 +246,17 @@ export default function DashboardPage() {
       ]);
       const errors: string[] = [];
       if (spendResult.status === "rejected") errors.push("Spend: " + spendResult.reason?.message);
+      if (spendResult.status === "fulfilled" && spendResult.value?.errors?.length) {
+        errors.push("Spend: " + spendResult.value.errors.join(" | "));
+      }
       if (namesResult.status === "rejected") errors.push("Names: " + namesResult.reason?.message);
+      if (namesResult.status === "fulfilled" && namesResult.value?.errors?.length) {
+        errors.push("Names: " + namesResult.value.errors.join(" | "));
+      }
       if (stripeResult.status === "rejected") errors.push("Stripe: " + stripeResult.reason?.message);
+      if (stripeResult.status === "fulfilled" && stripeResult.value?.errors?.length) {
+        errors.push("Stripe: " + stripeResult.value.errors.join(" | "));
+      }
       setSyncErrors(errors);
       setLastAutoSyncAt(new Date().toISOString());
       return spendResult.status === "fulfilled" ? spendResult.value : null;
@@ -416,7 +426,7 @@ export default function DashboardPage() {
 
             {/* Sync + Refresh */}
             <button
-              onClick={async () => { await syncSpendData(); await loadReport(); }}
+              onClick={async () => { await syncSpendData({ start_date: windowStart, end_date: windowEnd }); await loadReport(); }}
               disabled={syncingSpend}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold transition-colors disabled:opacity-50 h-[34px]"
             >
@@ -446,6 +456,7 @@ export default function DashboardPage() {
             { key: "journey", label: "Journey", icon: <Route size={13} /> },
             { key: "cohort", label: "Cohorts", icon: <Grid3x3 size={13} /> },
             { key: "capi", label: "CAPI Sync", icon: <Send size={13} /> },
+            { key: "spend", label: "Spend", icon: <DollarSign size={13} /> },
             { key: "names", label: "Ad Names", icon: <Tag size={13} /> },
           ].map((tab) => (
             <button
@@ -477,6 +488,9 @@ export default function DashboardPage() {
         {mainTab === "journey" && <JourneyPanel />}
         {mainTab === "cohort" && <CohortPanel />}
         {mainTab === "capi" && <CapiPanel />}
+        {mainTab === "spend" && (
+          <SpendImportPanel startDate={windowStart} endDate={windowEnd} onImported={loadReport} />
+        )}
         {mainTab === "names" && <AdNamesPanel />}
 
         {/* Sync status bar */}
