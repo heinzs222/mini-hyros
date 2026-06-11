@@ -530,6 +530,58 @@ def _clean_google_customer_id(customer_id: str) -> str:
     return customer_id.replace("customers/", "").replace("-", "").strip()
 
 
+def _google_ads_api_version() -> str:
+    raw = str(os.environ.get("GOOGLE_ADS_API_VERSION", "v24") or "").strip()
+    if not raw:
+        return "v24"
+    return raw if raw.startswith("v") else f"v{raw}"
+
+
+def _google_api_error_message(response: httpx.Response | None, fallback: str) -> str:
+    if response is None:
+        return fallback
+
+    try:
+        payload = response.json()
+    except Exception:
+        text = " ".join((response.text or fallback).split())
+        return f"HTTP {response.status_code}: {text[:300]}"
+
+    error = payload.get("error") if isinstance(payload, dict) else {}
+    if not isinstance(error, dict):
+        return f"HTTP {response.status_code}: {str(payload)[:300]}"
+
+    status = str(error.get("status") or "").strip()
+    message = str(error.get("message") or "").strip()
+    google_code = ""
+    detailed_message = ""
+
+    for detail in error.get("details") or []:
+        if not isinstance(detail, dict):
+            continue
+        for item in detail.get("errors") or []:
+            if not isinstance(item, dict):
+                continue
+            error_code = item.get("errorCode") or {}
+            if isinstance(error_code, dict) and error_code:
+                google_code = str(next(iter(error_code.values())) or "").strip()
+            detailed_message = str(item.get("message") or "").strip()
+            break
+        if google_code or detailed_message:
+            break
+
+    parts = [f"HTTP {response.status_code}"]
+    if status:
+        parts.append(status)
+    if google_code:
+        parts.append(google_code)
+    if detailed_message:
+        parts.append(detailed_message)
+    elif message:
+        parts.append(message)
+    return ": ".join(parts)[:600]
+
+
 async def _fetch_meta_insights(access_token: str, ad_account_id: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
     account_id = ad_account_id.replace("act_", "").strip()
     fields = ",".join(
@@ -713,7 +765,8 @@ async def _fetch_google_insights(
         f"WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'"
     )
 
-    url = f"https://googleads.googleapis.com/v19/customers/{clean_customer_id}/googleAds:search"
+    api_version = _google_ads_api_version()
+    url = f"https://googleads.googleapis.com/{api_version}/customers/{clean_customer_id}/googleAds:search"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "developer-token": developer_token,
@@ -867,9 +920,10 @@ async def _sync_google_spend(start_date: str, end_date: str) -> dict[str, Any]:
             "deleted": write_stats["deleted"],
             "date_range": {"start": start_date, "end": end_date},
             "customer_id": _clean_google_customer_id(customer_id),
+            "api_version": _google_ads_api_version(),
         }
     except httpx.HTTPStatusError as exc:
-        details = exc.response.text[:600] if exc.response is not None else str(exc)
+        details = _google_api_error_message(exc.response, str(exc))
         return {"synced": 0, "error": f"Google Ads API error: {details}"}
     except Exception as exc:
         return {"synced": 0, "error": str(exc)}
