@@ -327,26 +327,39 @@ async def sync_names(platform: str = Query(default="all")):
     """Fetch campaign/adset/ad names from ad platform APIs.
     Requires API credentials in environment variables.
     """
+    p = (platform or "all").strip().lower()
+    if p not in {"meta", "google", "tiktok", "all"}:
+        raise HTTPException(status_code=400, detail="platform must be one of: meta, google, tiktok, all")
+
     results = {"synced": 0, "errors": [], "platforms": {}}
 
-    if platform in ("all", "meta"):
-        r = await _sync_meta()
+    async def run_platform(label: str, coro: Any) -> dict[str, Any]:
+        try:
+            result = await coro
+            if isinstance(result, dict):
+                return result
+            return {"synced": 0, "error": f"{label} sync returned an invalid response"}
+        except Exception as exc:
+            return {"synced": 0, "error": f"{label} sync failed: {exc}"}
+
+    if p in {"all", "meta"}:
+        r = await run_platform("Meta", _sync_meta())
         results["platforms"]["meta"] = r
-        results["synced"] += r.get("synced", 0)
+        results["synced"] += int(r.get("synced", 0) or 0)
         if r.get("error"):
             results["errors"].append(f"meta: {r['error']}")
 
-    if platform in ("all", "google"):
-        r = await _sync_google()
+    if p in {"all", "google"}:
+        r = await run_platform("Google", _sync_google())
         results["platforms"]["google"] = r
-        results["synced"] += r.get("synced", 0)
+        results["synced"] += int(r.get("synced", 0) or 0)
         if r.get("error"):
             results["errors"].append(f"google: {r['error']}")
 
-    if platform in ("all", "tiktok"):
-        r = await _sync_tiktok()
+    if p in {"all", "tiktok"}:
+        r = await run_platform("TikTok", _sync_tiktok())
         results["platforms"]["tiktok"] = r
-        results["synced"] += r.get("synced", 0)
+        results["synced"] += int(r.get("synced", 0) or 0)
         if r.get("error"):
             results["errors"].append(f"tiktok: {r['error']}")
 

@@ -424,7 +424,34 @@ export default function DashboardPage() {
               </select>
             </div>
 
+            <div>
+              <div className="text-[10px] text-gray-500 mb-1">Basis</div>
+              <select
+                value={useClickDate ? "click" : "conversion"}
+                onChange={(e) => setUseClickDate(e.target.value === "click")}
+                className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500 w-[145px]"
+                aria-label="Attribution date basis"
+              >
+                <option value="conversion">Conversion Date</option>
+                <option value="click">Click Date</option>
+              </select>
+            </div>
+
             {/* Sync + Refresh */}
+            <button
+              onClick={() => setAutoRefresh((enabled) => !enabled)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors h-[34px] ${
+                autoRefresh
+                  ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/20"
+                  : "bg-white/5 text-gray-400 hover:bg-white/10"
+              }`}
+              title={autoRefresh ? "Disable live refresh" : "Enable live refresh"}
+              aria-pressed={autoRefresh}
+            >
+              <RefreshCw size={12} />
+              {autoRefresh ? "Live On" : "Live Off"}
+            </button>
+
             <button
               onClick={async () => { await syncSpendData({ start_date: windowStart, end_date: windowEnd }); await loadReport(); }}
               disabled={syncingSpend}
