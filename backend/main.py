@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from pathlib import Path
@@ -176,17 +177,21 @@ def _is_public_path(path: str) -> bool:
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if request.method.upper() == "OPTIONS":
-        return await call_next(request)
+    try:
+        if request.method.upper() == "OPTIONS":
+            return await call_next(request)
 
-    if not is_auth_enabled() or _is_public_path(request.url.path):
-        return await call_next(request)
+        if not is_auth_enabled() or _is_public_path(request.url.path):
+            return await call_next(request)
 
-    token = extract_request_token(request)
-    if validate_token(token):
-        return await call_next(request)
+        token = extract_request_token(request)
+        if validate_token(token):
+            return await call_next(request)
 
-    return _apply_cors_headers(JSONResponse(status_code=401, content={"detail": "Unauthorized"}), request)
+        return _apply_cors_headers(JSONResponse(status_code=401, content={"detail": "Unauthorized"}), request)
+    except Exception:
+        traceback.print_exc()
+        return _apply_cors_headers(JSONResponse(status_code=500, content={"detail": "Internal Server Error"}), request)
 
 
 def _db() -> str:

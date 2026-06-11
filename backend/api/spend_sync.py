@@ -1149,22 +1149,31 @@ async def sync_spend(
         "date_range": {"start": s, "end": e},
     }
 
+    async def run_platform(label: str, coro: Any) -> dict[str, Any]:
+        try:
+            result = await coro
+            if isinstance(result, dict):
+                return result
+            return {"synced": 0, "error": f"{label} sync returned an invalid response"}
+        except Exception as exc:
+            return {"synced": 0, "error": f"{label} sync failed: {exc}"}
+
     if p in {"meta", "all"}:
-        meta_result = await _sync_meta_spend(s, e)
+        meta_result = await run_platform("Meta", _sync_meta_spend(s, e))
         results["platforms"]["meta"] = meta_result
         results["synced"] += int(meta_result.get("synced", 0) or 0)
         if meta_result.get("error"):
             results["errors"].append(f"meta: {meta_result['error']}")
 
     if p in {"google", "all"}:
-        google_result = await _sync_google_spend(s, e)
+        google_result = await run_platform("Google", _sync_google_spend(s, e))
         results["platforms"]["google"] = google_result
         results["synced"] += int(google_result.get("synced", 0) or 0)
         if google_result.get("error"):
             results["errors"].append(f"google: {google_result['error']}")
 
     if p in {"tiktok", "all"}:
-        tiktok_result = await _sync_tiktok_spend(s, e)
+        tiktok_result = await run_platform("TikTok", _sync_tiktok_spend(s, e))
         results["platforms"]["tiktok"] = tiktok_result
         results["synced"] += int(tiktok_result.get("synced", 0) or 0)
         if tiktok_result.get("error"):
