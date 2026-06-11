@@ -6,6 +6,29 @@ import { fetchChildren, apiFetch } from "@/lib/api";
 import { ArrowUpDown, ChevronDown, ChevronRight, Loader2, Play, Image as ImageIcon, X, ExternalLink } from "lucide-react";
 import { useState, useCallback, useEffect, useRef } from "react";
 
+type MetricValues = {
+  impressions?: number;
+  clicks: number;
+  ctr?: number | null;
+  orders: number;
+  cost: number;
+  cpc?: number | null;
+  cpm?: number | null;
+  cpa?: number | null;
+  cvr?: number | null;
+  total_revenue: number;
+  revenue: number;
+  aov?: number | null;
+  rpc?: number | null;
+  roas?: number | null;
+  margin_pct?: number | null;
+  profit: number;
+  net_profit: number;
+  reported: number | null;
+  reported_delta: number | null;
+  [key: string]: number | null | undefined;
+};
+
 interface TableRow {
   id: string;
   name: string;
@@ -14,16 +37,7 @@ interface TableRow {
   thumbnail_url?: string;
   creative_type?: string;
   video_id?: string;
-  metrics: {
-    clicks: number;
-    cost: number;
-    total_revenue: number;
-    revenue: number;
-    profit: number;
-    net_profit: number;
-    reported: number | null;
-    reported_delta: number | null;
-  };
+  metrics: MetricValues;
   children_available: boolean;
   children_count: number | null;
 }
@@ -38,14 +52,7 @@ interface Props {
   columns: Column[];
   rows: TableRow[];
   totals: {
-    clicks: number;
-    cost: number;
-    total_revenue: number;
-    revenue: number;
-    profit: number;
-    net_profit: number;
-    reported: number | null;
-    reported_delta: number | null;
+    [key: string]: number | null | undefined;
   };
   activeTab: string;
   onTabChange: (tab: string) => void;
@@ -69,6 +76,81 @@ const PLATFORM_META: Record<string, { label: string; dot: string }> = {
 function platformFromId(id: string): string {
   const parts = id.split("|");
   return parts.length > 1 ? parts[0].toLowerCase() : "";
+}
+
+function platformFromRow(row: Pick<TableRow, "id" | "name">): string {
+  const fromId = platformFromId(row.id);
+  if (fromId) return fromId;
+  const name = `${row.id} ${row.name}`.toLowerCase();
+  if (name.includes("google")) return "google";
+  if (name.includes("facebook") || name.includes("meta")) return "meta";
+  if (name.includes("tiktok")) return "tiktok";
+  return "";
+}
+
+function toFiniteNumber(value: number | null | undefined): number {
+  const n = Number(value ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function recalcTotals(rows: TableRow[]): MetricValues {
+  let impressions = 0;
+  let clicks = 0;
+  let orders = 0;
+  let cost = 0;
+  let totalRevenue = 0;
+  let revenue = 0;
+  let profit = 0;
+  let netProfit = 0;
+  let reported = 0;
+  let hasReported = false;
+
+  for (const row of rows) {
+    impressions += toFiniteNumber(row.metrics.impressions);
+    clicks += toFiniteNumber(row.metrics.clicks);
+    orders += toFiniteNumber(row.metrics.orders);
+    cost += toFiniteNumber(row.metrics.cost);
+    totalRevenue += toFiniteNumber(row.metrics.total_revenue);
+    revenue += toFiniteNumber(row.metrics.revenue);
+    profit += toFiniteNumber(row.metrics.profit);
+    netProfit += toFiniteNumber(row.metrics.net_profit);
+    if (row.metrics.reported != null) {
+      reported += toFiniteNumber(row.metrics.reported);
+      hasReported = true;
+    }
+  }
+
+  const cpc = clicks > 0 ? cost / clicks : null;
+  const cpm = impressions > 0 ? (cost * 1000) / impressions : null;
+  const ctr = impressions > 0 ? (clicks / impressions) * 100 : null;
+  const cpa = orders > 0 ? cost / orders : null;
+  const cvr = clicks > 0 ? (orders / clicks) * 100 : null;
+  const aov = orders > 0 ? revenue / orders : null;
+  const rpc = clicks > 0 ? revenue / clicks : null;
+  const roas = cost > 0 ? revenue / cost : null;
+  const marginPct = revenue > 0 ? (profit / revenue) * 100 : null;
+
+  return {
+    impressions,
+    clicks,
+    ctr,
+    orders: Math.round(orders * 100) / 100,
+    cost,
+    cpc,
+    cpm,
+    cpa,
+    cvr,
+    total_revenue: totalRevenue,
+    revenue,
+    aov,
+    rpc,
+    roas,
+    margin_pct: marginPct,
+    profit,
+    net_profit: netProfit,
+    reported: hasReported ? reported : null,
+    reported_delta: hasReported ? revenue - reported : null,
+  };
 }
 
 const TABS = [
@@ -151,14 +233,34 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   const metricCols = columns.filter((c) => c.type !== "dimension");
   const dimensionCol = columns.find((c) => c.type === "dimension");
   const compareById = new Map(compareRows.map((r) => [r.id, r]));
+  const querySignature = `${activeTab}|${startDate || ""}|${endDate || ""}|${model || ""}|${lookbackDays || ""}|${useClickDate ? "click" : "conversion"}`;
 
   const filtered = rows.filter((r) => {
-    const matchSearch = r.name.toLowerCase().includes(search.toLowerCase()) || r.id.toLowerCase().includes(search.toLowerCase());
-    const matchPlatform = platformFilter === "all" || platformFromId(r.id) === platformFilter;
+    const needle = search.toLowerCase().trim();
+    const matchSearch = !needle
+      || r.name.toLowerCase().includes(needle)
+      || r.id.toLowerCase().includes(needle)
+      || (r.raw_id || "").toLowerCase().includes(needle);
+    const matchPlatform = platformFilter === "all" || platformFromRow(r) === platformFilter;
     return matchSearch && matchPlatform;
   });
 
-  const platformsInData = Array.from(new Set(rows.map((r) => platformFromId(r.id)).filter(Boolean)));
+  const platformsInData = Array.from(new Set(rows.map((r) => platformFromRow(r)).filter(Boolean)));
+  const platformsKey = platformsInData.join("|");
+  const visibleTotals = search.trim() || platformFilter !== "all" ? recalcTotals(filtered) : (totals as MetricValues);
+  const totalsLabel = search.trim() || platformFilter !== "all" ? "TOTAL (VISIBLE)" : "TOTAL";
+
+  useEffect(() => {
+    setExpanded({});
+    setChildRows({});
+    setLoadingChildren({});
+  }, [querySignature]);
+
+  useEffect(() => {
+    if (platformFilter !== "all" && !platformsKey.split("|").includes(platformFilter)) {
+      onPlatformFilterChange?.("all");
+    }
+  }, [platformFilter, platformsKey, onPlatformFilterChange]);
 
   const sorted = [...filtered].sort((a, b) => {
     const av = (a.metrics as any)[sortKey] ?? 0;
@@ -273,9 +375,9 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   // Render a single data row
   const renderRow = (row: TableRow, depth: number, parentKey?: string): React.ReactNode => {
     const rowKey = parentKey ? `${parentKey}>${row.id}` : row.id;
-    const isExpanded = expanded[rowKey] || expanded[row.id];
-    const isLoading = loadingChildren[rowKey] || loadingChildren[row.id];
-    const children = childRows[rowKey] || childRows[row.id] || [];
+    const isExpanded = Boolean(expanded[rowKey]);
+    const isLoading = Boolean(loadingChildren[rowKey]);
+    const children = childRows[rowKey] || [];
     const levelColor = LEVEL_COLORS[row.level] || "";
     const levelLabel = LEVEL_LABELS[row.level] || "";
     const compareRow = depth === 0 ? compareById.get(row.id) : undefined;
@@ -341,7 +443,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
                 </span>
               )}
               {depth === 0 && (() => {
-                const plat = platformFromId(row.id);
+                const plat = platformFromRow(row);
                 const pm = plat ? PLATFORM_META[plat] : null;
                 return pm ? <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${pm.dot}`} title={pm.label} /> : null;
               })()}
@@ -459,6 +561,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
             key={t.key}
             onClick={() => {
               onTabChange(t.key);
+              onPlatformFilterChange?.("all");
               setExpanded({});
               setChildRows({});
             }}
@@ -541,11 +644,11 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
             {/* Totals row */}
             <tr className="border-t-2 border-brand-600/30 bg-white/[0.02] font-semibold">
               <td className="px-4 py-2.5 text-gray-300 sticky left-0 bg-[var(--card)] z-10">
-                TOTAL
+                {totalsLabel}
               </td>
               {metricCols.map((col) => (
                 <td key={col.key} className="text-right px-3 py-2.5 whitespace-nowrap">
-                  <CellValue col={col} metrics={totals} />
+                  <CellValue col={col} metrics={visibleTotals} />
                 </td>
               ))}
             </tr>

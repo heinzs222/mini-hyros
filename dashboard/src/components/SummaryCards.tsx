@@ -36,6 +36,17 @@ type SummaryTotals = {
   reported_delta: number | null;
   all_orders_count?: number;
   all_orders_revenue?: number;
+  all_orders_gross_revenue?: number;
+  all_orders_cogs?: number;
+  all_orders_fees?: number;
+  tracked_orders?: number;
+  tracked_revenue?: number;
+  tracked_gross_revenue?: number;
+  attributed_orders?: number;
+  attributed_revenue?: number;
+  unattributed_orders?: number;
+  unattributed_revenue?: number;
+  attribution_rate?: number | null;
   blended_roas?: number | null;
   blended_cvr?: number | null;
   blended_aov?: number | null;
@@ -61,8 +72,7 @@ function moneyDelta(current: number | null | undefined, previous: number | null 
   if (current == null || previous == null) return undefined;
   const diff = current - previous;
   const sign = diff > 0 ? "+" : diff < 0 ? "-" : "";
-  const absMoney = formatMoney(Math.abs(diff));
-  return `${sign}${absMoney}`;
+  return `${sign}${formatMoney(Math.abs(diff))}`;
 }
 
 function numberDelta(current: number | null | undefined, previous: number | null | undefined): string | undefined {
@@ -84,6 +94,22 @@ function percentPointDelta(current: number | null | undefined, previous: number 
   const diff = current - previous;
   const sign = diff > 0 ? "+" : diff < 0 ? "-" : "";
   return `${sign}${Math.abs(diff).toFixed(2)} pp`;
+}
+
+function trackedOrders(totals?: SummaryTotals | null): number {
+  return Number(totals?.tracked_orders ?? totals?.all_orders_count ?? 0);
+}
+
+function trackedRevenue(totals?: SummaryTotals | null): number {
+  return Number(totals?.tracked_revenue ?? totals?.all_orders_revenue ?? 0);
+}
+
+function attributedOrders(totals?: SummaryTotals | null): number {
+  return Number(totals?.attributed_orders ?? totals?.orders ?? 0);
+}
+
+function attributedRevenue(totals?: SummaryTotals | null): number {
+  return Number(totals?.attributed_revenue ?? totals?.revenue ?? 0);
 }
 
 function Card({
@@ -113,27 +139,44 @@ function Card({
         {value}
       </div>
       {sub && <div className="text-[11px] text-gray-500">{sub}</div>}
-      {delta && <div className={`text-[10px] ${deltaClass || "text-gray-500"}`}>Δ {delta}</div>}
+      {delta && <div className={`text-[10px] ${deltaClass || "text-gray-500"}`}>Delta {delta}</div>}
     </div>
   );
 }
 
 export default function SummaryCards({ totals, compareTotals, compareLabel, showCompareBanner = true }: Props) {
-  const delta = totals.reported_delta;
+  const syncDelta = totals.reported_delta;
 
-  // Compute blended metrics from available fields — works even if backend doesn't return them
-  const _aoRev = totals.all_orders_revenue ?? 0;
-  const _aoCnt = totals.all_orders_count ?? 0;
-  const _cost = totals.cost ?? 0;
-  const _clicks = totals.clicks ?? 0;
-  const _blendedRoas = totals.blended_roas ?? (_cost > 0 && _aoRev > 0 ? Math.round((_aoRev / _cost) * 100) / 100 : null);
-  const _blendedCvr = totals.blended_cvr ?? (_clicks > 0 && _aoCnt > 0 ? Math.round((_aoCnt / _clicks) * 100 * 1000) / 1000 : null);
-  const _blendedAov = totals.blended_aov ?? (_aoCnt > 0 ? Math.round((_aoRev / _aoCnt) * 100) / 100 : null);
-  const _blendedProfit = totals.blended_profit ?? (_aoRev > 0 ? Math.round((_aoRev - _cost) * 100) / 100 : null);
-  const _blendedCpa = totals.blended_cpa ?? (_aoCnt > 0 ? Math.round((_cost / _aoCnt) * 100) / 100 : null);
-  const _mer = (totals.mer != null && totals.mer > 0)
-    ? totals.mer
-    : (_cost > 0 && _aoRev > 0 ? Math.round((_aoRev / _cost) * 100) / 100 : null);
+  const currentTrackedOrders = trackedOrders(totals);
+  const currentTrackedRevenue = trackedRevenue(totals);
+  const currentAttributedOrders = attributedOrders(totals);
+  const currentAttributedRevenue = attributedRevenue(totals);
+  const compareTrackedOrders = compareTotals ? trackedOrders(compareTotals) : undefined;
+  const compareTrackedRevenue = compareTotals ? trackedRevenue(compareTotals) : undefined;
+  const compareAttributedOrders = compareTotals ? attributedOrders(compareTotals) : undefined;
+  const compareAttributedRevenue = compareTotals ? attributedRevenue(compareTotals) : undefined;
+
+  const cost = Number(totals.cost ?? 0);
+  const clicks = Number(totals.clicks ?? 0);
+  const blendedRoas = totals.blended_roas ?? (cost > 0 ? Math.round((currentTrackedRevenue / cost) * 100) / 100 : null);
+  const blendedCvr = totals.blended_cvr ?? (clicks > 0 ? Math.round((currentTrackedOrders / clicks) * 100000) / 1000 : null);
+  const blendedAov = totals.blended_aov ?? (currentTrackedOrders > 0 ? Math.round((currentTrackedRevenue / currentTrackedOrders) * 100) / 100 : null);
+  const blendedProfit = totals.blended_profit ?? Math.round((currentTrackedRevenue - cost) * 100) / 100;
+  const blendedCpa = totals.blended_cpa ?? (currentTrackedOrders > 0 ? Math.round((cost / currentTrackedOrders) * 100) / 100 : null);
+  const mer = totals.mer ?? (cost > 0 ? Math.round((currentTrackedRevenue / cost) * 100) / 100 : null);
+
+  const attributionRate = totals.attribution_rate ?? (
+    currentTrackedOrders > 0 ? Math.round((currentAttributedOrders / currentTrackedOrders) * 10000) / 100 : null
+  );
+  const compareAttributionRate = compareTotals?.attribution_rate ?? (
+    compareTrackedOrders && compareTrackedOrders > 0 && compareAttributedOrders != null ? (compareAttributedOrders / compareTrackedOrders) * 100 : null
+  );
+
+  const roasDisplay = totals.roas ?? blendedRoas;
+  const compareRoasDisplay = compareTotals?.roas ?? compareTotals?.blended_roas;
+  const cvrDisplay = totals.cvr ?? blendedCvr;
+  const compareCvrDisplay = compareTotals?.cvr ?? compareTotals?.blended_cvr;
+  const profitDisplay = currentAttributedRevenue > 0 ? totals.profit : blendedProfit;
 
   return (
     <div className="space-y-2">
@@ -143,92 +186,108 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-5 xl:grid-cols-10 gap-3">
         <Card
           label="Ad Spend"
           value={formatMoney(totals.cost)}
           sub={`CPC: ${formatMoney(totals.cpc)} | CPA: ${formatMoney(totals.cpa ?? totals.cac)}`}
           delta={moneyDelta(totals.cost, compareTotals?.cost)}
-          deltaClass={deltaColor((totals.cost ?? 0) - (compareTotals?.cost ?? 0))}
+          deltaClass={deltaColor(Number(totals.cost ?? 0) - Number(compareTotals?.cost ?? 0))}
           icon={<DollarSign size={14} />}
         />
         <Card
-          label={totals.revenue > 0 ? "Revenue (Attr.)" : "Revenue (Stripe)"}
-          value={formatMoney(totals.revenue > 0 ? totals.revenue : (totals.all_orders_revenue ?? 0))}
-          sub={totals.revenue > 0
-            ? `All Orders: ${formatMoney(totals.all_orders_revenue)} (${totals.all_orders_count ?? 0})`
-            : `${totals.all_orders_count ?? 0} orders · attr: $0`}
-          delta={moneyDelta(totals.revenue > 0 ? totals.revenue : (totals.all_orders_revenue ?? 0), compareTotals?.revenue)}
-          deltaClass={deltaColor((totals.revenue ?? 0) - (compareTotals?.revenue ?? 0))}
+          label="Tracked Revenue"
+          value={formatMoney(currentTrackedRevenue)}
+          sub={`${formatNumber(currentTrackedOrders)} tracked orders`}
+          delta={moneyDelta(currentTrackedRevenue, compareTrackedRevenue)}
+          deltaClass={deltaColor(compareTrackedRevenue == null ? null : currentTrackedRevenue - compareTrackedRevenue)}
           icon={<TrendingUp size={14} />}
           colorClass="text-emerald-400"
         />
         <Card
-          label={_blendedProfit != null && totals.revenue === 0 ? "Profit (Blended)" : "Profit"}
-          value={formatMoney(totals.revenue === 0 && _blendedProfit != null ? _blendedProfit : totals.profit)}
-          sub={totals.revenue === 0 && _blendedProfit != null
-            ? `Stripe rev − ad spend`
-            : `Margin: ${formatPercentValue(totals.margin_pct)} | Net: ${formatMoney(totals.net_profit)}`}
-          delta={moneyDelta(totals.profit, compareTotals?.profit)}
-          deltaClass={deltaColor((totals.profit ?? 0) - (compareTotals?.profit ?? 0))}
-          icon={<TrendingDown size={14} />}
-          colorClass={profitColor(totals.revenue === 0 && _blendedProfit != null ? _blendedProfit : totals.profit)}
+          label="Attr. Revenue"
+          value={formatMoney(currentAttributedRevenue)}
+          sub={`${formatNumber(currentAttributedOrders)} attributed orders`}
+          delta={moneyDelta(currentAttributedRevenue, compareAttributedRevenue)}
+          deltaClass={deltaColor(compareAttributedRevenue == null ? null : currentAttributedRevenue - compareAttributedRevenue)}
+          icon={<Target size={14} />}
+          colorClass={currentAttributedRevenue > 0 ? "text-emerald-400" : "text-gray-400"}
         />
         <Card
-          label={totals.roas ? "ROAS" : "ROAS (Blended)"}
-          value={formatRatio(totals.roas || _blendedRoas)}
-          sub={`MER: ${formatRatio(_mer)}`}
-          delta={ratioDelta(totals.roas, compareTotals?.roas)}
-          deltaClass={deltaColor((totals.roas ?? 0) - (compareTotals?.roas ?? 0))}
-          icon={<Target size={14} />}
-          colorClass={
-            (totals.roas || _blendedRoas || 0) >= 1
-              ? "text-emerald-400"
-              : "text-red-400"
+          label={currentAttributedRevenue > 0 ? "Profit (Attr.)" : "Profit (Tracked)"}
+          value={formatMoney(profitDisplay)}
+          sub={
+            currentAttributedRevenue > 0
+              ? `Margin: ${formatPercentValue(totals.margin_pct)} | Net: ${formatMoney(totals.net_profit)}`
+              : "Tracked revenue - ad spend"
           }
+          delta={moneyDelta(totals.profit, compareTotals?.profit)}
+          deltaClass={deltaColor(Number(totals.profit ?? 0) - Number(compareTotals?.profit ?? 0))}
+          icon={<TrendingDown size={14} />}
+          colorClass={profitColor(profitDisplay)}
+        />
+        <Card
+          label={totals.roas != null ? "ROAS (Attr.)" : "ROAS (Tracked)"}
+          value={formatRatio(roasDisplay)}
+          sub={`MER: ${formatRatio(mer)}`}
+          delta={ratioDelta(roasDisplay, compareRoasDisplay)}
+          deltaClass={deltaColor(Number(roasDisplay ?? 0) - Number(compareRoasDisplay ?? 0))}
+          icon={<Target size={14} />}
+          colorClass={(roasDisplay ?? 0) >= 1 ? "text-emerald-400" : "text-red-400"}
         />
         <Card
           label="Clicks"
           value={formatNumber(totals.clicks)}
-          sub={totals.impressions ? `Impr: ${formatNumber(totals.impressions)} | CTR: ${formatPercentValue(totals.ctr ?? null)}` : `Orders: ${formatNumber(totals.orders)} | CVR: ${formatPercentValue(totals.cvr)}`}
+          sub={
+            totals.impressions
+              ? `Impr: ${formatNumber(totals.impressions)} | CTR: ${formatPercentValue(totals.ctr ?? null)}`
+              : `Attr. CVR: ${formatPercentValue(totals.cvr)}`
+          }
           delta={numberDelta(totals.clicks, compareTotals?.clicks)}
-          deltaClass={deltaColor((totals.clicks ?? 0) - (compareTotals?.clicks ?? 0))}
+          deltaClass={deltaColor(Number(totals.clicks ?? 0) - Number(compareTotals?.clicks ?? 0))}
           icon={<MousePointerClick size={14} />}
         />
         <Card
-          label={totals.orders > 0 ? "Orders" : "Orders (Stripe)"}
-          value={formatNumber(totals.orders > 0 ? totals.orders : _aoCnt)}
-          sub={totals.orders > 0
-            ? `AOV: ${formatMoney(totals.aov)}`
-            : `AOV: ${formatMoney(_blendedAov)} · CPA: ${formatMoney(_blendedCpa)}`}
-          delta={numberDelta(totals.orders, compareTotals?.orders)}
-          deltaClass={deltaColor((totals.orders ?? 0) - (compareTotals?.orders ?? 0))}
+          label="Orders"
+          value={formatNumber(currentTrackedOrders)}
+          sub={`Attr: ${formatNumber(currentAttributedOrders)} | AOV: ${formatMoney(blendedAov)} | CPA: ${formatMoney(blendedCpa)}`}
+          delta={numberDelta(currentTrackedOrders, compareTrackedOrders)}
+          deltaClass={deltaColor(compareTrackedOrders == null ? null : currentTrackedOrders - compareTrackedOrders)}
           icon={<ShoppingCart size={14} />}
         />
         <Card
-          label={totals.cvr ? "CVR" : "CVR (Blended)"}
-          value={formatPercentValue(totals.cvr || _blendedCvr)}
-          sub={totals.cvr ? `RPC: ${formatMoney(totals.rpc)}` : `${formatNumber(_aoCnt)} orders / ${formatNumber(_clicks)} clicks`}
-          delta={percentPointDelta(totals.cvr, compareTotals?.cvr)}
-          deltaClass={deltaColor((totals.cvr ?? 0) - (compareTotals?.cvr ?? 0))}
+          label={totals.cvr != null ? "CVR (Attr.)" : "CVR (Tracked)"}
+          value={formatPercentValue(cvrDisplay)}
+          sub={
+            totals.cvr != null
+              ? `RPC: ${formatMoney(totals.rpc)} | tracked: ${formatPercentValue(blendedCvr)}`
+              : `${formatNumber(currentTrackedOrders)} orders / ${formatNumber(clicks)} clicks`
+          }
+          delta={percentPointDelta(cvrDisplay, compareCvrDisplay)}
+          deltaClass={deltaColor(Number(cvrDisplay ?? 0) - Number(compareCvrDisplay ?? 0))}
           icon={<Percent size={14} />}
-          colorClass={(totals.cvr || _blendedCvr || 0) >= 1 ? "text-emerald-400" : "text-yellow-400"}
+          colorClass={(cvrDisplay ?? 0) >= 1 ? "text-emerald-400" : "text-yellow-400"}
+        />
+        <Card
+          label="Attribution Rate"
+          value={formatPercentValue(attributionRate)}
+          sub={`${formatNumber(totals.unattributed_orders ?? Math.max(currentTrackedOrders - currentAttributedOrders, 0))} unattributed orders`}
+          delta={percentPointDelta(attributionRate, compareAttributionRate)}
+          deltaClass={deltaColor(Number(attributionRate ?? 0) - Number(compareAttributionRate ?? 0))}
+          icon={<Gauge size={14} />}
+          colorClass={(attributionRate ?? 0) >= 80 ? "text-emerald-400" : "text-yellow-400"}
         />
         <Card
           label="Sync Delta"
-          value={formatMoney(delta)}
-          sub={
-            totals.reported != null
-              ? `Reported: ${formatMoney(totals.reported)}`
-              : undefined
-          }
+          value={formatMoney(syncDelta)}
+          sub={totals.reported != null ? `Reported: ${formatMoney(totals.reported)}` : undefined}
           delta={moneyDelta(totals.reported_delta, compareTotals?.reported_delta)}
-          deltaClass={deltaColor((totals.reported_delta ?? 0) - (compareTotals?.reported_delta ?? 0))}
+          deltaClass={deltaColor(Number(totals.reported_delta ?? 0) - Number(compareTotals?.reported_delta ?? 0))}
           icon={<Gauge size={14} />}
           colorClass={
-            delta != null && delta > 0
+            syncDelta != null && syncDelta > 0
               ? "text-emerald-400"
-              : delta != null && delta < 0
+              : syncDelta != null && syncDelta < 0
               ? "text-red-400"
               : "text-gray-400"
           }

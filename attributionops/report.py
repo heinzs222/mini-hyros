@@ -861,23 +861,43 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     try:
         _all_orders = query(
             db_path,
-            "SELECT COUNT(*) AS cnt, COALESCE(SUM(gross),0) AS rev FROM orders WHERE substr(ts,1,10) BETWEEN :s AND :e",
+            """
+            SELECT
+              COUNT(*) AS cnt,
+              COALESCE(SUM(gross),0) AS gross_rev,
+              COALESCE(SUM(net),0) AS net_rev,
+              COALESCE(SUM(cogs),0) AS cogs,
+              COALESCE(SUM(fees),0) AS fees
+            FROM orders
+            WHERE substr(ts,1,10) BETWEEN :s AND :e
+            """,
             {"s": inputs.start_date, "e": inputs.end_date},
         ).rows
         _ao = _all_orders[0] if _all_orders else {}
         all_orders_count = int(_ao.get("cnt") or 0)
-        all_orders_revenue = float(_ao.get("rev") or 0.0)
+        all_orders_gross_revenue = float(_ao.get("gross_rev") or 0.0)
+        all_orders_revenue = float(_ao.get("net_rev") or 0.0)
+        all_orders_cogs = float(_ao.get("cogs") or 0.0)
+        all_orders_fees = float(_ao.get("fees") or 0.0)
     except Exception:
         all_orders_count = 0
+        all_orders_gross_revenue = 0.0
         all_orders_revenue = 0.0
+        all_orders_cogs = 0.0
+        all_orders_fees = 0.0
 
     total_clicks = int(totals["clicks"])
+    attributed_orders = round(float(totals["_orders"]), 2)
+    attributed_revenue = float(totals["revenue"])
+    unattributed_orders = round(max(float(all_orders_count) - attributed_orders, 0.0), 2)
+    unattributed_revenue = round_money(max(all_orders_revenue - attributed_revenue, 0.0))
+    attribution_rate = safe_div(attributed_orders, float(all_orders_count))
     # MER = total (Stripe) revenue / total ad spend — always blended
     mer = safe_div(all_orders_revenue, total_cost)
     blended_roas = safe_div(all_orders_revenue, total_cost)
     blended_cvr = safe_div(all_orders_count, total_clicks)
     blended_aov = safe_div(all_orders_revenue, all_orders_count) if all_orders_count else None
-    blended_profit = round_money(all_orders_revenue - total_cost) if all_orders_revenue else None
+    blended_profit = round_money(all_orders_revenue - total_cost - all_orders_cogs - all_orders_fees)
     blended_cpa = safe_div(total_cost, all_orders_count) if all_orders_count else None
 
     summary_totals = {
@@ -888,6 +908,17 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         "cpa": round_money(cpa) if cpa is not None else None,
         "all_orders_count": all_orders_count,
         "all_orders_revenue": round_money(all_orders_revenue),
+        "all_orders_gross_revenue": round_money(all_orders_gross_revenue),
+        "all_orders_cogs": round_money(all_orders_cogs),
+        "all_orders_fees": round_money(all_orders_fees),
+        "tracked_orders": all_orders_count,
+        "tracked_revenue": round_money(all_orders_revenue),
+        "tracked_gross_revenue": round_money(all_orders_gross_revenue),
+        "attributed_orders": attributed_orders,
+        "attributed_revenue": round_money(attributed_revenue),
+        "unattributed_orders": unattributed_orders,
+        "unattributed_revenue": unattributed_revenue,
+        "attribution_rate": round(attribution_rate * 100.0, 2) if attribution_rate is not None else None,
         "blended_roas": round(blended_roas, 2) if blended_roas is not None else None,
         "blended_cvr": round(blended_cvr * 100.0, 3) if blended_cvr is not None else None,
         "blended_aov": round_money(blended_aov) if blended_aov is not None else None,
@@ -1078,21 +1109,21 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
                 {"key": "impressions", "label": "Impressions", "type": "number"},
                 {"key": "clicks", "label": "Clicks", "type": "number"},
                 {"key": "ctr", "label": "CTR", "type": "percent"},
-                {"key": "orders", "label": "Orders", "type": "number"},
+                {"key": "orders", "label": "Attr. Orders", "type": "number"},
                 {"key": "cost", "label": "Cost", "type": "money"},
                 {"key": "cpc", "label": "CPC", "type": "money"},
                 {"key": "cpm", "label": "CPM", "type": "money"},
                 {"key": "cpa", "label": "CPA", "type": "money"},
                 {"key": "cvr", "label": "CVR", "type": "percent"},
-                {"key": "total_revenue", "label": "Total Revenue", "type": "money"},
-                {"key": "revenue", "label": "Revenue", "type": "money"},
+                {"key": "total_revenue", "label": "Gross Rev.", "type": "money"},
+                {"key": "revenue", "label": "Net Rev.", "type": "money"},
                 {"key": "aov", "label": "AOV", "type": "money"},
                 {"key": "roas", "label": "ROAS", "type": "ratio"},
                 {"key": "profit", "label": "Profit", "type": "money"},
                 {"key": "margin_pct", "label": "Margin", "type": "percent"},
                 {"key": "net_profit", "label": "Net Profit", "type": "money"},
-                {"key": "reported", "label": "Reported", "type": "money"},
-                {"key": "reported_delta", "label": "Rep. Delta", "type": "money"},
+                {"key": "reported", "label": "Ads Reported", "type": "money"},
+                {"key": "reported_delta", "label": "Ads Delta", "type": "money"},
             ],
             "rows": table_rows,
             "totals_row": totals_metrics,

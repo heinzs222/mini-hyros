@@ -30,7 +30,6 @@ from attributionops.tools.integrations import integrations_status
 from attributionops.tools.tracking import tracking_health_check
 from attributionops.tools.forecasting import forecasting_run
 from attributionops.tools.warehouse import warehouse_query
-from attributionops.db import query as db_query
 
 from api.webhooks import router as webhooks_router
 from api.video_metrics import router as video_router
@@ -233,36 +232,6 @@ async def get_report(
     )
     report = build_hyros_like_report(_db(), inputs)
 
-    # Inject blended metrics directly from DB (independent of attributionops cache)
-    try:
-        _row = db_query(
-            _db(),
-            "SELECT COUNT(*) AS cnt, COALESCE(SUM(gross),0) AS rev FROM orders "
-            "WHERE substr(ts,1,10) BETWEEN :s AND :e",
-            {"s": start_date, "e": end_date},
-        ).rows
-        _ao = _row[0] if _row else {}
-        _ao_cnt = int(_ao.get("cnt") or 0)
-        _ao_rev = float(_ao.get("rev") or 0.0)
-    except Exception:
-        _ao_cnt = 0
-        _ao_rev = 0.0
-    _st = report.get("summary_totals", {})
-    _cost = float(_st.get("cost") or 0.0)
-    _clicks = int(_st.get("clicks") or 0)
-    def _d(a, b): return (a / b) if b else None
-    report["summary_totals"] = {
-        **_st,
-        "all_orders_count": _ao_cnt,
-        "all_orders_revenue": round(_ao_rev, 2),
-        "mer": round(_d(_ao_rev, _cost), 2) if _d(_ao_rev, _cost) is not None else None,
-        "blended_roas": round(_d(_ao_rev, _cost), 2) if _d(_ao_rev, _cost) is not None else None,
-        "blended_cvr": round(_d(_ao_cnt, _clicks) * 100.0, 3) if _d(_ao_cnt, _clicks) is not None else None,
-        "blended_aov": round(_d(_ao_rev, _ao_cnt), 2) if _ao_cnt else None,
-        "blended_profit": round(_ao_rev - _cost, 2) if _ao_rev else None,
-        "blended_cpa": round(_d(_cost, _ao_cnt), 2) if _ao_cnt else None,
-    }
-
     # Resolve IDs to names
     entity_type_map = {
         "campaign": "campaign",
@@ -414,7 +383,7 @@ async def get_report_children(
 
     # Get touchpoint sessions grouped by child
     tp_sql = f"""
-        SELECT {tp_group} as child_key,
+        SELECT {tp_id_tmpl} as child_key,
                {tp_id_tmpl} as child_id,
                t.platform, t.campaign_id, t.adset_id, t.ad_id,
                COUNT(DISTINCT t.session_id) as sessions,
@@ -422,22 +391,23 @@ async def get_report_children(
         FROM touchpoints t
         WHERE {where_sql}
           AND COALESCE({tp_group}, '') <> ''
-        GROUP BY {tp_group}
+        GROUP BY {tp_id_tmpl}
         ORDER BY touchpoint_count DESC
     """
     tp_rows = sql_rows(db_path, tp_sql, params)
 
     # Get spend data grouped by child — this is the primary source for paid campaigns
     sp_sql = f"""
-        SELECT {sp_group} as child_key,
+        SELECT {sp_id_tmpl} as child_key,
                {sp_id_tmpl} as child_id,
                s.platform, s.campaign_id, s.adset_id, s.ad_id,
                SUM(CAST(COALESCE(s.clicks, '0') AS REAL)) as sp_clicks,
-               SUM(CAST(COALESCE(s.cost, '0') AS REAL)) as sp_cost
+               SUM(CAST(COALESCE(s.cost, '0') AS REAL)) as sp_cost,
+               SUM(CAST(COALESCE(s.impressions, '0') AS REAL)) as sp_impressions
         FROM spend s
         WHERE {spend_where_sql}
           AND COALESCE({sp_group}, '') <> ''
-        GROUP BY {sp_group}
+        GROUP BY {sp_id_tmpl}
         ORDER BY sp_cost DESC
     """
     sp_rows = sql_rows(db_path, sp_sql, spend_params)
@@ -462,6 +432,7 @@ async def get_report_children(
             "sessions": int(tp.get("sessions") or 0),
             "sp_clicks": float(sp.get("sp_clicks") or 0),
             "sp_cost": float(sp.get("sp_cost") or 0),
+            "sp_impressions": float(sp.get("sp_impressions") or 0),
         })
     tp_rows = merged_rows
 
@@ -490,18 +461,27 @@ async def get_report_children(
         # Filter attribution rows to match parent filters
         match = True
         for k, v in filters.items():
-            if v and str(ar.get(k, "")) != v:
+            actual = str(ar.get(k, "") or "")
+            if k == "account_id" and v and not actual:
+                continue
+            if v and actual != v:
                 match = False
                 break
         if not match:
             continue
 
+        platform = str(ar.get("platform", "") or "")
+        account_id = str(ar.get("account_id", "") or "")
+        campaign_id = str(ar.get("campaign_id", "") or "")
+        adset_id = str(ar.get("adset_id", "") or "")
+        ad_id = str(ar.get("ad_id", "") or "")
+
         if child_tab == "campaign":
-            ck = str(ar.get("campaign_id", ""))
+            ck = f"{platform}|{account_id}|{campaign_id}" if campaign_id else ""
         elif child_tab == "ad_set":
-            ck = str(ar.get("adset_id", ""))
+            ck = f"{platform}|{account_id}|{campaign_id}|{adset_id}" if adset_id else ""
         elif child_tab == "ad":
-            ck = str(ar.get("ad_id", ""))
+            ck = f"{platform}|{account_id}|{campaign_id}|{adset_id}|{ad_id}" if ad_id else ""
         else:
             continue
 
@@ -511,6 +491,24 @@ async def get_report_children(
             attrib_by_child[ck]["orders"] += float(str(ar.get("orders") or "0") or 0)
             attrib_by_child[ck]["cogs"] += to_float(ar.get("cogs"))
             attrib_by_child[ck]["fees"] += to_float(ar.get("fees"))
+
+    known_child_keys = {str(r.get("child_key", "")) for r in tp_rows}
+    for ck in attrib_by_child.keys():
+        if not ck or ck in known_child_keys:
+            continue
+        parts_for_key = ck.split("|")
+        tp_rows.append({
+            "child_key": ck,
+            "child_id": ck,
+            "platform": parts_for_key[0] if len(parts_for_key) > 0 else "",
+            "campaign_id": parts_for_key[2] if len(parts_for_key) > 2 else "",
+            "adset_id": parts_for_key[3] if len(parts_for_key) > 3 else "",
+            "ad_id": parts_for_key[4] if len(parts_for_key) > 4 else "",
+            "sessions": 0,
+            "sp_clicks": 0.0,
+            "sp_cost": 0.0,
+            "sp_impressions": 0.0,
+        })
 
     # Build response rows
     rows = []
@@ -526,10 +524,14 @@ async def get_report_children(
         fees = round(attrib.get("fees", 0.0), 2)
         sp_clicks = float(tp.get("sp_clicks") or 0)
         sp_cost = float(tp.get("sp_cost") or 0)
+        sp_impressions = float(tp.get("sp_impressions") or 0)
         clicks = int(sp_clicks) if sp_clicks > 0 else int(tp.get("sessions", 0))
+        impressions = int(sp_impressions)
         cost = sp_cost
         profit = round(revenue - cost - cogs - fees, 2)
         cpc = round((cost / clicks), 2) if clicks > 0 else None
+        cpm = round((cost * 1000.0 / impressions), 2) if impressions > 0 else None
+        ctr = round((clicks / impressions) * 100.0, 2) if impressions > 0 else None
         cpa = round((cost / orders), 2) if orders > 0 else None
         cvr = round((orders / clicks) * 100.0, 2) if clicks > 0 else None
         aov = round((revenue / orders), 2) if orders > 0 else None
@@ -539,15 +541,20 @@ async def get_report_children(
 
         has_grandchildren = child_tab in ("campaign", "ad_set")
 
+        entity_name = ck.split("|")[-1] if "|" in ck else ck
+
         rows.append({
             "id": str(tp.get("child_id", ck)),
-            "name": ck if ck else "(empty)",
+            "name": entity_name or "(empty)",
             "level": child_tab,
             "metrics": {
+                "impressions": impressions,
                 "clicks": clicks,
+                "ctr": ctr,
                 "orders": round(orders, 2),
                 "cost": cost,
                 "cpc": cpc,
+                "cpm": cpm,
                 "cpa": cpa,
                 "cvr": cvr,
                 "total_revenue": total_revenue,

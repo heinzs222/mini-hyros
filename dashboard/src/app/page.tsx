@@ -59,7 +59,10 @@ type CompareMode = "none" | "previous_period" | "custom_range" | "model";
 function shiftIsoDate(dateIso: string, deltaDays: number): string {
   const date = new Date(`${dateIso}T00:00:00`);
   date.setDate(date.getDate() + deltaDays);
-  return date.toISOString().slice(0, 10);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function inclusiveSpanDays(startIso: string, endIso: string): number {
@@ -112,18 +115,13 @@ export default function DashboardPage() {
   const spendSyncTimerRef = useRef<NodeJS.Timeout | null>(null);
   const syncingSpendRef = useRef(false);
   const loadReportRef = useRef<() => Promise<void>>(async () => {});
+  const reportRequestSeqRef = useRef(0);
 
   const loadReport = useCallback(async () => {
+    const requestSeq = reportRequestSeqRef.current + 1;
+    reportRequestSeqRef.current = requestSeq;
+
     try {
-      // Show cached data instantly if available
-      const cached = typeof window !== "undefined" ? window.localStorage.getItem(REPORT_CACHE_KEY) : null;
-      if (cached) {
-        try {
-          const { data } = JSON.parse(cached);
-          if (data) { setReport(data); setLoading(false); }
-        } catch {}
-      }
-      setError(null);
       const [startDate, endDate] = normalizeDateRange(primaryStartDate, primaryEndDate);
 
       const primaryParams = {
@@ -133,6 +131,25 @@ export default function DashboardPage() {
         active_tab: activeTab,
         use_click_date: useClickDate,
       };
+      const cacheKey = JSON.stringify(primaryParams);
+      let cacheHit = false;
+
+      // Show cached data only when it exactly matches the current report query.
+      const cached = typeof window !== "undefined" ? window.localStorage.getItem(REPORT_CACHE_KEY) : null;
+      if (cached) {
+        try {
+          const { data, key } = JSON.parse(cached);
+          if (key === cacheKey && data) {
+            setReport(data);
+            setLoading(false);
+            cacheHit = true;
+          }
+        } catch {}
+      }
+
+      if (!cacheHit) setLoading(true);
+      setError(null);
+      setCompareReport(null);
 
       let comparePromise: Promise<any> | null = null;
       let nextCompareLabel = "";
@@ -177,21 +194,25 @@ export default function DashboardPage() {
         comparePromise ?? Promise.resolve(null),
       ]);
 
+      if (requestSeq !== reportRequestSeqRef.current) return;
       setReport(data);
       setCompareReport(compareData);
       setCompareLabel(compareData ? nextCompareLabel : "");
       // Cache for instant display on next login
       if (data && typeof window !== "undefined") {
-        try { window.localStorage.setItem(REPORT_CACHE_KEY, JSON.stringify({ data, ts: Date.now() })); } catch {}
+        try { window.localStorage.setItem(REPORT_CACHE_KEY, JSON.stringify({ key: cacheKey, data, ts: Date.now() })); } catch {}
       }
     } catch (err: any) {
+      if (requestSeq !== reportRequestSeqRef.current) return;
       if (String(err?.message || "").includes("401")) {
         router.replace("/login");
         return;
       }
       setError(err.message || "Failed to load report");
     } finally {
-      setLoading(false);
+      if (requestSeq === reportRequestSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [
     activeTab,
@@ -274,8 +295,7 @@ export default function DashboardPage() {
       await loadReportRef.current();
     };
 
-    // Load report immediately from DB, then sync in background
-    void loadReportRef.current();
+    // Sync in the background, then refresh the current report after sync completes.
     void runBackgroundSync();
 
     spendSyncTimerRef.current = setInterval(() => {
@@ -337,6 +357,7 @@ export default function DashboardPage() {
 
   const handleTabChange = (tab: string) => {
     setActiveTab(tab);
+    setPlatformFilter("all");
   };
 
   const [windowStart, windowEnd] = normalizeDateRange(primaryStartDate, primaryEndDate);
