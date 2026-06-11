@@ -83,6 +83,14 @@ function modelLabel(value: string): string {
   return MODELS.find((m) => m.value === value)?.label || value;
 }
 
+function compactSyncError(message: string): string {
+  return String(message || "")
+    .replace(/\s+/g, " ")
+    .replace(/access_token=[^&\s]+/gi, "access_token=REDACTED")
+    .trim()
+    .slice(0, 500);
+}
+
 const REPORT_CACHE_KEY = "hyros_report_cache";
 
 export default function DashboardPage() {
@@ -245,18 +253,18 @@ export default function DashboardPage() {
         syncStripe({ start_date: syncStart, end_date: syncEnd }),
       ]);
       const errors: string[] = [];
-      if (spendResult.status === "rejected") errors.push("Spend: " + spendResult.reason?.message);
-      if (spendResult.status === "fulfilled" && spendResult.value?.errors?.length) {
-        errors.push("Spend: " + spendResult.value.errors.join(" | "));
-      }
-      if (namesResult.status === "rejected") errors.push("Names: " + namesResult.reason?.message);
-      if (namesResult.status === "fulfilled" && namesResult.value?.errors?.length) {
-        errors.push("Names: " + namesResult.value.errors.join(" | "));
-      }
-      if (stripeResult.status === "rejected") errors.push("Stripe: " + stripeResult.reason?.message);
-      if (stripeResult.status === "fulfilled" && stripeResult.value?.errors?.length) {
-        errors.push("Stripe: " + stripeResult.value.errors.join(" | "));
-      }
+      const addSyncErrors = (scope: string, result: PromiseSettledResult<any>) => {
+        if (result.status === "rejected") {
+          errors.push(`${scope}: ${result.reason?.message || result.reason || "Sync failed"}`);
+          return;
+        }
+        for (const item of result.value?.errors || []) {
+          errors.push(`${scope}: ${item}`);
+        }
+      };
+      addSyncErrors("Spend", spendResult);
+      addSyncErrors("Names", namesResult);
+      addSyncErrors("Stripe", stripeResult);
       setSyncErrors(errors);
       setLastAutoSyncAt(new Date().toISOString());
       return spendResult.status === "fulfilled" ? spendResult.value : null;
@@ -533,7 +541,16 @@ export default function DashboardPage() {
               )}
             </span>
             {syncErrors.length > 0 && (
-              <span className="text-yellow-500 text-[10px]">⚠ {syncErrors.join(" | ")}</span>
+              <div className="min-w-0 flex-1 max-h-24 overflow-auto rounded-lg border border-yellow-500/25 bg-yellow-500/10 px-2.5 py-2 text-[10px] text-yellow-300">
+                <div className="font-semibold uppercase tracking-wide">Sync needs attention</div>
+                <div className="mt-1 space-y-1">
+                  {syncErrors.map((syncError, index) => (
+                    <div key={`${syncError}-${index}`} className="break-words">
+                      {compactSyncError(syncError)}
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
         )}

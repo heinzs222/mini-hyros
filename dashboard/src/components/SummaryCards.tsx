@@ -155,15 +155,28 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
   const compareTrackedRevenue = compareTotals ? trackedRevenue(compareTotals) : undefined;
   const compareAttributedOrders = compareTotals ? attributedOrders(compareTotals) : undefined;
   const compareAttributedRevenue = compareTotals ? attributedRevenue(compareTotals) : undefined;
+  const hasAttribution = currentAttributedOrders > 0 || currentAttributedRevenue > 0;
+  const compareHasAttribution = Number(compareAttributedOrders ?? 0) > 0 || Number(compareAttributedRevenue ?? 0) > 0;
 
   const cost = Number(totals.cost ?? 0);
   const clicks = Number(totals.clicks ?? 0);
+  const compareCost = Number(compareTotals?.cost ?? 0);
+  const compareClicks = Number(compareTotals?.clicks ?? 0);
   const blendedRoas = totals.blended_roas ?? (cost > 0 ? Math.round((currentTrackedRevenue / cost) * 100) / 100 : null);
   const blendedCvr = totals.blended_cvr ?? (clicks > 0 ? Math.round((currentTrackedOrders / clicks) * 100000) / 1000 : null);
   const blendedAov = totals.blended_aov ?? (currentTrackedOrders > 0 ? Math.round((currentTrackedRevenue / currentTrackedOrders) * 100) / 100 : null);
   const blendedProfit = totals.blended_profit ?? Math.round((currentTrackedRevenue - cost) * 100) / 100;
   const blendedCpa = totals.blended_cpa ?? (currentTrackedOrders > 0 ? Math.round((cost / currentTrackedOrders) * 100) / 100 : null);
   const mer = totals.mer ?? (cost > 0 ? Math.round((currentTrackedRevenue / cost) * 100) / 100 : null);
+  const compareBlendedRoas = compareTotals
+    ? compareTotals.blended_roas ?? (compareCost > 0 ? Math.round((Number(compareTrackedRevenue ?? 0) / compareCost) * 100) / 100 : null)
+    : undefined;
+  const compareBlendedCvr = compareTotals
+    ? compareTotals.blended_cvr ?? (compareClicks > 0 ? Math.round((Number(compareTrackedOrders ?? 0) / compareClicks) * 100000) / 1000 : null)
+    : undefined;
+  const compareBlendedProfit = compareTotals
+    ? compareTotals.blended_profit ?? Math.round((Number(compareTrackedRevenue ?? 0) - compareCost) * 100) / 100
+    : undefined;
 
   const attributionRate = totals.attribution_rate ?? (
     currentTrackedOrders > 0 ? Math.round((currentAttributedOrders / currentTrackedOrders) * 10000) / 100 : null
@@ -172,11 +185,24 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
     compareTrackedOrders && compareTrackedOrders > 0 && compareAttributedOrders != null ? (compareAttributedOrders / compareTrackedOrders) * 100 : null
   );
 
-  const roasDisplay = totals.roas ?? blendedRoas;
-  const compareRoasDisplay = compareTotals?.roas ?? compareTotals?.blended_roas;
-  const cvrDisplay = totals.cvr ?? blendedCvr;
-  const compareCvrDisplay = compareTotals?.cvr ?? compareTotals?.blended_cvr;
-  const profitDisplay = currentAttributedRevenue > 0 ? totals.profit : blendedProfit;
+  const roasDisplay = hasAttribution ? totals.roas ?? blendedRoas : blendedRoas;
+  const compareRoasDisplay = compareTotals
+    ? compareHasAttribution
+      ? compareTotals.roas ?? compareBlendedRoas
+      : compareBlendedRoas
+    : undefined;
+  const cvrDisplay = hasAttribution ? totals.cvr ?? blendedCvr : blendedCvr;
+  const compareCvrDisplay = compareTotals
+    ? compareHasAttribution
+      ? compareTotals.cvr ?? compareBlendedCvr
+      : compareBlendedCvr
+    : undefined;
+  const profitDisplay = hasAttribution ? totals.profit : blendedProfit;
+  const compareProfitDisplay = compareTotals
+    ? compareHasAttribution
+      ? compareTotals.profit
+      : compareBlendedProfit
+    : undefined;
 
   return (
     <div className="space-y-2">
@@ -214,20 +240,20 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
           colorClass={currentAttributedRevenue > 0 ? "text-emerald-400" : "text-gray-400"}
         />
         <Card
-          label={currentAttributedRevenue > 0 ? "Profit (Attr.)" : "Profit (Tracked)"}
+          label={hasAttribution ? "Profit (Attr.)" : "Profit (Tracked)"}
           value={formatMoney(profitDisplay)}
           sub={
-            currentAttributedRevenue > 0
+            hasAttribution
               ? `Margin: ${formatPercentValue(totals.margin_pct)} | Net: ${formatMoney(totals.net_profit)}`
               : "Tracked revenue - ad spend"
           }
-          delta={moneyDelta(totals.profit, compareTotals?.profit)}
-          deltaClass={deltaColor(Number(totals.profit ?? 0) - Number(compareTotals?.profit ?? 0))}
+          delta={moneyDelta(profitDisplay, compareProfitDisplay)}
+          deltaClass={deltaColor(Number(profitDisplay ?? 0) - Number(compareProfitDisplay ?? 0))}
           icon={<TrendingDown size={14} />}
           colorClass={profitColor(profitDisplay)}
         />
         <Card
-          label={totals.roas != null ? "ROAS (Attr.)" : "ROAS (Tracked)"}
+          label={hasAttribution ? "ROAS (Attr.)" : "ROAS (Tracked)"}
           value={formatRatio(roasDisplay)}
           sub={`MER: ${formatRatio(mer)}`}
           delta={ratioDelta(roasDisplay, compareRoasDisplay)}
@@ -256,10 +282,10 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
           icon={<ShoppingCart size={14} />}
         />
         <Card
-          label={totals.cvr != null ? "CVR (Attr.)" : "CVR (Tracked)"}
+          label={hasAttribution ? "CVR (Attr.)" : "CVR (Tracked)"}
           value={formatPercentValue(cvrDisplay)}
           sub={
-            totals.cvr != null
+            hasAttribution
               ? `RPC: ${formatMoney(totals.rpc)} | tracked: ${formatPercentValue(blendedCvr)}`
               : `${formatNumber(currentTrackedOrders)} orders / ${formatNumber(clicks)} clicks`
           }

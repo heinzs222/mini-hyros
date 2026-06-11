@@ -379,18 +379,20 @@ def _meta_error_message(payload: dict[str, Any], status_code: int) -> str:
     err = payload.get("error") or {}
     message = str(err.get("message") or "Meta API request failed").strip()
     code = err.get("code")
+    subcode = err.get("error_subcode")
     error_type = err.get("type")
-    fbtrace = err.get("fbtrace_id")
 
-    parts = [message]
+    bits = [f"HTTP {status_code}"]
     if error_type:
-        parts.append(f"type={error_type}")
+        bits.append(str(error_type))
     if code is not None:
-        parts.append(f"code={code}")
-    if fbtrace:
-        parts.append(f"fbtrace_id={fbtrace}")
-    parts.append(f"status={status_code}")
-    return " | ".join(parts)
+        bits.append(f"code={code}")
+    if subcode is not None:
+        bits.append(f"subcode={subcode}")
+    prefix = bits[0] if len(bits) == 1 else f"{bits[0]}: {' '.join(bits[1:])}"
+    if message:
+        return f"{prefix}: {message}"[:600]
+    return prefix[:600]
 
 
 async def _meta_fetch_all(
@@ -718,6 +720,8 @@ async def _sync_google() -> dict:
 
     except httpx.HTTPStatusError as exc:
         details = _google_api_error_message(exc.response, str(exc))
+        if "login-customer-id" in details and not login_customer_id:
+            details += " Set GOOGLE_ADS_LOGIN_CUSTOMER_ID to the manager account ID, or use a customer ID directly accessible by this OAuth user."
         return {"synced": synced, "error": f"Google Ads API error: {details}"}
     except Exception as exc:
         return {"synced": synced, "error": str(exc)}

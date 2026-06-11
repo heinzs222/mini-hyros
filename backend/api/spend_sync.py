@@ -582,6 +582,41 @@ def _google_api_error_message(response: httpx.Response | None, fallback: str) ->
     return ": ".join(parts)[:600]
 
 
+def _meta_api_error_message(response: httpx.Response | None, fallback: str) -> str:
+    if response is None:
+        return fallback
+
+    try:
+        payload = response.json()
+    except Exception:
+        text = " ".join((response.text or fallback).split())
+        return f"HTTP {response.status_code}: {text[:300]}"
+
+    error = payload.get("error") if isinstance(payload, dict) else {}
+    if not isinstance(error, dict):
+        return f"HTTP {response.status_code}: {str(payload)[:300]}"
+
+    message = str(error.get("message") or "Meta API request failed").strip()
+    error_type = str(error.get("type") or "").strip()
+    code = error.get("code")
+    subcode = error.get("error_subcode")
+
+    meta_bits = []
+    if error_type:
+        meta_bits.append(error_type)
+    if code is not None:
+        meta_bits.append(f"code={code}")
+    if subcode is not None:
+        meta_bits.append(f"subcode={subcode}")
+
+    prefix = f"HTTP {response.status_code}"
+    if meta_bits:
+        prefix += f": {' '.join(meta_bits)}"
+    if message:
+        return f"{prefix}: {message}"[:600]
+    return prefix[:600]
+
+
 async def _fetch_meta_insights(access_token: str, ad_account_id: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
     account_id = ad_account_id.replace("act_", "").strip()
     fields = ",".join(
@@ -719,7 +754,7 @@ async def _sync_meta_spend(start_date: str, end_date: str) -> dict[str, Any]:
             "account_id": ad_account_id.replace("act_", ""),
         }
     except httpx.HTTPStatusError as exc:
-        details = exc.response.text[:400] if exc.response is not None else str(exc)
+        details = _meta_api_error_message(exc.response, str(exc))
         return {"synced": 0, "error": f"Meta Insights API error: {details}"}
     except Exception as exc:
         return {"synced": 0, "error": str(exc)}
@@ -924,6 +959,8 @@ async def _sync_google_spend(start_date: str, end_date: str) -> dict[str, Any]:
         }
     except httpx.HTTPStatusError as exc:
         details = _google_api_error_message(exc.response, str(exc))
+        if "login-customer-id" in details and not login_customer_id:
+            details += " Set GOOGLE_ADS_LOGIN_CUSTOMER_ID to the manager account ID, or use a customer ID directly accessible by this OAuth user."
         return {"synced": 0, "error": f"Google Ads API error: {details}"}
     except Exception as exc:
         return {"synced": 0, "error": str(exc)}
