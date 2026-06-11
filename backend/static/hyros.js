@@ -216,10 +216,19 @@
     var url = ENDPOINT + path;
     var payload = JSON.stringify(data);
     var sent = false;
+    var isCrossOrigin = false;
+
+    try {
+      isCrossOrigin = new URL(url, window.location.href).origin !== window.location.origin;
+    } catch (e) {
+      isCrossOrigin = false;
+    }
 
     // Prefer sendBeacon for page unload resilience. If browser policies
     // block ping/beacon requests (or sendBeacon fails), fall back to fetch.
-    if (navigator.sendBeacon) {
+    // Cross-origin beacons use credentialed CORS, which breaks public pixels
+    // unless the backend allows credentials. Use credentialless fetch instead.
+    if (!isCrossOrigin && navigator.sendBeacon) {
       try {
         var blob = new Blob([payload], { type: "application/json" });
         sent = navigator.sendBeacon(url, blob) === true;
@@ -232,6 +241,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: payload,
+        credentials: isCrossOrigin ? "omit" : "same-origin",
         keepalive: true,
       }).catch(function () {});
     }
