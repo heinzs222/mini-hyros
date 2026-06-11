@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Request, HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -102,6 +103,60 @@ def _lookup_customer_key(db_path: str, visitor_id: str = "", session_id: str = "
             if row and row[0]:
                 return str(row[0]).strip()
     return ""
+
+
+def _stape_endpoint() -> str:
+    return os.environ.get("STAPE_ENDPOINT", "").strip().rstrip("/")
+
+
+def _compact_params(params: dict[str, Any]) -> dict[str, str]:
+    return {
+        str(key): str(value)
+        for key, value in params.items()
+        if value is not None and str(value) != ""
+    }
+
+
+async def _forward_purchase_to_stape(payload: dict[str, Any], order_id: str, session_id: str, value: float) -> None:
+    endpoint = _stape_endpoint()
+    if not endpoint:
+        return
+
+    params = _compact_params({
+        "v": os.environ.get("STAPE_VERSION", "2").strip() or "2",
+        "event": "purchase",
+        "value": value,
+        "currency": payload.get("currency", "USD"),
+        "transaction_id": order_id,
+        "order_id": order_id,
+        "event_id": payload.get("event_id") or order_id,
+        "visitor_id": payload.get("visitor_id"),
+        "session_id": session_id,
+        "utm_source": payload.get("utm_source"),
+        "utm_medium": payload.get("utm_medium"),
+        "utm_campaign": payload.get("utm_campaign"),
+        "utm_content": payload.get("utm_content"),
+        "utm_term": payload.get("utm_term"),
+        "gclid": payload.get("gclid"),
+        "wbraid": payload.get("wbraid"),
+        "gbraid": payload.get("gbraid"),
+        "fbclid": payload.get("fbclid"),
+        "ttclid": payload.get("ttclid"),
+        "ad_id": payload.get("ad_id"),
+        "adset_id": payload.get("adset_id"),
+        "campaign_id": payload.get("campaign_id"),
+        "creative_id": payload.get("creative_id"),
+        "landing_page": payload.get("landing_page"),
+        "referrer": payload.get("referrer"),
+        "device": payload.get("device"),
+    })
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.get(f"{endpoint}/data", params=params)
+    except Exception:
+        # Stape forwarding must never make the conversion endpoint fail.
+        return
 
 
 def _backfill_customer_key(conn: sqlite3.Connection, customer_key: str, visitor_id: str = "", session_id: str = "") -> None:
@@ -591,5 +646,7 @@ async def track_conversion(request: Request):
         "ts": now,
         "source": "pixel",
     }))
+    if is_purchase:
+        asyncio.create_task(_forward_purchase_to_stape(payload, order_id, session_id, gross))
 
     return {"ok": True, "order_id": order_id, "customer_key": customer_key}
