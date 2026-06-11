@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import subprocess
@@ -179,6 +180,13 @@ def _default_dates() -> tuple[str, str]:
     end = date.today()
     start = end - timedelta(days=30)
     return start.isoformat(), end.isoformat()
+
+
+def _optional_script_attr(name: str, value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    return f' {name}="{html.escape(value, quote=True)}"'
 
 
 # ── REST endpoints ─────────────────────────────────────────────────────────────
@@ -729,6 +737,8 @@ async def tracking_setup_page():
     """Serve an HTML page with copy-paste tracking script instructions."""
     host = os.environ.get("TRACKING_DOMAIN", "http://localhost:8000")
     token = os.environ.get("SITE_TOKEN", "your-site-token")
+    stape_endpoint = os.environ.get("STAPE_ENDPOINT", "").strip().rstrip("/")
+    stape_attr = _optional_script_attr("data-stape-endpoint", stape_endpoint)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -794,7 +804,7 @@ async def tracking_setup_page():
 
 <div class="section">
 <pre id="snippet-main"><code>&lt;!-- Mini Hyros Tracking Pixel --&gt;
-&lt;script src="{host}/t/hyros.js" data-token="{token}" data-endpoint="{host}"&gt;&lt;/script&gt;</code></pre>
+&lt;script src="{host}/t/hyros.js" data-token="{token}" data-endpoint="{host}"{stape_attr}&gt;&lt;/script&gt;</code></pre>
 <button class="copy-btn" onclick="copySnippet('snippet-main')">Copy</button>
 </div>
 
@@ -1018,6 +1028,8 @@ async def ghl_setup_page():
     """GHL-specific setup instructions page."""
     host = os.environ.get("TRACKING_DOMAIN", "http://localhost:8000")
     token = os.environ.get("SITE_TOKEN", "your-site-token")
+    stape_endpoint = os.environ.get("STAPE_ENDPOINT", "").strip().rstrip("/")
+    stape_attr = _optional_script_attr("data-stape-endpoint", stape_endpoint)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1064,7 +1076,7 @@ async def ghl_setup_page():
 
 <div class="section">
 <pre id="ghl-pixel"><code>&lt;!-- Mini Hyros Tracking Pixel --&gt;
-&lt;script src="{host}/t/hyros.js" data-token="{token}" data-endpoint="{host}"&gt;&lt;/script&gt;
+&lt;script src="{host}/t/hyros.js" data-token="{token}" data-endpoint="{host}"{stape_attr}&gt;&lt;/script&gt;
 &lt;script src="{host}/t/hyros-ghl.js"&gt;&lt;/script&gt;</code></pre>
 <button class="copy-btn" onclick="copySnippet('ghl-pixel')">Copy</button>
 </div>

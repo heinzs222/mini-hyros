@@ -40,6 +40,7 @@ git push -u origin main
    - `ATTRIBUTIONOPS_DB_PATH` = `/app/data/dummy/attributionops_demo.sqlite`
    - `TRACKING_DOMAIN` = `https://mini-hyros-api.onrender.com` (your Render URL)
    - `SITE_TOKEN` = `your-site-token` (pick any string)
+   - `STAPE_ENDPOINT` = `https://wnczugry.usv.stape.io` (your Stape sGTM URL)
 6. Click **Create Web Service**
 7. Wait for build to complete (~3-5 min)
 8. Your backend URL will be: `https://mini-hyros-api.onrender.com`
@@ -68,8 +69,9 @@ git push -u origin main
 
 Go back to Render → your web service → Environment:
 - Set `TRACKING_DOMAIN` = `https://mini-hyros-api.onrender.com`
+- Set `STAPE_ENDPOINT` = `https://wnczugry.usv.stape.io`
 
-This makes the setup page (`/t/setup`) show the correct script URLs.
+This makes the setup page (`/t/setup`) show the correct script URLs and Stape endpoint.
 
 ---
 
@@ -81,7 +83,8 @@ Your main tracking script will be:
 ```html
 <script src="https://mini-hyros-api.onrender.com/t/hyros.js"
         data-token="your-site-token"
-        data-endpoint="https://mini-hyros-api.onrender.com"></script>
+        data-endpoint="https://mini-hyros-api.onrender.com"
+        data-stape-endpoint="https://wnczugry.usv.stape.io"></script>
 ```
 
 ---
