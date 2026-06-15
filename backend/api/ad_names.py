@@ -554,6 +554,12 @@ def _google_ads_api_version() -> str:
     return raw if raw.startswith("v") else f"v{raw}"
 
 
+def _google_ads_api_sync_disabled() -> bool:
+    mode = str(os.environ.get("GOOGLE_ADS_SYNC_MODE", "api") or "api").strip().lower()
+    disabled = str(os.environ.get("DISABLE_GOOGLE_ADS_API_SYNC", "") or "").strip().lower()
+    return mode in {"script", "push", "manual", "disabled", "off"} or disabled in {"1", "true", "yes", "on"}
+
+
 def _google_api_error_message(response: httpx.Response | None, fallback: str) -> str:
     if response is None:
         return fallback
@@ -636,6 +642,13 @@ async def _google_gaql(
 
 async def _sync_google() -> dict:
     """Sync campaign / ad-group / ad names from Google Ads REST API (no google-ads library needed)."""
+    if _google_ads_api_sync_disabled():
+        return {
+            "synced": 0,
+            "skipped": True,
+            "reason": "Google Ads API name sync is disabled; names are imported from Google Ads Script spend push.",
+        }
+
     client_id = os.environ.get("GOOGLE_ADS_CLIENT_ID", "").strip()
     client_secret = os.environ.get("GOOGLE_ADS_CLIENT_SECRET", "").strip()
     refresh_token = os.environ.get("GOOGLE_ADS_REFRESH_TOKEN", "").strip()

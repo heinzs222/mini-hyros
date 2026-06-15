@@ -41,6 +41,7 @@ git push -u origin main
    - `TRACKING_DOMAIN` = `https://mini-hyros-api.onrender.com` (your Render URL)
    - `SITE_TOKEN` = `your-site-token` (pick any string)
    - `GOOGLE_ADS_SCRIPT_TOKEN` = `your-private-google-ads-script-token` (optional, for Google Ads Script spend push)
+   - `GOOGLE_ADS_SYNC_MODE` = `api` (use `script` when Google Ads Script is pushing spend instead of the Ads API)
    - `STAPE_ENDPOINT` = `https://wnczugry.usv.stape.io` (your Stape sGTM URL)
 6. Click **Create Web Service**
 7. Wait for build to complete (~3-5 min)
