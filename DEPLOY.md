@@ -40,6 +40,7 @@ git push -u origin main
    - `ATTRIBUTIONOPS_DB_PATH` = `/app/data/dummy/attributionops_demo.sqlite`
    - `TRACKING_DOMAIN` = `https://mini-hyros-api.onrender.com` (your Render URL)
    - `SITE_TOKEN` = `your-site-token` (pick any string)
+   - `GOOGLE_ADS_SCRIPT_TOKEN` = `your-private-google-ads-script-token` (optional, for Google Ads Script spend push)
    - `STAPE_ENDPOINT` = `https://wnczugry.usv.stape.io` (your Stape sGTM URL)
 6. Click **Create Web Service**
 7. Wait for build to complete (~3-5 min)

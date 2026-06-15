@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hmac
 import io
 import json
 import os
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -31,6 +32,29 @@ class SpendCsvImportPayload(BaseModel):
     account_id: str = ""
     csv_text: str
     replace: bool = True
+
+
+class GoogleAdsScriptSpendRow(BaseModel):
+    date: str
+    account_id: str = ""
+    campaign_id: str = ""
+    campaign_name: str = ""
+    adset_id: str = ""
+    adset_name: str = ""
+    ad_id: str = ""
+    ad_name: str = ""
+    clicks: float = 0
+    impressions: float = 0
+    cost: float = 0
+
+
+class GoogleAdsScriptSpendPayload(BaseModel):
+    token: str = ""
+    account_id: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    replace: bool = True
+    rows: list[GoogleAdsScriptSpendRow]
 
 
 def _db() -> str:
@@ -68,6 +92,31 @@ def _ensure_ad_names_table(db_path: str) -> None:
             )"""
         )
         conn.commit()
+
+
+def _spend_push_tokens() -> list[str]:
+    return [
+        str(token).strip()
+        for token in (
+            os.environ.get("GOOGLE_ADS_SCRIPT_TOKEN", ""),
+            os.environ.get("SPEND_WEBHOOK_TOKEN", ""),
+            os.environ.get("SITE_TOKEN", ""),
+        )
+        if str(token).strip()
+    ]
+
+
+def _authorize_spend_push(request: Request, payload_token: str = "") -> None:
+    provided = (
+        str(request.headers.get("x-mini-hyros-token") or "").strip()
+        or str(request.query_params.get("token") or "").strip()
+        or str(payload_token or "").strip()
+    )
+    allowed = _spend_push_tokens()
+    if not allowed:
+        raise HTTPException(status_code=500, detail="Set GOOGLE_ADS_SCRIPT_TOKEN or SITE_TOKEN before using spend push.")
+    if not provided or not any(hmac.compare_digest(provided, token) for token in allowed):
+        raise HTTPException(status_code=401, detail="Invalid spend push token.")
 
 
 def _default_dates() -> tuple[str, str]:
@@ -505,6 +554,210 @@ def _import_spend_csv_rows(payload: SpendCsvImportPayload) -> dict[str, Any]:
         "names_upserted": names_upserted,
         "date_range": {"start": start_date, "end": end_date},
         "replace": bool(payload.replace),
+        "warnings": warnings,
+    }
+
+
+def _import_google_ads_script_rows(payload: GoogleAdsScriptSpendPayload) -> dict[str, Any]:
+    account_id_default = _clean_google_customer_id(_clean_id(payload.account_id))
+    imported_at = _now()
+    parsed_rows: list[dict[str, Any]] = []
+    skipped = 0
+    warnings: list[str] = []
+
+    for row in payload.rows:
+        day = _parse_import_date(row.date)
+        if not day:
+            skipped += 1
+            continue
+
+        account_id = _clean_google_customer_id(_clean_id(row.account_id) or account_id_default)
+        campaign_id = _clean_id(row.campaign_id)
+        adset_id = _clean_id(row.adset_id)
+        ad_id = _clean_id(row.ad_id)
+        campaign_name = str(row.campaign_name or "").strip()
+        adset_name = str(row.adset_name or "").strip()
+        ad_name = str(row.ad_name or "").strip()
+
+        if not campaign_id and not adset_id and not ad_id:
+            skipped += 1
+            continue
+
+        metadata = json.dumps(
+            {
+                "campaign_name": campaign_name,
+                "adset_name": adset_name,
+                "ad_name": ad_name,
+                "source": "google_ads_script",
+                "imported_at": imported_at,
+            },
+            separators=(",", ":"),
+        )
+        parsed_rows.append(
+            {
+                "platform": "google",
+                "date": day,
+                "account_id": account_id,
+                "campaign_id": campaign_id,
+                "adset_id": adset_id,
+                "ad_id": ad_id,
+                "creative_id": "",
+                "clicks": str(max(int(round(_num(row.clicks))), 0)),
+                "cost": _fmt_decimal(max(_num(row.cost), 0.0)),
+                "impressions": str(max(int(round(_num(row.impressions))), 0)),
+                "metadata": metadata,
+                "campaign_name": campaign_name,
+                "adset_name": adset_name,
+                "ad_name": ad_name,
+            }
+        )
+
+    if not parsed_rows:
+        start_date = _parse_import_date(payload.start_date)
+        end_date = _parse_import_date(payload.end_date)
+        deleted = 0
+        if payload.replace and start_date and end_date:
+            if start_date > end_date:
+                start_date, end_date = end_date, start_date
+            db_path = _db()
+            _ensure_spend_table(db_path)
+            with connect(db_path) as conn:
+                if account_id_default:
+                    deleted = conn.execute(
+                        """
+                        DELETE FROM spend
+                        WHERE platform = 'google'
+                          AND date BETWEEN ? AND ?
+                          AND account_id = ?
+                        """,
+                        (start_date, end_date, account_id_default),
+                    ).rowcount
+                else:
+                    deleted = conn.execute(
+                        """
+                        DELETE FROM spend
+                        WHERE platform = 'google'
+                          AND date BETWEEN ? AND ?
+                        """,
+                        (start_date, end_date),
+                    ).rowcount
+                conn.commit()
+
+        return {
+            "ok": True,
+            "platform": "google",
+            "inserted": 0,
+            "deleted": int(deleted or 0),
+            "skipped": skipped,
+            "date_range": {"start": start_date, "end": end_date} if start_date and end_date else {},
+            "replace": bool(payload.replace),
+            "warnings": warnings or ["No usable spend rows were received from Google Ads Script."],
+        }
+
+    dates = [r["date"] for r in parsed_rows]
+    start_date = _parse_import_date(payload.start_date) or min(dates)
+    end_date = _parse_import_date(payload.end_date) or max(dates)
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    db_path = _db()
+    _ensure_spend_table(db_path)
+    _ensure_ad_names_table(db_path)
+
+    inserted = 0
+    names_upserted = 0
+    with connect(db_path) as conn:
+        if payload.replace:
+            if account_id_default:
+                deleted = conn.execute(
+                    """
+                    DELETE FROM spend
+                    WHERE platform = 'google'
+                      AND date BETWEEN ? AND ?
+                      AND account_id = ?
+                    """,
+                    (start_date, end_date, account_id_default),
+                ).rowcount
+            else:
+                deleted = conn.execute(
+                    """
+                    DELETE FROM spend
+                    WHERE platform = 'google'
+                      AND date BETWEEN ? AND ?
+                    """,
+                    (start_date, end_date),
+                ).rowcount
+        else:
+            deleted = 0
+
+        for r in parsed_rows:
+            conn.execute(
+                """
+                INSERT INTO spend (
+                    platform, date, account_id, campaign_id,
+                    adset_id, ad_id, creative_id,
+                    clicks, cost, impressions, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    r["platform"],
+                    r["date"],
+                    r["account_id"],
+                    r["campaign_id"],
+                    r["adset_id"],
+                    r["ad_id"],
+                    r["creative_id"],
+                    r["clicks"],
+                    r["cost"],
+                    r["impressions"],
+                    r["metadata"],
+                ),
+            )
+            inserted += 1
+
+            if r["campaign_id"] and r["campaign_name"] and r["campaign_name"] != r["campaign_id"]:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at)
+                    VALUES ('google', 'campaign', ?, ?, '', 'google_ads_script', ?)
+                    """,
+                    (r["campaign_id"], r["campaign_name"], imported_at),
+                )
+                names_upserted += 1
+            if r["adset_id"] and r["adset_name"] and r["adset_name"] != r["adset_id"]:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at)
+                    VALUES ('google', 'adset', ?, ?, ?, 'google_ads_script', ?)
+                    """,
+                    (r["adset_id"], r["adset_name"], r["campaign_id"], imported_at),
+                )
+                names_upserted += 1
+            if r["ad_id"] and r["ad_name"] and r["ad_name"] != r["ad_id"]:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO ad_names (platform, entity_type, entity_id, name, parent_id, source, updated_at)
+                    VALUES ('google', 'ad', ?, ?, ?, 'google_ads_script', ?)
+                    """,
+                    (r["ad_id"], r["ad_name"], r["adset_id"], imported_at),
+                )
+                names_upserted += 1
+
+        conn.commit()
+
+    if not account_id_default:
+        warnings.append("No account_id was supplied. Rows were imported, but account-level drilldowns may stay blank.")
+
+    return {
+        "ok": True,
+        "platform": "google",
+        "inserted": inserted,
+        "deleted": int(deleted or 0),
+        "skipped": skipped,
+        "names_upserted": names_upserted,
+        "date_range": {"start": start_date, "end": end_date},
+        "replace": bool(payload.replace),
+        "source": "google_ads_script",
         "warnings": warnings,
     }
 
@@ -1282,3 +1535,14 @@ async def import_spend_csv(payload: SpendCsvImportPayload):
     attribution dashboard uses imported cost/click/impression data immediately.
     """
     return _import_spend_csv_rows(payload)
+
+
+@router.post("/google-ads-script")
+async def import_google_ads_script_spend(request: Request, payload: GoogleAdsScriptSpendPayload):
+    """Receive Google Ads spend rows pushed by a Google Ads Script.
+
+    This bypasses Google Ads API developer-token approval because the report is
+    generated inside the advertiser account and posted into Mini Hyros.
+    """
+    _authorize_spend_push(request, payload.token)
+    return _import_google_ads_script_rows(payload)

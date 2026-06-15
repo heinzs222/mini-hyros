@@ -166,6 +166,8 @@ def _is_public_path(path: str) -> bool:
         return True
     if p.startswith("/api/webhooks"):
         return True
+    if p == "/api/spend/google-ads-script":
+        return True
     if p.startswith("/t/"):
         return True
     if p.startswith("/v1/lst/"):
