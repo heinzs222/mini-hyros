@@ -14,6 +14,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import Counter
+from typing import Any
 
 from fastapi import APIRouter, Query, HTTPException
 
@@ -32,6 +33,194 @@ def _db() -> str:
 def _table_columns(db_path: str, table: str) -> set[str]:
     with connect(db_path) as conn:
         return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _parse_ts(ts: str) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _duration_label(start_ts: str, end_ts: str) -> str:
+    start = _parse_ts(start_ts)
+    end = _parse_ts(end_ts)
+    if not start or not end:
+        return ""
+    seconds = max((end - start).total_seconds(), 0)
+    minutes = seconds / 60
+    hours = seconds / 3600
+    if minutes < 1:
+        return "<1 min"
+    if hours < 1:
+        return f"{int(minutes)} min"
+    if hours < 24:
+        return f"{hours:.1f} hours"
+    return f"{hours / 24:.1f} days"
+
+
+def _ad_name_map(db_path: str) -> dict[tuple[str, str, str], str]:
+    try:
+        rows = db_query(db_path, """
+            SELECT platform, entity_type, entity_id, name
+            FROM ad_names
+            WHERE COALESCE(entity_id, '') != ''
+        """)
+    except Exception:
+        return {}
+    return {
+        (str(r.get("platform") or ""), str(r.get("entity_type") or ""), str(r.get("entity_id") or "")): str(r.get("name") or "")
+        for r in rows
+    }
+
+
+def _entity_name(names: dict[tuple[str, str, str], str], platform: str, entity_type: str, entity_id: str) -> str:
+    if not entity_id:
+        return ""
+    return names.get((platform, entity_type, entity_id), "")
+
+
+def _event_label(event: dict[str, Any]) -> str:
+    details = event.get("details") or {}
+    event_type = event.get("type")
+    if event_type == "touchpoint":
+        platform = details.get("platform") or details.get("channel") or "direct"
+        campaign = details.get("campaign_name") or details.get("campaign_id") or ""
+        return f"{platform}: {campaign}" if campaign else str(platform)
+    if event_type == "session":
+        event_name = details.get("event_name") or ""
+        if event_name and event_name.lower() not in ("pageview", "page_view"):
+            return str(event_name)
+        return str(details.get("page_title") or details.get("landing_page") or "Session")
+    if event_type == "order":
+        return "Purchase"
+    if event_type == "conversion":
+        return str(details.get("conversion_type") or "Conversion")
+    return str(event_type or "event")
+
+
+def _compact_path(timeline: list[dict[str, Any]], max_steps: int = 8) -> list[str]:
+    parts: list[str] = []
+    for event in timeline:
+        label = _event_label(event).strip()
+        if not label:
+            continue
+        if not parts or parts[-1] != label:
+            parts.append(label)
+    if len(parts) <= max_steps:
+        return parts
+    return parts[: max_steps - 1] + [f"+{len(parts) - max_steps + 1} more"]
+
+
+def _conversion_timeline(
+    db_path: str,
+    customer_key: str,
+    conversion_ts: str,
+    conversion: dict[str, Any],
+    names: dict[tuple[str, str, str], str],
+) -> list[dict[str, Any]]:
+    timeline: list[dict[str, Any]] = []
+
+    session_cols = _table_columns(db_path, "sessions")
+    session_select = [
+        "session_id", "ts", "utm_source", "utm_medium", "utm_campaign", "utm_content",
+        "landing_page", "device", "referrer", "gclid", "fbclid", "ttclid",
+    ]
+    for optional_col in ("visitor_id", "event_name", "page_title", "custom_data_json"):
+        if optional_col in session_cols:
+            session_select.append(optional_col)
+
+    sessions = db_query(db_path, f"""
+        SELECT {", ".join(session_select)}
+        FROM sessions
+        WHERE customer_key = ? AND ts <= ?
+        ORDER BY ts
+    """, [customer_key, conversion_ts])
+
+    for s in sessions:
+        details = {
+            "session_id": s.get("session_id", ""),
+            "utm_source": s.get("utm_source", ""),
+            "utm_medium": s.get("utm_medium", ""),
+            "utm_campaign": s.get("utm_campaign", ""),
+            "utm_content": s.get("utm_content", ""),
+            "landing_page": s.get("landing_page", ""),
+            "device": s.get("device", ""),
+            "referrer": s.get("referrer", ""),
+            "has_gclid": bool(s.get("gclid")),
+            "has_fbclid": bool(s.get("fbclid")),
+            "has_ttclid": bool(s.get("ttclid")),
+        }
+        for optional_col in ("visitor_id", "event_name", "page_title"):
+            if optional_col in s:
+                details[optional_col] = s.get(optional_col, "")
+        if s.get("custom_data_json"):
+            try:
+                details["custom_data"] = json.loads(s.get("custom_data_json") or "{}")
+            except json.JSONDecodeError:
+                details["custom_data"] = {}
+        timeline.append({"type": "session", "ts": s.get("ts", ""), "details": details})
+
+    touchpoints = db_query(db_path, """
+        SELECT ts, channel, platform, campaign_id, adset_id, ad_id,
+               creative_id, gclid, fbclid, ttclid, session_id
+        FROM touchpoints
+        WHERE customer_key = ? AND ts <= ?
+        ORDER BY ts
+    """, [customer_key, conversion_ts])
+
+    for t in touchpoints:
+        platform = str(t.get("platform") or "")
+        campaign_id = str(t.get("campaign_id") or "")
+        adset_id = str(t.get("adset_id") or "")
+        ad_id = str(t.get("ad_id") or "")
+        timeline.append({
+            "type": "touchpoint",
+            "ts": t.get("ts", ""),
+            "details": {
+                "channel": t.get("channel", ""),
+                "platform": platform,
+                "campaign_id": campaign_id,
+                "campaign_name": _entity_name(names, platform, "campaign", campaign_id),
+                "adset_id": adset_id,
+                "adset_name": _entity_name(names, platform, "adset", adset_id),
+                "ad_id": ad_id,
+                "ad_name": _entity_name(names, platform, "ad", ad_id),
+                "creative_id": t.get("creative_id", ""),
+                "session_id": t.get("session_id", ""),
+                "has_gclid": bool(t.get("gclid")),
+                "has_fbclid": bool(t.get("fbclid")),
+                "has_ttclid": bool(t.get("ttclid")),
+            },
+        })
+
+    conv_type = conversion.get("type") or "Conversion"
+    timeline.append({
+        "type": "conversion",
+        "ts": conversion_ts,
+        "details": {
+            "conversion_id": conversion.get("conversion_id", ""),
+            "conversion_type": conv_type,
+            "value": float(conversion.get("value", 0) or 0),
+            "order_id": conversion.get("order_id", ""),
+        },
+    })
+
+    if str(conv_type).strip().lower() in ("purchase", "payment"):
+        timeline.append({
+            "type": "order",
+            "ts": conversion_ts,
+            "details": {
+                "order_id": conversion.get("order_id", ""),
+                "gross": float(conversion.get("gross", conversion.get("value", 0)) or 0),
+                "net": float(conversion.get("net", conversion.get("value", 0)) or 0),
+            },
+        })
+
+    timeline.sort(key=lambda event: str(event.get("ts") or ""))
+    return timeline
 
 
 @router.get("/customer")
@@ -190,6 +379,90 @@ async def customer_journey(
             "time_to_convert": time_to_convert,
         },
         "timeline": timeline,
+    }
+
+
+@router.get("/leads")
+async def lead_paths(
+    start_date: str = Query(default=""),
+    end_date: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
+    include_purchases: bool = Query(default=True),
+):
+    """Recent lead and purchase paths with the timeline for each customer."""
+    db_path = _db()
+
+    lead_types = [
+        "lead",
+        "formsubmission",
+        "form_submission",
+        "signup",
+        "booking",
+        "appointment",
+        "appointmentbooked",
+        "appointment_booked",
+    ]
+    purchase_types = ["purchase", "payment"] if include_purchases else []
+    wanted_types = lead_types + purchase_types
+    placeholders = ", ".join("?" for _ in wanted_types)
+    where = [
+        "COALESCE(c.customer_key, '') != ''",
+        f"LOWER(COALESCE(c.type, '')) IN ({placeholders})",
+    ]
+    params: list[Any] = list(wanted_types)
+
+    if start_date:
+        where.append("date(substr(c.ts, 1, 10)) >= date(?)")
+        params.append(start_date)
+    if end_date:
+        where.append("date(substr(c.ts, 1, 10)) <= date(?)")
+        params.append(end_date)
+
+    params.append(limit)
+    conversions = db_query(db_path, f"""
+        SELECT c.conversion_id, c.ts, c.type, c.value, c.order_id, c.customer_key,
+               o.gross, o.net
+        FROM conversions c
+        LEFT JOIN orders o ON o.order_id = c.order_id
+        WHERE {" AND ".join(where)}
+        ORDER BY c.ts DESC
+        LIMIT ?
+    """, params)
+
+    names = _ad_name_map(db_path)
+    rows: list[dict[str, Any]] = []
+    for conv in conversions:
+        customer_key = str(conv.get("customer_key") or "")
+        conversion_ts = str(conv.get("ts") or "")
+        timeline = _conversion_timeline(db_path, customer_key, conversion_ts, conv, names)
+        pre_conversion = [event for event in timeline if event.get("type") not in ("conversion", "order")]
+        first_touch = pre_conversion[0] if pre_conversion else None
+        last_touch = pre_conversion[-1] if pre_conversion else None
+
+        rows.append({
+            "customer_key": customer_key,
+            "customer_key_short": f"{customer_key[:10]}..." if len(customer_key) > 13 else customer_key,
+            "conversion_id": conv.get("conversion_id", ""),
+            "conversion_type": conv.get("type", ""),
+            "conversion_ts": conversion_ts,
+            "order_id": conv.get("order_id", ""),
+            "value": round(float(conv.get("value", 0) or 0), 2),
+            "gross": round(float(conv.get("gross", conv.get("value", 0)) or 0), 2),
+            "first_touch": first_touch,
+            "last_touch": last_touch,
+            "first_touch_ts": first_touch.get("ts", "") if first_touch else "",
+            "last_touch_ts": last_touch.get("ts", "") if last_touch else "",
+            "time_to_convert": _duration_label(first_touch.get("ts", ""), conversion_ts) if first_touch else "",
+            "touchpoint_count": len(pre_conversion),
+            "path": _compact_path(timeline),
+            "timeline": timeline,
+        })
+
+    return {
+        "rows": rows,
+        "count": len(rows),
+        "include_purchases": include_purchases,
+        "date_range": {"start": start_date, "end": end_date},
     }
 
 

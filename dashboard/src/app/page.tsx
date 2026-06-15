@@ -520,7 +520,7 @@ export default function DashboardPage() {
         {/* Feature Tabs */}
         {mainTab === "funnel" && <FunnelPanel />}
         {mainTab === "ltv" && <LtvPanel />}
-        {mainTab === "journey" && <JourneyPanel />}
+        {mainTab === "journey" && <JourneyPanel startDate={windowStart} endDate={windowEnd} />}
         {mainTab === "cohort" && <CohortPanel />}
         {mainTab === "capi" && <CapiPanel />}
         {mainTab === "spend" && (
@@ -573,27 +573,15 @@ export default function DashboardPage() {
               showCompareBanner={false}
             />
 
-            {/* Source + Funnel clarity */}
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-              <div className="xl:col-span-2">
+            {/* Main attribution grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+              <div className="lg:col-span-2 space-y-6">
                 <PlatformComparisonTable
                   rows={report.platform_comparison?.rows || []}
                   compareRows={compareReport?.platform_comparison?.rows || []}
                   compareLabel={compareLabel}
                 />
-              </div>
-              <div>
-                <FunnelSnapshotTable
-                  rows={report.funnels?.rows || []}
-                  compareRows={compareReport?.funnels?.rows || []}
-                  compareLabel={compareLabel}
-                />
-              </div>
-            </div>
 
-            {/* Charts + Sidebar */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-2 space-y-6">
                 <PerformanceChart
                   data={report.charts?.time_series || []}
                   compareData={compareReport?.charts?.time_series || []}
@@ -618,6 +606,11 @@ export default function DashboardPage() {
                 />
               </div>
               <div className="space-y-4">
+                <FunnelSnapshotTable
+                  rows={report.funnels?.rows || []}
+                  compareRows={compareReport?.funnels?.rows || []}
+                  compareLabel={compareLabel}
+                />
                 <TrackingHealth
                   tracking={report.tracking}
                   freshness={report.diagnostics?.data_freshness}

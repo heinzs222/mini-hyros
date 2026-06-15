@@ -210,6 +210,22 @@ export async function fetchCommonPaths(limit = 10, min_conversions = 1) {
   return res.json();
 }
 
+export async function fetchLeadJourneys(params: {
+  start_date?: string;
+  end_date?: string;
+  limit?: number;
+  include_purchases?: boolean;
+} = {}) {
+  const sp = new URLSearchParams();
+  if (params.start_date) sp.set("start_date", params.start_date);
+  if (params.end_date) sp.set("end_date", params.end_date);
+  if (params.limit) sp.set("limit", String(params.limit));
+  if (params.include_purchases === false) sp.set("include_purchases", "false");
+  const res = await apiFetch(`${API_BASE}/api/journey/leads?${sp.toString()}`);
+  if (!res.ok) throw new Error(`Lead journeys fetch failed: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchCustomerJourney(customerKey: string) {
   const res = await apiFetch(`${API_BASE}/api/journey/customer?customer_key=${customerKey}`);
   if (!res.ok) throw new Error(`Customer journey fetch failed: ${res.status}`);
