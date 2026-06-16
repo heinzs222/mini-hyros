@@ -7,19 +7,27 @@
 
 var MINI_HYROS_ENDPOINT = "https://mini-hyros.onrender.com";
 var MINI_HYROS_TOKEN = "PASTE_SITE_OR_GOOGLE_ADS_SCRIPT_TOKEN_HERE";
+
+// DATE_MODE options:
+// - "LOOKBACK": push today plus the previous LOOKBACK_DAYS days.
+// - "CUSTOM": push the exact CUSTOM_START_DATE to CUSTOM_END_DATE range.
+// - "YESTERDAY", "LAST_7_DAYS", "THIS_MONTH", "LAST_MONTH": common presets.
+var DATE_MODE = "LOOKBACK";
 var LOOKBACK_DAYS = 30;
+var CUSTOM_START_DATE = "2026-05-17";
+var CUSTOM_END_DATE = "2026-06-16";
+
 var BATCH_SIZE = 1000;
 
 function main() {
   var account = AdsApp.currentAccount();
   var accountId = account.getCustomerId().replace(/-/g, "");
   var tz = account.getTimeZone();
-  var endDate = new Date();
-  var startDate = new Date();
-  startDate.setDate(endDate.getDate() - LOOKBACK_DAYS);
+  var dateRange = getDateRange(tz);
+  var start = dateRange.start;
+  var end = dateRange.end;
 
-  var start = Utilities.formatDate(startDate, tz, "yyyy-MM-dd");
-  var end = Utilities.formatDate(endDate, tz, "yyyy-MM-dd");
+  Logger.log("Mini Hyros: running Google Ads spend push for " + start + " to " + end + " (" + dateRange.mode + ").");
   var rows = fetchSpendRows(accountId, start, end);
 
   if (!rows.length) {
@@ -34,6 +42,67 @@ function main() {
   }
 
   Logger.log("Mini Hyros: pushed " + rows.length + " Google Ads spend rows for " + start + " to " + end + ".");
+}
+
+function getDateRange(tz) {
+  var mode = String(DATE_MODE || "LOOKBACK").toUpperCase();
+  var today = stripTime(new Date());
+  var startDate;
+  var endDate;
+
+  if (mode === "CUSTOM") {
+    startDate = parseDateString(CUSTOM_START_DATE);
+    endDate = parseDateString(CUSTOM_END_DATE);
+  } else if (mode === "YESTERDAY") {
+    startDate = shiftDate(today, -1);
+    endDate = shiftDate(today, -1);
+  } else if (mode === "LAST_7_DAYS") {
+    startDate = shiftDate(today, -6);
+    endDate = today;
+  } else if (mode === "THIS_MONTH") {
+    startDate = new Date(today.getFullYear(), today.getMonth(), 1);
+    endDate = today;
+  } else if (mode === "LAST_MONTH") {
+    startDate = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    endDate = new Date(today.getFullYear(), today.getMonth(), 0);
+  } else {
+    mode = "LOOKBACK";
+    endDate = today;
+    startDate = shiftDate(today, -Number(LOOKBACK_DAYS || 30));
+  }
+
+  if (!startDate || !endDate || isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+    throw new Error("Invalid date range. Use yyyy-MM-dd, for example 2026-05-17.");
+  }
+
+  if (startDate.getTime() > endDate.getTime()) {
+    var tmp = startDate;
+    startDate = endDate;
+    endDate = tmp;
+  }
+
+  return {
+    mode: mode,
+    start: Utilities.formatDate(startDate, tz, "yyyy-MM-dd"),
+    end: Utilities.formatDate(endDate, tz, "yyyy-MM-dd")
+  };
+}
+
+function parseDateString(value) {
+  var text = String(value || "").trim();
+  var match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+function shiftDate(date, days) {
+  var copy = new Date(date.getTime());
+  copy.setDate(copy.getDate() + Number(days || 0));
+  return copy;
+}
+
+function stripTime(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
 function fetchSpendRows(accountId, start, end) {
