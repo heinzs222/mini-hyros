@@ -14,6 +14,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import Counter
+from itertools import groupby
 from typing import Any
 
 from fastapi import APIRouter, Query, HTTPException
@@ -474,48 +475,43 @@ async def common_paths(
     """Most common conversion paths (channel sequences leading to purchase)."""
     db_path = _db()
 
-    # Get customers who have orders
-    customers_with_orders = db_query(db_path, """
-        SELECT DISTINCT customer_key FROM orders WHERE customer_key != ''
+    # Revenue per customer in one grouped query (was one query per customer).
+    rev_rows = db_query(db_path, """
+        SELECT customer_key, SUM(CAST(gross AS REAL)) AS rev
+        FROM orders WHERE customer_key != '' GROUP BY customer_key
+    """)
+    revenue_by_customer = {r["customer_key"]: float(r["rev"] or 0) for r in rev_rows}
+
+    # All touchpoints for customers-with-orders in one ordered query (was one
+    # query per customer). Rows arrive grouped by customer_key, then by ts.
+    touch_rows = db_query(db_path, """
+        SELECT t.customer_key, t.channel, t.platform
+        FROM touchpoints t
+        WHERE t.customer_key != '' AND EXISTS (
+            SELECT 1 FROM orders o WHERE o.customer_key = t.customer_key AND o.customer_key != ''
+        )
+        ORDER BY t.customer_key, t.ts
     """)
 
     path_counter = Counter()
     path_revenue = {}
 
-    for cust in customers_with_orders:
-        ck = cust["customer_key"]
-
-        # Get touchpoint channels in order for this customer
-        touches = db_query(db_path, """
-            SELECT channel, platform FROM touchpoints
-            WHERE customer_key = ?
-            ORDER BY ts
-        """, [ck])
-
-        if not touches:
-            continue
-
-        # Build path string
+    for ck, group in groupby(touch_rows, key=lambda r: r["customer_key"]):
+        # Build path string (collapse consecutive identical labels).
         path_parts = []
         prev = ""
-        for t in touches:
+        for t in group:
             label = t.get("platform") or t.get("channel") or "direct"
             if label != prev:
                 path_parts.append(label)
                 prev = label
 
+        if not path_parts:
+            continue
+
         path_str = " → ".join(path_parts)
         path_counter[path_str] += 1
-
-        # Get revenue for this customer
-        rev = db_query(db_path, """
-            SELECT SUM(CAST(gross AS REAL)) as rev FROM orders WHERE customer_key = ?
-        """, [ck])
-        revenue = float(rev[0]["rev"] or 0) if rev else 0
-
-        if path_str not in path_revenue:
-            path_revenue[path_str] = 0
-        path_revenue[path_str] += revenue
+        path_revenue[path_str] = path_revenue.get(path_str, 0) + revenue_by_customer.get(ck, 0)
 
     # Filter and sort
     rows = []

@@ -104,25 +104,28 @@ export default function JourneyPanel({ startDate = "", endDate = "" }: JourneyPa
   const [expandedLeads, setExpandedLeads] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
+    const controller = new AbortController();
     async function load() {
       setLoading(true);
       try {
         const [s, p, leads] = await Promise.all([
-          fetchJourneyStats(),
-          fetchCommonPaths(20, 1),
-          fetchLeadJourneys({ start_date: startDate, end_date: endDate, limit: 50 }),
+          fetchJourneyStats(controller.signal),
+          fetchCommonPaths(20, 1, controller.signal),
+          fetchLeadJourneys({ start_date: startDate, end_date: endDate, limit: 50 }, controller.signal),
         ]);
         setStats(s);
         setPaths(p.rows || []);
         setLeadJourneys(leads.rows || []);
-      } catch {
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
         setStats(null);
         setPaths([]);
         setLeadJourneys([]);
       }
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
     load();
+    return () => controller.abort();
   }, [startDate, endDate]);
 
   async function handleSearch() {

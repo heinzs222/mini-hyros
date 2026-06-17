@@ -1,5 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  experimental: {
+    optimizePackageImports: ["lucide-react", "recharts"],
+  },
   // Only proxy in local dev (when no NEXT_PUBLIC_API_URL is set, frontend
   // calls localhost:3000/api/* which gets rewritten to the backend).
   // In production on Vercel, NEXT_PUBLIC_API_URL points directly at the

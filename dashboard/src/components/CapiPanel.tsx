@@ -10,17 +10,23 @@ export default function CapiPanel() {
   const [syncResult, setSyncResult] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
-  async function load() {
+  async function load(signal?: AbortSignal) {
     setLoading(true);
     try {
-      const [s, l] = await Promise.all([fetchCapiStatus(), fetchCapiLog(20)]);
+      const [s, l] = await Promise.all([fetchCapiStatus(signal), fetchCapiLog(20, signal)]);
       setStatus(s);
       setLog(l.rows || []);
-    } catch {}
-    setLoading(false);
+    } catch (err: any) {
+      if (err?.name === "AbortError") return;
+    }
+    if (!signal?.aborted) setLoading(false);
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => controller.abort();
+  }, []);
 
   async function handleSync() {
     setSyncing(true);

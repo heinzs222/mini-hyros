@@ -10,16 +10,23 @@ export default function LtvPanel() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const controller = new AbortController();
     async function load() {
       setLoading(true);
       try {
-        const [s, r] = await Promise.all([fetchLtvSummary(), fetchLtvBySource(breakdown)]);
+        const [s, r] = await Promise.all([
+          fetchLtvSummary(controller.signal),
+          fetchLtvBySource(breakdown, "30,60,90,365", controller.signal),
+        ]);
         setSummary(s);
         setRows(r.rows || []);
-      } catch {}
-      setLoading(false);
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
+      }
+      if (!controller.signal.aborted) setLoading(false);
     }
     load();
+    return () => controller.abort();
   }, [breakdown]);
 
   if (loading) return <div className="text-center py-12 text-gray-500 text-sm">Loading LTV data...</div>;

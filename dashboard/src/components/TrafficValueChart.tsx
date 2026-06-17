@@ -1,5 +1,6 @@
 "use client";
 
+import { memo, useMemo } from "react";
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -52,8 +53,8 @@ function fmtMoney(v: number | null | undefined): string {
   return `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-export default function TrafficValueChart({ data, compareData = [], compareLabel = "" }: Props) {
-  const chartData = alignSeries(data, compareData);
+function TrafficValueChart({ data, compareData = [], compareLabel = "" }: Props) {
+  const chartData = useMemo(() => alignSeries(data, compareData), [data, compareData]);
   const hasCompare = compareData.length > 0;
 
   return (
@@ -96,8 +97,8 @@ export default function TrafficValueChart({ data, compareData = [], compareLabel
               }}
             />
             <Legend wrapperStyle={{ fontSize: 11 }} />
-            <Bar yAxisId="left" dataKey="clicks" name="Clicks" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-            <Line yAxisId="right" type="monotone" dataKey="rpc" name="RPC" stroke="#22c55e" strokeWidth={2} dot={false} />
+            <Bar yAxisId="left" dataKey="clicks" name="Clicks" fill="#3b82f6" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+            <Line yAxisId="right" type="monotone" dataKey="rpc" name="RPC" stroke="#22c55e" strokeWidth={2} dot={false} isAnimationActive={false} />
             {hasCompare && (
               <>
                 <Bar
@@ -106,6 +107,7 @@ export default function TrafficValueChart({ data, compareData = [], compareLabel
                   name={`Clicks (${compareLabel || "Compare"})`}
                   fill="#1e40af"
                   radius={[4, 4, 0, 0]}
+                  isAnimationActive={false}
                 />
                 <Line
                   yAxisId="right"
@@ -116,6 +118,7 @@ export default function TrafficValueChart({ data, compareData = [], compareLabel
                   strokeWidth={2}
                   dot={false}
                   strokeDasharray="4 4"
+                  isAnimationActive={false}
                 />
               </>
             )}
@@ -125,3 +128,5 @@ export default function TrafficValueChart({ data, compareData = [], compareLabel
     </div>
   );
 }
+
+export default memo(TrafficValueChart);

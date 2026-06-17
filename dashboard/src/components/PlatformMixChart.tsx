@@ -1,5 +1,6 @@
 "use client";
 
+import { memo, useMemo } from "react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -45,8 +46,8 @@ function buildRows(rows: PlatformRow[], compareRows: PlatformRow[]) {
   });
 }
 
-export default function PlatformMixChart({ rows, compareRows = [], compareLabel = "" }: Props) {
-  const chartRows = buildRows(rows, compareRows);
+function PlatformMixChart({ rows, compareRows = [], compareLabel = "" }: Props) {
+  const chartRows = useMemo(() => buildRows(rows, compareRows), [rows, compareRows]);
   const hasCompare = compareRows.length > 0;
 
   return (
@@ -91,8 +92,8 @@ export default function PlatformMixChart({ rows, compareRows = [], compareLabel 
               />
               <Legend wrapperStyle={{ fontSize: 11 }} />
 
-              <Bar dataKey="revenue" name="Revenue" fill="#22c55e" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="profit" name="Profit" fill="#6366f1" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="revenue" name="Revenue" fill="#22c55e" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+              <Bar dataKey="profit" name="Profit" fill="#6366f1" radius={[4, 4, 0, 0]} isAnimationActive={false} />
               {hasCompare && (
                 <>
                   <Bar
@@ -100,12 +101,14 @@ export default function PlatformMixChart({ rows, compareRows = [], compareLabel 
                     name={`Revenue (${compareLabel || "Compare"})`}
                     fill="#60a5fa"
                     radius={[4, 4, 0, 0]}
+                    isAnimationActive={false}
                   />
                   <Bar
                     dataKey="compare_profit"
                     name={`Profit (${compareLabel || "Compare"})`}
                     fill="#a78bfa"
                     radius={[4, 4, 0, 0]}
+                    isAnimationActive={false}
                   />
                 </>
               )}
@@ -116,3 +119,5 @@ export default function PlatformMixChart({ rows, compareRows = [], compareLabel 
     </div>
   );
 }
+
+export default memo(PlatformMixChart);

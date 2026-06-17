@@ -37,7 +37,15 @@ def _now() -> str:
     return datetime.now(UTC).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# The ad_names schema never changes at runtime, so ensure it once per process
+# per DB instead of re-running CREATE TABLE + 4 ALTER-in-try/except on every
+# read (get_name_map/get_thumbnails_map are called on every /api/report).
+_ensured_dbs: set[str] = set()
+
+
 def _ensure_table(db_path: str) -> None:
+    if db_path in _ensured_dbs:
+        return
     with connect(db_path) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS ad_names (
             platform TEXT,
@@ -60,6 +68,7 @@ def _ensure_table(db_path: str) -> None:
             except Exception:
                 pass
         conn.commit()
+    _ensured_dbs.add(db_path)
 
 
 # ── Models ───────────────────────────────────────────────────────────────────
@@ -191,13 +200,7 @@ def get_name_map(db_path: str, entity_type: str = "") -> dict[str, str]:
     - "{entity_id}" (fallback for legacy callers)
     """
     try:
-        with connect(db_path) as conn:
-            conn.execute("""CREATE TABLE IF NOT EXISTS ad_names (
-                platform TEXT, entity_type TEXT, entity_id TEXT,
-                name TEXT, parent_id TEXT, source TEXT DEFAULT 'manual',
-                updated_at TEXT, PRIMARY KEY (platform, entity_type, entity_id)
-            )""")
-            conn.commit()
+        _ensure_table(db_path)
 
         if entity_type:
             rows = sql_rows(

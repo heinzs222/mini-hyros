@@ -154,17 +154,26 @@ async def ltv_by_customer(
         LIMIT ?
     """, [limit])
 
-    # Enrich with acquisition source
+    # Acquisition source (earliest touchpoint) for the selected customers in a
+    # single windowed query, instead of one query per customer.
+    keys = [c["customer_key"] for c in customers]
+    first_touch_by_customer: dict[str, dict] = {}
+    if keys:
+        placeholders = ",".join(["?"] * len(keys))
+        ft_rows = db_query(db_path, f"""
+            SELECT customer_key, platform, campaign_id, channel FROM (
+                SELECT customer_key, platform, campaign_id, channel,
+                       ROW_NUMBER() OVER (PARTITION BY customer_key ORDER BY ts, rowid) AS rn
+                FROM touchpoints
+                WHERE customer_key IN ({placeholders})
+            ) WHERE rn = 1
+        """, keys)
+        first_touch_by_customer = {r["customer_key"]: r for r in ft_rows}
+
     rows = []
     for c in customers:
         ck = c["customer_key"]
-        touch = db_query(db_path, """
-            SELECT platform, campaign_id, channel, MIN(ts) as first_ts
-            FROM touchpoints WHERE customer_key = ?
-            ORDER BY ts LIMIT 1
-        """, [ck])
-
-        source = touch[0] if touch else {}
+        source = first_touch_by_customer.get(ck, {})
         rows.append({
             "customer_key": ck,
             "order_count": int(c.get("order_count", 0)),

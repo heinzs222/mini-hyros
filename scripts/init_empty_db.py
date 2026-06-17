@@ -49,18 +49,37 @@ def init_db(db_path: str) -> None:
             order_id TEXT, customer_key TEXT
         );""")
 
+        # Indexes for the warehouse access patterns used by the report/
+        # attribution engine. The originals only covered customer_key/session_id/
+        # visitor_id — there was no index on any ts/date column, so every
+        # date-range filter (the dominant pattern) ran as a full table scan. Keep
+        # in sync with scripts/generate_dummy_data.py (WAREHOUSE_INDEXES).
         conn.execute("CREATE INDEX idx_sessions_session_id ON sessions(session_id);")
         conn.execute("CREATE INDEX idx_sessions_visitor_id ON sessions(visitor_id);")
         conn.execute("CREATE INDEX idx_sessions_customer_key ON sessions(customer_key);")
+        conn.execute("CREATE INDEX idx_sessions_ts ON sessions(ts);")
+        # Composite covers the attribution customer+window scan and tracking EXISTS.
+        conn.execute("CREATE INDEX idx_touchpoints_customer_key_ts ON touchpoints(customer_key, ts);")
         conn.execute("CREATE INDEX idx_touchpoints_session_id ON touchpoints(session_id);")
         conn.execute("CREATE INDEX idx_touchpoints_customer_key ON touchpoints(customer_key);")
+        conn.execute("CREATE INDEX idx_touchpoints_ts ON touchpoints(ts);")
+        conn.execute("CREATE INDEX idx_touchpoints_campaign_id ON touchpoints(campaign_id);")
         conn.execute("CREATE INDEX idx_orders_customer_key ON orders(customer_key);")
+        conn.execute("CREATE INDEX idx_orders_ts ON orders(ts);")
+        conn.execute("CREATE INDEX idx_orders_order_id ON orders(order_id);")
         conn.execute("CREATE INDEX idx_conversions_customer_key ON conversions(customer_key);")
+        conn.execute("CREATE INDEX idx_conversions_ts ON conversions(ts);")
+        conn.execute("CREATE INDEX idx_conversions_order_id ON conversions(order_id);")
+        conn.execute("CREATE INDEX idx_spend_date ON spend(date);")
+        conn.execute("CREATE INDEX idx_spend_platform_date ON spend(platform, date);")
 
         conn.execute("""CREATE TABLE reported_value (
             platform TEXT, date TEXT, account_id TEXT, campaign_id TEXT,
             adset_id TEXT, ad_id TEXT, conversion_type TEXT, reported_value TEXT
         );""")
+
+        conn.execute("CREATE INDEX idx_reported_value_date ON reported_value(date);")
+        conn.execute("CREATE INDEX idx_reported_value_platform_date ON reported_value(platform, date);")
 
         conn.execute("""CREATE TABLE IF NOT EXISTS ad_names (
             platform TEXT,

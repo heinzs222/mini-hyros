@@ -21,13 +21,13 @@ export function clearAuthToken() {
   window.localStorage.removeItem(AUTH_TOKEN_KEY);
 }
 
-export async function apiFetch(input: string, init: RequestInit = {}) {
+export async function apiFetch(input: string, init: RequestInit = {}, signal?: AbortSignal) {
   const headers = new Headers(init.headers || {});
   const token = readAuthToken();
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  return fetch(input, { ...init, headers });
+  return fetch(input, { ...init, headers, signal: signal ?? init.signal });
 }
 
 export async function loginWithPassword(username: string, password: string) {
@@ -185,27 +185,27 @@ export async function fetchTracking() {
 }
 
 // ── LTV ──────────────────────────────────────────────────────────────────────
-export async function fetchLtvBySource(breakdown = "platform", windows = "30,60,90,365") {
-  const res = await apiFetch(`${API_BASE}/api/ltv/by-source?breakdown=${breakdown}&windows=${windows}`);
+export async function fetchLtvBySource(breakdown = "platform", windows = "30,60,90,365", signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/ltv/by-source?breakdown=${breakdown}&windows=${windows}`, {}, signal);
   if (!res.ok) throw new Error(`LTV fetch failed: ${res.status}`);
   return res.json();
 }
 
-export async function fetchLtvSummary() {
-  const res = await apiFetch(`${API_BASE}/api/ltv/summary`);
+export async function fetchLtvSummary(signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/ltv/summary`, {}, signal);
   if (!res.ok) throw new Error(`LTV summary fetch failed: ${res.status}`);
   return res.json();
 }
 
 // ── Customer Journey ─────────────────────────────────────────────────────────
-export async function fetchJourneyStats() {
-  const res = await apiFetch(`${API_BASE}/api/journey/stats`);
+export async function fetchJourneyStats(signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/journey/stats`, {}, signal);
   if (!res.ok) throw new Error(`Journey stats fetch failed: ${res.status}`);
   return res.json();
 }
 
-export async function fetchCommonPaths(limit = 10, min_conversions = 1) {
-  const res = await apiFetch(`${API_BASE}/api/journey/common-paths?limit=${limit}&min_conversions=${min_conversions}`);
+export async function fetchCommonPaths(limit = 10, min_conversions = 1, signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/journey/common-paths?limit=${limit}&min_conversions=${min_conversions}`, {}, signal);
   if (!res.ok) throw new Error(`Common paths fetch failed: ${res.status}`);
   return res.json();
 }
@@ -215,13 +215,13 @@ export async function fetchLeadJourneys(params: {
   end_date?: string;
   limit?: number;
   include_purchases?: boolean;
-} = {}) {
+} = {}, signal?: AbortSignal) {
   const sp = new URLSearchParams();
   if (params.start_date) sp.set("start_date", params.start_date);
   if (params.end_date) sp.set("end_date", params.end_date);
   if (params.limit) sp.set("limit", String(params.limit));
   if (params.include_purchases === false) sp.set("include_purchases", "false");
-  const res = await apiFetch(`${API_BASE}/api/journey/leads?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/journey/leads?${sp.toString()}`, {}, signal);
   if (!res.ok) throw new Error(`Lead journeys fetch failed: ${res.status}`);
   return res.json();
 }
@@ -233,24 +233,24 @@ export async function fetchCustomerJourney(customerKey: string) {
 }
 
 // ── Funnel ───────────────────────────────────────────────────────────────────
-export async function fetchFunnelReport(startDate = "", endDate = "") {
+export async function fetchFunnelReport(startDate = "", endDate = "", signal?: AbortSignal) {
   const sp = new URLSearchParams();
   if (startDate) sp.set("start_date", startDate);
   if (endDate) sp.set("end_date", endDate);
-  const res = await apiFetch(`${API_BASE}/api/funnel/report?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/funnel/report?${sp.toString()}`, {}, signal);
   if (!res.ok) throw new Error(`Funnel report fetch failed: ${res.status}`);
   return res.json();
 }
 
-export async function fetchFunnelBySource(breakdown = "platform") {
-  const res = await apiFetch(`${API_BASE}/api/funnel/by-source?breakdown=${breakdown}`);
+export async function fetchFunnelBySource(breakdown = "platform", signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/funnel/by-source?breakdown=${breakdown}`, {}, signal);
   if (!res.ok) throw new Error(`Funnel by source fetch failed: ${res.status}`);
   return res.json();
 }
 
 // ── Cohort ───────────────────────────────────────────────────────────────────
-export async function fetchCohortAnalysis(granularity = "month") {
-  const res = await apiFetch(`${API_BASE}/api/cohort/analysis?granularity=${granularity}`);
+export async function fetchCohortAnalysis(granularity = "month", signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/cohort/analysis?granularity=${granularity}`, {}, signal);
   if (!res.ok) throw new Error(`Cohort analysis fetch failed: ${res.status}`);
   return res.json();
 }
@@ -262,8 +262,8 @@ export async function fetchCohortRetention(granularity = "month") {
 }
 
 // ── CAPI ─────────────────────────────────────────────────────────────────────
-export async function fetchCapiStatus() {
-  const res = await apiFetch(`${API_BASE}/api/capi/status`);
+export async function fetchCapiStatus(signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/capi/status`, {}, signal);
   if (!res.ok) throw new Error(`CAPI status fetch failed: ${res.status}`);
   return res.json();
 }
@@ -274,8 +274,8 @@ export async function triggerCapiSync() {
   return res.json();
 }
 
-export async function fetchCapiLog(limit = 20) {
-  const res = await apiFetch(`${API_BASE}/api/capi/log?limit=${limit}`);
+export async function fetchCapiLog(limit = 20, signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/capi/log?limit=${limit}`, {}, signal);
   if (!res.ok) throw new Error(`CAPI log fetch failed: ${res.status}`);
   return res.json();
 }
@@ -304,11 +304,11 @@ export async function fetchInsights() {
 }
 
 // ── Ad Names ─────────────────────────────────────────────────────────────────
-export async function fetchAdNames(platform = "", entityType = "") {
+export async function fetchAdNames(platform = "", entityType = "", signal?: AbortSignal) {
   const sp = new URLSearchParams();
   if (platform) sp.set("platform", platform);
   if (entityType) sp.set("entity_type", entityType);
-  const res = await apiFetch(`${API_BASE}/api/ad-names?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/ad-names?${sp.toString()}`, {}, signal);
   if (!res.ok) throw new Error(`Ad names fetch failed: ${res.status}`);
   return res.json();
 }
@@ -370,8 +370,8 @@ export async function fetchStripeStatus() {
 }
 
 // ── Platform Auth ─────────────────────────────────────────────────────────────
-export async function fetchTikTokStatus() {
-  const res = await apiFetch(`${API_BASE}/api/platform-auth/tiktok/status`);
+export async function fetchTikTokStatus(signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/platform-auth/tiktok/status`, {}, signal);
   if (!res.ok) throw new Error(`TikTok status failed: ${res.status}`);
   return res.json();
 }
@@ -389,20 +389,56 @@ export async function refreshTikTokToken() {
 }
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
-export function createWebSocket(onMessage: (data: any) => void): WebSocket | null {
+export interface ManagedWebSocket {
+  socket: WebSocket;
+  /** Closes the socket without scheduling a reconnect (use on unmount). */
+  close: () => void;
+}
+
+export function createWebSocket(onMessage: (data: any) => void): ManagedWebSocket | null {
   if (typeof window === "undefined") return null;
-  const token = readAuthToken();
-  const wsBase = API_BASE.replace("http", "ws") + "/ws";
-  const wsUrl = token ? `${wsBase}?token=${encodeURIComponent(token)}` : wsBase;
-  const ws = new WebSocket(wsUrl);
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      onMessage(data);
-    } catch {}
+
+  // Shared state across reconnect attempts so an intentional close stops
+  // the auto-reconnect loop and any pending reconnect timeout.
+  const state = { manualClose: false, reconnectTimer: null as ReturnType<typeof setTimeout> | null };
+  let currentSocket: WebSocket;
+
+  const connect = (): WebSocket => {
+    const token = readAuthToken();
+    const wsBase = API_BASE.replace("http", "ws") + "/ws";
+    const wsUrl = token ? `${wsBase}?token=${encodeURIComponent(token)}` : wsBase;
+    const ws = new WebSocket(wsUrl);
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        onMessage(data);
+      } catch {}
+    };
+    ws.onclose = () => {
+      if (state.manualClose) return;
+      state.reconnectTimer = setTimeout(() => {
+        if (state.manualClose) return;
+        currentSocket = connect();
+      }, 3000);
+    };
+    return ws;
   };
-  ws.onclose = () => {
-    setTimeout(() => createWebSocket(onMessage), 3000);
+
+  currentSocket = connect();
+
+  return {
+    get socket() {
+      return currentSocket;
+    },
+    close() {
+      state.manualClose = true;
+      if (state.reconnectTimer) {
+        clearTimeout(state.reconnectTimer);
+        state.reconnectTimer = null;
+      }
+      try {
+        currentSocket.close();
+      } catch {}
+    },
   };
-  return ws;
 }

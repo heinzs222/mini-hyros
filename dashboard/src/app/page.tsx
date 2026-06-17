@@ -1,26 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncAdNames, syncStripe } from "@/lib/api";
+import dynamic from "next/dynamic";
+import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncAdNames, syncStripe, type ManagedWebSocket } from "@/lib/api";
 import { daysAgo } from "@/lib/utils";
 import SummaryCards from "@/components/SummaryCards";
-import PerformanceChart from "@/components/PerformanceChart";
-import TrafficValueChart from "../components/TrafficValueChart";
-import CumulativePerformanceChart from "../components/CumulativePerformanceChart";
-import PlatformMixChart from "../components/PlatformMixChart";
 import AttributionTable from "@/components/AttributionTable";
 import TrackingHealth from "@/components/TrackingHealth";
 import PlatformComparisonTable from "@/components/PlatformComparisonTable";
 import FunnelSnapshotTable from "@/components/FunnelSnapshotTable";
 import LiveFeed from "@/components/LiveFeed";
-import LtvPanel from "@/components/LtvPanel";
-import FunnelPanel from "@/components/FunnelPanel";
-import JourneyPanel from "@/components/JourneyPanel";
-import CohortPanel from "@/components/CohortPanel";
-import CapiPanel from "@/components/CapiPanel";
-import AdNamesPanel from "@/components/AdNamesPanel";
-import SpendImportPanel from "@/components/SpendImportPanel";
 import {
   BarChart3,
   DollarSign,
@@ -36,7 +26,25 @@ import {
   LogOut,
 } from "lucide-react";
 
+// Code-split heavy client components so recharts and the feature panels load on demand.
+const ChartLoading = () => <div className="h-72 rounded-xl border border-[var(--card-border)] bg-[var(--card)] animate-pulse" />;
+const PanelLoading = () => <div className="text-center py-12 text-gray-500 text-sm">Loading...</div>;
+
+const PerformanceChart = dynamic(() => import("@/components/PerformanceChart"), { ssr: false, loading: ChartLoading });
+const TrafficValueChart = dynamic(() => import("@/components/TrafficValueChart"), { ssr: false, loading: ChartLoading });
+const CumulativePerformanceChart = dynamic(() => import("@/components/CumulativePerformanceChart"), { ssr: false, loading: ChartLoading });
+const PlatformMixChart = dynamic(() => import("@/components/PlatformMixChart"), { ssr: false, loading: ChartLoading });
+
+const LtvPanel = dynamic(() => import("@/components/LtvPanel"), { ssr: false, loading: PanelLoading });
+const FunnelPanel = dynamic(() => import("@/components/FunnelPanel"), { ssr: false, loading: PanelLoading });
+const JourneyPanel = dynamic(() => import("@/components/JourneyPanel"), { ssr: false, loading: PanelLoading });
+const CohortPanel = dynamic(() => import("@/components/CohortPanel"), { ssr: false, loading: PanelLoading });
+const CapiPanel = dynamic(() => import("@/components/CapiPanel"), { ssr: false, loading: PanelLoading });
+const AdNamesPanel = dynamic(() => import("@/components/AdNamesPanel"), { ssr: false, loading: PanelLoading });
+const SpendImportPanel = dynamic(() => import("@/components/SpendImportPanel"), { ssr: false, loading: PanelLoading });
+
 interface LiveEvent {
+  _id?: number;
   type: string;
   ts: string;
   order_id?: string;
@@ -93,6 +101,10 @@ function compactSyncError(message: string): string {
 
 const REPORT_CACHE_KEY = "hyros_report_cache";
 
+// Shared stable empty array so nullish fallbacks keep a constant identity across
+// renders (prevents child re-renders when liveEvents state updates).
+const EMPTY: any[] = [];
+
 export default function DashboardPage() {
   const router = useRouter();
   const [report, setReport] = useState<any>(null);
@@ -120,16 +132,30 @@ export default function DashboardPage() {
   const [syncErrors, setSyncErrors] = useState<string[]>([]);
   const [platformFilter, setPlatformFilter] = useState("all");
   const [mainTab, setMainTab] = useState("attribution");
-  const wsRef = useRef<WebSocket | null>(null);
+  const wsRef = useRef<ManagedWebSocket | null>(null);
   const refreshTimerRef = useRef<NodeJS.Timeout | null>(null);
   const spendSyncTimerRef = useRef<NodeJS.Timeout | null>(null);
   const syncingSpendRef = useRef(false);
   const loadReportRef = useRef<() => Promise<void>>(async () => {});
   const reportRequestSeqRef = useRef(0);
+  // Guard so the 30s interval / WS refetch never overlaps an in-flight report request.
+  const reportInFlightRef = useRef(false);
+  // Coalesces bursts of WS new_order events into a single trailing refetch.
+  const wsRefetchTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // Monotonic id assigned to each live event on receipt (stable list key).
+  const liveEventSeqRef = useRef(0);
+  // Current main tab, mirrored into a ref so timers/WS handlers can gate on it.
+  const mainTabRef = useRef("attribution");
 
   const loadReport = useCallback(async () => {
+    // Only the attribution tab consumes the full report; skip elsewhere.
+    if (mainTab !== "attribution") return;
+    // In-flight guard: do not stack report requests.
+    if (reportInFlightRef.current) return;
+
     const requestSeq = reportRequestSeqRef.current + 1;
     reportRequestSeqRef.current = requestSeq;
+    reportInFlightRef.current = true;
 
     try {
       const [startDate, endDate] = normalizeDateRange(primaryStartDate, primaryEndDate);
@@ -220,11 +246,13 @@ export default function DashboardPage() {
       }
       setError(err.message || "Failed to load report");
     } finally {
+      reportInFlightRef.current = false;
       if (requestSeq === reportRequestSeqRef.current) {
         setLoading(false);
       }
     }
   }, [
+    mainTab,
     activeTab,
     model,
     primaryStartDate,
@@ -305,6 +333,10 @@ export default function DashboardPage() {
   }, [loadReport]);
 
   useEffect(() => {
+    mainTabRef.current = mainTab;
+  }, [mainTab]);
+
+  useEffect(() => {
     if (!authChecked) return;
 
     const runBackgroundSync = async () => {
@@ -333,35 +365,71 @@ export default function DashboardPage() {
     loadReport();
   }, [loadReport, authChecked]);
 
-  // Auto-refresh every 30s
+  // Auto-refresh every 30s — only on the attribution tab, paused while the tab is
+  // hidden, and never while a report request is already in flight.
   useEffect(() => {
-    if (autoRefresh && authChecked) {
-      refreshTimerRef.current = setInterval(loadReport, 30_000);
-    }
-    return () => {
-      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
+    if (!autoRefresh || !authChecked || mainTab !== "attribution") return;
+
+    const tick = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      if (reportInFlightRef.current) return;
+      void loadReport();
     };
-  }, [autoRefresh, loadReport, authChecked]);
+
+    refreshTimerRef.current = setInterval(tick, 30_000);
+
+    const onVisibilityChange = () => {
+      if (typeof document !== "undefined" && !document.hidden) {
+        // Became visible again — do one immediate refetch.
+        if (!reportInFlightRef.current) void loadReport();
+      }
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
+
+    return () => {
+      if (refreshTimerRef.current) {
+        clearInterval(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
+    };
+  }, [autoRefresh, loadReport, authChecked, mainTab]);
 
   // WebSocket for real-time events
   useEffect(() => {
     if (!authChecked) return;
-    const ws = createWebSocket((data: LiveEvent) => {
-      setLiveEvents((prev) => [...prev.slice(-49), data]);
-      // Auto-refresh report on new orders
+    const managed = createWebSocket((data: LiveEvent) => {
+      const eventId = (liveEventSeqRef.current += 1);
+      setLiveEvents((prev) => [...prev.slice(-49), { ...data, _id: eventId }]);
+      // Coalesce bursts of new_order events into a single trailing refetch
+      // ~1s after the last event (instead of one timer per event).
       if (data.type === "new_order") {
-        setTimeout(() => {
+        if (wsRefetchTimerRef.current) clearTimeout(wsRefetchTimerRef.current);
+        wsRefetchTimerRef.current = setTimeout(() => {
+          wsRefetchTimerRef.current = null;
+          if (mainTabRef.current !== "attribution") return;
           void loadReportRef.current();
         }, 1000);
       }
     });
-    if (ws) {
-      wsRef.current = ws;
-      ws.onopen = () => setWsConnected(true);
-      ws.onclose = () => setWsConnected(false);
+    if (managed) {
+      wsRef.current = managed;
+      managed.socket.onopen = () => setWsConnected(true);
+      managed.socket.onclose = () => setWsConnected(false);
     }
     return () => {
-      if (wsRef.current) wsRef.current.close();
+      if (wsRefetchTimerRef.current) {
+        clearTimeout(wsRefetchTimerRef.current);
+        wsRefetchTimerRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     };
   }, [authChecked]);
 
@@ -373,13 +441,24 @@ export default function DashboardPage() {
     }
   };
 
-  const handleTabChange = (tab: string) => {
+  const handleTabChange = useCallback((tab: string) => {
     setActiveTab(tab);
     setPlatformFilter("all");
-  };
+  }, []);
 
   const [windowStart, windowEnd] = normalizeDateRange(primaryStartDate, primaryEndDate);
   const activeWindowLabel = `${windowStart} to ${windowEnd}`;
+
+  // Memoize the derived arrays handed to the heavy (memoized) report children so a
+  // liveEvents state update (WS message) does not re-render the report subtree.
+  const timeSeries = useMemo(() => report?.charts?.time_series || EMPTY, [report]);
+  const compareTimeSeries = useMemo(() => compareReport?.charts?.time_series || EMPTY, [compareReport]);
+  const platformRows = useMemo(() => report?.platform_comparison?.rows || EMPTY, [report]);
+  const comparePlatformRows = useMemo(() => compareReport?.platform_comparison?.rows || EMPTY, [compareReport]);
+  const funnelRows = useMemo(() => report?.funnels?.rows || EMPTY, [report]);
+  const compareFunnelRows = useMemo(() => compareReport?.funnels?.rows || EMPTY, [compareReport]);
+  const tableRows = useMemo(() => report?.table?.rows || EMPTY, [report]);
+  const compareTableRows = useMemo(() => compareReport?.table?.rows || EMPTY, [compareReport]);
 
   if (!authChecked) {
     return (
@@ -577,38 +656,38 @@ export default function DashboardPage() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
               <div className="lg:col-span-2 space-y-6">
                 <PlatformComparisonTable
-                  rows={report.platform_comparison?.rows || []}
-                  compareRows={compareReport?.platform_comparison?.rows || []}
+                  rows={platformRows}
+                  compareRows={comparePlatformRows}
                   compareLabel={compareLabel}
                 />
 
                 <PerformanceChart
-                  data={report.charts?.time_series || []}
-                  compareData={compareReport?.charts?.time_series || []}
+                  data={timeSeries}
+                  compareData={compareTimeSeries}
                   compareLabel={compareLabel}
                 />
                 <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                   <TrafficValueChart
-                    data={report.charts?.time_series || []}
-                    compareData={compareReport?.charts?.time_series || []}
+                    data={timeSeries}
+                    compareData={compareTimeSeries}
                     compareLabel={compareLabel}
                   />
                   <CumulativePerformanceChart
-                    data={report.charts?.time_series || []}
-                    compareData={compareReport?.charts?.time_series || []}
+                    data={timeSeries}
+                    compareData={compareTimeSeries}
                     compareLabel={compareLabel}
                   />
                 </div>
                 <PlatformMixChart
-                  rows={report.platform_comparison?.rows || []}
-                  compareRows={compareReport?.platform_comparison?.rows || []}
+                  rows={platformRows}
+                  compareRows={comparePlatformRows}
                   compareLabel={compareLabel}
                 />
               </div>
               <div className="space-y-4">
                 <FunnelSnapshotTable
-                  rows={report.funnels?.rows || []}
-                  compareRows={compareReport?.funnels?.rows || []}
+                  rows={funnelRows}
+                  compareRows={compareFunnelRows}
                   compareLabel={compareLabel}
                 />
                 <TrackingHealth
@@ -684,9 +763,9 @@ export default function DashboardPage() {
             {/* Attribution Table */}
             <AttributionTable
               columns={report.table.columns}
-              rows={report.table.rows}
+              rows={tableRows}
               totals={report.table.totals_row}
-              compareRows={compareReport?.table?.rows || []}
+              compareRows={compareTableRows}
               compareLabel={compareLabel}
               activeTab={activeTab}
               onTabChange={handleTabChange}
