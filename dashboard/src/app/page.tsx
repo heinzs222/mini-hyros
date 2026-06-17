@@ -25,6 +25,7 @@ import CohortPanel from "@/components/CohortPanel";
 import CapiPanel from "@/components/CapiPanel";
 import AdNamesPanel from "@/components/AdNamesPanel";
 import SpendImportPanel from "@/components/SpendImportPanel";
+import ModelSelect from "@/components/ModelSelect";
 import {
   BarChart3,
   DollarSign,
@@ -477,16 +478,7 @@ export default function DashboardPage() {
 
               {showReportControls && (
                 <>
-                  <select
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    className="h-[34px] rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[13px] text-ink focus:border-brand-500 focus:outline-none"
-                    aria-label="Attribution model"
-                  >
-                    {MODELS.map((m) => (
-                      <option key={m.value} value={m.value}>{m.label}</option>
-                    ))}
-                  </select>
+                  <ModelSelect value={model} onChange={setModel} />
                   <select
                     value={useClickDate ? "click" : "conversion"}
                     onChange={(e) => setUseClickDate(e.target.value === "click")}

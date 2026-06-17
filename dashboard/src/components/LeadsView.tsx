@@ -162,6 +162,30 @@ export default function LeadsView({ startDate, endDate }: Props) {
     return nums;
   }, [totalPages, page]);
 
+  const exportCsv = () => {
+    const headers = ["Date", "Name", "Price", "Origin Source", "Last Source", "Lead", "Status", "Info"];
+    const lines = filtered.map((r) => {
+      const price = r.gross || r.value;
+      const origin = r.path?.[0] || "Direct";
+      const last = r.path && r.path.length >= 2 ? r.path[r.path.length - 2] : origin;
+      const status = r.touchpoint_count > 0 ? "Attributed" : "Unattributed";
+      const info = `${r.touchpoint_count} touches${r.time_to_convert ? ` · ${r.time_to_convert}` : ""}`;
+      return [fmtDate(r.conversion_ts), titleCase(r.conversion_type), price || "", origin, last, r.customer_key_short, status, info];
+    });
+    const csv = [headers, ...lines]
+      .map((cols) => cols.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `leads-${tab}-${startDate}_${endDate}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -177,11 +201,20 @@ export default function LeadsView({ startDate, endDate }: Props) {
           >
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
           </button>
-          <button className="flex h-9 items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface)] px-3 text-[13px] font-medium text-ink hover:bg-white/5">
-            <Download size={14} /> Export sales
+          <button
+            onClick={exportCsv}
+            disabled={filtered.length === 0}
+            className="flex h-9 items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface)] px-3 text-[13px] font-medium text-ink hover:bg-white/5 disabled:opacity-40"
+            title="Export the current view to CSV"
+          >
+            <Download size={14} /> Export
           </button>
-          <button className="flex h-9 items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface)] px-3 text-[13px] font-medium text-ink hover:bg-white/5">
-            <Upload size={14} /> Import sales
+          <button
+            disabled
+            title="CSV import coming soon"
+            className="flex h-9 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface)] px-3 text-[13px] font-medium text-ink-faint opacity-60"
+          >
+            <Upload size={14} /> Import
           </button>
         </div>
       </div>
