@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   RefreshCw,
   Upload,
@@ -25,6 +25,11 @@ import {
 } from "lucide-react";
 import { fetchLeadJourneys, fetchRefundSummary } from "@/lib/api";
 import { formatMoney } from "@/lib/utils";
+import { useToast } from "@/components/Toast";
+
+function rowKey(r: { customer_key: string; conversion_ts: string; order_id: string }): string {
+  return `${r.customer_key}|${r.conversion_ts}|${r.order_id}`;
+}
 
 interface Props {
   startDate: string;
@@ -131,6 +136,7 @@ function sortValue(r: LeadRow, key: SortKey): string | number {
 }
 
 export default function LeadsView({ startDate, endDate }: Props) {
+  const toast = useToast();
   const [rows, setRows] = useState<LeadRow[]>([]);
   const [refundCount, setRefundCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -139,10 +145,16 @@ export default function LeadsView({ startDate, endDate }: Props) {
   const [subFilter, setSubFilter] = useState<"all" | "recurring">("all");
   const [groupOrders, setGroupOrders] = useState(false);
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "attributed" | "unattributed">("all");
+  const [showFilterMenu, setShowFilterMenu] = useState(false);
+  const [density, setDensity] = useState<"comfortable" | "compact">("comfortable");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [sortKey, setSortKey] = useState<SortKey>("date");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const filterMenuRef = useRef<HTMLDivElement>(null);
+  const filterActive = statusFilter !== "all";
 
   const load = async () => {
     setLoading(true);
@@ -156,7 +168,9 @@ export default function LeadsView({ startDate, endDate }: Props) {
       else throw data.reason;
       if (refunds.status === "fulfilled") setRefundCount(Number(refunds.value?.totals?.refund?.count || 0));
     } catch (e: any) {
-      setError(e?.message || "Failed to load leads");
+      const msg = e?.message || "Failed to load leads";
+      setError(msg);
+      toast.error("Couldn’t load leads", { description: msg });
     } finally {
       setLoading(false);
     }
@@ -167,8 +181,18 @@ export default function LeadsView({ startDate, endDate }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startDate, endDate]);
 
-  useEffect(() => setPage(1), [tab, subFilter, groupOrders, search, sortKey, sortDir, pageSize]);
+  useEffect(() => setPage(1), [tab, subFilter, groupOrders, search, statusFilter, sortKey, sortDir, pageSize]);
   useEffect(() => setSubFilter("all"), [tab]);
+  useEffect(() => setSelected(new Set()), [tab, subFilter, groupOrders, search, statusFilter, startDate, endDate]);
+
+  useEffect(() => {
+    if (!showFilterMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (filterMenuRef.current && !filterMenuRef.current.contains(e.target as Node)) setShowFilterMenu(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [showFilterMenu]);
 
   const counts = useMemo(() => {
     const c: Record<TabKey, number> = { sales: 0, subscriptions: 0, leads: 0, calls: 0, phone: 0 };
@@ -195,6 +219,9 @@ export default function LeadsView({ startDate, endDate }: Props) {
           .includes(q),
       );
     }
+    if (statusFilter !== "all") {
+      list = list.filter((r) => (r.touchpoint_count > 0 ? "attributed" : "unattributed") === statusFilter);
+    }
     // Group line items into a single order row
     if (groupOrders) {
       const map = new Map<string, LeadRow>();
@@ -219,7 +246,7 @@ export default function LeadsView({ startDate, endDate }: Props) {
       return String(av).localeCompare(String(bv)) * dir;
     });
     return list;
-  }, [rows, tab, subFilter, groupOrders, search, sortKey, sortDir]);
+  }, [rows, tab, subFilter, groupOrders, search, statusFilter, sortKey, sortDir]);
 
   const totalPages = Math.max(1, Math.ceil(display.length / pageSize));
   const pageRows = display.slice((page - 1) * pageSize, page * pageSize);
@@ -241,8 +268,33 @@ export default function LeadsView({ startDate, endDate }: Props) {
     return nums;
   }, [totalPages, page]);
 
+  const toggleRow = (r: LeadRow) => {
+    const k = rowKey(r);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+  };
+  const pageKeys = pageRows.map(rowKey);
+  const allPageSelected = pageKeys.length > 0 && pageKeys.every((k) => selected.has(k));
+  const toggleSelectAllPage = () => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allPageSelected) pageKeys.forEach((k) => next.delete(k));
+      else pageKeys.forEach((k) => next.add(k));
+      return next;
+    });
+  };
+
   const exportCsv = () => {
-    const lines = display.map((r) => [
+    const source = selected.size > 0 ? display.filter((r) => selected.has(rowKey(r))) : display;
+    if (source.length === 0) {
+      toast.info("Nothing to export", { description: "No rows match the current view." });
+      return;
+    }
+    const lines = source.map((r) => [
       fmtDate(r.conversion_ts),
       nameOf(r),
       originOf(r),
@@ -266,12 +318,23 @@ export default function LeadsView({ startDate, endDate }: Props) {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+    toast.success("Export ready", {
+      description: `Downloaded ${source.length} ${selected.size > 0 ? "selected " : ""}row${source.length === 1 ? "" : "s"} as CSV.`,
+    });
   };
 
   const Header = ({ bottom = false }: { bottom?: boolean }) => (
     <tr className={`text-[12px] text-ink-dim ${bottom ? "border-t border-[var(--card-border)]" : "border-b border-[var(--card-border)]"}`}>
       <th className="w-10 px-4 py-3">
-        {!bottom && <input type="checkbox" className="accent-brand-500" aria-label="Select all" />}
+        {!bottom && (
+          <input
+            type="checkbox"
+            className="accent-brand-500"
+            aria-label="Select all on page"
+            checked={allPageSelected}
+            onChange={toggleSelectAllPage}
+          />
+        )}
       </th>
       {COLS.map((c) => {
         const active = sortKey === c.key;
@@ -383,11 +446,39 @@ export default function LeadsView({ startDate, endDate }: Props) {
               className="w-48 bg-transparent text-[13px] text-ink placeholder:text-ink-faint focus:outline-none"
             />
           </div>
-          <button className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--card-border)] bg-[var(--surface)] text-ink-dim hover:text-ink" title="Filters">
-            <Filter size={14} />
-          </button>
-          <button className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--card-border)] bg-[var(--surface)] text-ink-dim hover:text-ink" title="Column settings">
-            <SlidersHorizontal size={14} />
+          <div className="relative" ref={filterMenuRef}>
+            <button
+              onClick={() => setShowFilterMenu((s) => !s)}
+              title="Filter by attribution status"
+              className={`flex h-9 items-center gap-1.5 rounded-lg border bg-[var(--surface)] px-2.5 text-[13px] transition-colors ${
+                filterActive ? "border-brand-500/50 text-brand-300" : "border-[var(--card-border)] text-ink-dim hover:text-ink"
+              }`}
+            >
+              <Filter size={14} />
+              {filterActive && <span className="capitalize">{statusFilter}</span>}
+            </button>
+            {showFilterMenu && (
+              <div className="animate-hpop absolute right-0 z-30 mt-2 w-[210px] rounded-xl border border-[var(--card-border)] bg-[#0c0c11] p-2 shadow-2xl">
+                <div className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-ink-dim">Attribution status</div>
+                {([["all", "All"], ["attributed", "Attributed"], ["unattributed", "Unattributed"]] as const).map(([val, label]) => (
+                  <button
+                    key={val}
+                    onClick={() => { setStatusFilter(val); setShowFilterMenu(false); }}
+                    className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-[13px] text-ink hover:bg-white/5"
+                  >
+                    {label}
+                    {statusFilter === val && <Check size={14} className="text-brand-400" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={() => setDensity((d) => (d === "compact" ? "comfortable" : "compact"))}
+            title="Toggle row density"
+            className="flex h-9 items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface)] px-2.5 text-[13px] text-ink-dim transition-colors hover:text-ink"
+          >
+            <SlidersHorizontal size={14} /> <span className="capitalize">{density}</span>
           </button>
         </div>
       </div>
@@ -395,7 +486,7 @@ export default function LeadsView({ startDate, endDate }: Props) {
       {/* Table */}
       <div className="hpanel overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1080px] text-left">
+          <table className={`w-full min-w-[1080px] text-left ${density === "compact" ? "leads-compact" : ""}`}>
             <thead className="sticky top-0 z-10 bg-[var(--surface)]">
               <Header />
             </thead>
@@ -425,10 +516,18 @@ export default function LeadsView({ startDate, endDate }: Props) {
                   return (
                     <tr
                       key={`${r.customer_key}-${r.conversion_ts}-${i}`}
-                      className="border-b border-[var(--card-border)]/60 text-[13px] text-ink transition-colors hover:bg-white/[0.02]"
+                      className={`border-b border-[var(--card-border)]/60 text-[13px] text-ink transition-colors hover:bg-white/[0.02] ${
+                        selected.has(rowKey(r)) ? "bg-brand-500/[0.06]" : ""
+                      }`}
                     >
                       <td className="px-4 py-3">
-                        <input type="checkbox" className="accent-brand-500" />
+                        <input
+                          type="checkbox"
+                          className="accent-brand-500"
+                          checked={selected.has(rowKey(r))}
+                          onChange={() => toggleRow(r)}
+                          aria-label="Select row"
+                        />
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 tabular text-ink-dim">{fmtDate(r.conversion_ts)}</td>
                       <td className="whitespace-nowrap px-4 py-3 font-medium">
@@ -509,6 +608,11 @@ export default function LeadsView({ startDate, endDate }: Props) {
           })}
           <PagerBtn disabled={page === totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}><ChevronRight size={15} /></PagerBtn>
           <PagerBtn disabled={page === totalPages} onClick={() => setPage(totalPages)}><ChevronsRight size={15} /></PagerBtn>
+          {selected.size > 0 && (
+            <span className="ml-3 rounded-md bg-brand-500/10 px-2 py-1 text-[12px] font-medium text-brand-300">
+              {selected.size} selected
+            </span>
+          )}
           <span className="ml-3 flex items-center gap-2 text-ink-dim">
             Showing
             <select

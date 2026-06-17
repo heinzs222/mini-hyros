@@ -12,7 +12,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Move, Image as ImageIcon } from "lucide-react";
+import { Image as ImageIcon } from "lucide-react";
 import { formatMoney, formatNumber, formatRatio } from "@/lib/utils";
 import KpiCard from "./KpiCard";
 
@@ -86,9 +86,6 @@ function WidgetHeader({ title }: { title: string }) {
         <ImageIcon size={15} className="text-ink-faint" />
         <span className="text-[15px] font-semibold text-ink-bright">{title}</span>
       </div>
-      <button title="Move widget" className="text-ink-faint opacity-0 transition-opacity hover:text-ink group-hover:opacity-100">
-        <Move size={14} />
-      </button>
     </div>
   );
 }
@@ -191,7 +188,6 @@ export default function DashboardView({ report, compareReport, compareCaption }:
           caption={caption}
           data={d.series.map((r) => r.revenue)}
           color={COLORS.green}
-          showControls
         />
         <KpiCard
           label="Cost"
@@ -201,7 +197,6 @@ export default function DashboardView({ report, compareReport, compareCaption }:
           caption={caption}
           data={d.series.map((r) => r.cost)}
           color={COLORS.red}
-          showControls
         />
         <KpiCard
           label="ROAS"
@@ -211,7 +206,6 @@ export default function DashboardView({ report, compareReport, compareCaption }:
           caption={caption}
           data={d.series.map((r) => r.roas)}
           color={COLORS.yellow}
-          showControls
         />
         <KpiCard
           label="Cost per Lead"
@@ -221,7 +215,6 @@ export default function DashboardView({ report, compareReport, compareCaption }:
           caption={caption}
           data={d.series.map((r) => r.cpa)}
           color={COLORS.red}
-          showControls
         />
         <KpiCard
           label="NET CAC"
@@ -231,7 +224,6 @@ export default function DashboardView({ report, compareReport, compareCaption }:
           caption={caption}
           data={d.series.map((r) => r.cpa)}
           color={COLORS.red}
-          showControls
         />
       </div>
 

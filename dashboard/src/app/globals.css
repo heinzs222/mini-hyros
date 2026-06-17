@@ -75,6 +75,12 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Compact row density for data tables */
+.leads-compact tbody td {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
 /* Cards / panels */
 .hpanel {
   background: var(--surface);

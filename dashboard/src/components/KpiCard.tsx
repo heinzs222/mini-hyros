@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowDown, ArrowUp, MoreHorizontal, Move } from "lucide-react";
+import { ArrowDown, ArrowUp } from "lucide-react";
 import Sparkline from "./Sparkline";
 
 interface Props {
@@ -13,7 +13,6 @@ interface Props {
   caption?: string;
   data: Array<number | null | undefined>;
   color?: string;
-  showControls?: boolean;
 }
 
 export default function KpiCard({
@@ -24,7 +23,6 @@ export default function KpiCard({
   caption,
   data,
   color = "#22c55e",
-  showControls = false,
 }: Props) {
   const hasDelta = deltaPct != null && Number.isFinite(deltaPct);
   const up = (deltaPct ?? 0) >= 0;
@@ -34,14 +32,8 @@ export default function KpiCard({
 
   return (
     <div className="hpanel group relative overflow-hidden p-4 transition-colors hover:border-white/10">
-      <div className="mb-1 flex items-center justify-between">
+      <div className="mb-1">
         <span className="h-label text-ink-dim">{label}</span>
-        {showControls && (
-          <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-            <button title="Move widget" className="text-ink-faint hover:text-ink"><Move size={13} /></button>
-            <button title="Widget options" className="text-ink-faint hover:text-ink"><MoreHorizontal size={14} /></button>
-          </div>
-        )}
       </div>
 
       <div className="flex items-end justify-between gap-3">

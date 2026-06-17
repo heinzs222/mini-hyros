@@ -3,6 +3,7 @@
 import { importSpendCsv, syncSpend } from "@/lib/api";
 import { AlertTriangle, CheckCircle2, Database, RefreshCw, Upload } from "lucide-react";
 import { useState } from "react";
+import { useToast } from "@/components/Toast";
 
 interface Props {
   startDate: string;
@@ -29,6 +30,7 @@ function formatResult(result: any): string {
 }
 
 export default function SpendImportPanel({ startDate, endDate, onImported }: Props) {
+  const toast = useToast();
   const [platform, setPlatform] = useState("google");
   const [accountId, setAccountId] = useState("");
   const [replaceExisting, setReplaceExisting] = useState(true);
@@ -47,12 +49,14 @@ export default function SpendImportPanel({ startDate, endDate, onImported }: Pro
   const handleImport = async () => {
     if (!csvText.trim()) {
       setError("Paste or upload a CSV export first.");
+      toast.info("Nothing to import", { description: "Paste or upload a CSV export first." });
       return;
     }
 
     setBusy("import");
     setResult(null);
     setError("");
+    const toastId = toast.loading(`Importing ${platform} spend CSV…`);
     try {
       const imported = await importSpendCsv({
         platform,
@@ -62,8 +66,16 @@ export default function SpendImportPanel({ startDate, endDate, onImported }: Pro
       });
       setResult(imported);
       await onImported?.();
+      toast.update(toastId, {
+        type: "success",
+        title: "Spend imported",
+        description: `Imported ${imported?.inserted ?? 0} rows · replaced ${imported?.deleted ?? 0} · skipped ${imported?.skipped ?? 0}.`,
+        duration: 5000,
+      });
     } catch (err: any) {
-      setError(err?.message || "Spend import failed.");
+      const msg = err?.message || "Spend import failed.";
+      setError(msg);
+      toast.update(toastId, { type: "error", title: "Spend import failed", description: msg, duration: 11000 });
     } finally {
       setBusy("");
     }
@@ -73,13 +85,21 @@ export default function SpendImportPanel({ startDate, endDate, onImported }: Pro
     setBusy("sync");
     setResult(null);
     setError("");
+    const toastId = toast.loading(`Syncing ${platform} spend…`);
     try {
       const synced = await syncSpend({ platform, start_date: startDate, end_date: endDate });
       setResult(synced);
-      if (synced?.errors?.length) setError(synced.errors.join(" | "));
+      if (synced?.errors?.length) {
+        setError(synced.errors.join(" | "));
+        toast.update(toastId, { type: "error", title: "Spend sync had issues", description: synced.errors.slice(0, 4).join("\n"), duration: 12000 });
+      } else {
+        toast.update(toastId, { type: "success", title: "Spend synced", description: `Synced ${synced?.synced ?? 0} rows for ${synced?.date_range?.start || startDate} → ${synced?.date_range?.end || endDate}.`, duration: 5000 });
+      }
       await onImported?.();
     } catch (err: any) {
-      setError(err?.message || "Spend sync failed.");
+      const msg = err?.message || "Spend sync failed.";
+      setError(msg);
+      toast.update(toastId, { type: "error", title: "Spend sync failed", description: msg, duration: 11000 });
     } finally {
       setBusy("");
     }

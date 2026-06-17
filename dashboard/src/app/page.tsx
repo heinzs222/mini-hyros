@@ -26,6 +26,7 @@ import CapiPanel from "@/components/CapiPanel";
 import AdNamesPanel from "@/components/AdNamesPanel";
 import SpendImportPanel from "@/components/SpendImportPanel";
 import ModelSelect from "@/components/ModelSelect";
+import { useToast } from "@/components/Toast";
 import {
   BarChart3,
   DollarSign,
@@ -37,7 +38,6 @@ import {
   Grid3x3,
   Send,
   Tag,
-  Plus,
 } from "lucide-react";
 
 interface LiveEvent {
@@ -128,6 +128,9 @@ const SECTION_TITLES: Record<Section, string> = {
 
 export default function DashboardPage() {
   const router = useRouter();
+  const toast = useToast();
+  const toastRef = useRef(toast);
+  useEffect(() => { toastRef.current = toast; });
   const [report, setReport] = useState<any>(null);
   const [compareReport, setCompareReport] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -280,13 +283,20 @@ export default function DashboardPage() {
     router,
   ]);
 
-  const syncSpendData = useCallback(async (range?: { start_date?: string; end_date?: string }) => {
+  const syncSpendData = useCallback(async (
+    range?: { start_date?: string; end_date?: string },
+    opts?: { notify?: boolean },
+  ) => {
     if (syncingSpendRef.current) return null;
 
+    const notify = Boolean(opts?.notify);
     const syncEnd = range?.end_date || daysAgo(0);
     const syncStart = range?.start_date || daysAgo(7);
     syncingSpendRef.current = true;
     setSyncingSpend(true);
+    const toastId = notify
+      ? toastRef.current.loading("Syncing all platforms…", { description: "Pulling ad spend, ad names and Stripe orders." })
+      : 0;
 
     try {
       const [spendResult, namesResult, stripeResult] = await Promise.allSettled([
@@ -309,9 +319,38 @@ export default function DashboardPage() {
       addSyncErrors("Stripe", stripeResult);
       setSyncErrors(errors);
       setLastAutoSyncAt(new Date().toISOString());
+
+      if (notify) {
+        if (errors.length === 0) {
+          toastRef.current.update(toastId, {
+            type: "success",
+            title: "Sync complete",
+            description: "Ad spend, ad names and Stripe orders are up to date.",
+            duration: 4500,
+          });
+        } else {
+          const detail =
+            errors.slice(0, 4).map(compactSyncError).join("\n") +
+            (errors.length > 4 ? `\n+${errors.length - 4} more issue${errors.length - 4 === 1 ? "" : "s"}…` : "");
+          toastRef.current.update(toastId, {
+            type: "error",
+            title: `Sync finished with ${errors.length} issue${errors.length === 1 ? "" : "s"}`,
+            description: detail,
+            duration: 13000,
+          });
+        }
+      }
       return spendResult.status === "fulfilled" ? spendResult.value : null;
-    } catch (err) {
+    } catch (err: any) {
       console.warn("Auto sync failed:", err);
+      if (notify) {
+        toastRef.current.update(toastId, {
+          type: "error",
+          title: "Sync failed",
+          description: compactSyncError(err?.message || String(err) || "Could not reach the sync service."),
+          duration: 12000,
+        });
+      }
       return null;
     } finally {
       syncingSpendRef.current = false;
@@ -507,7 +546,7 @@ export default function DashboardPage() {
 
               {section !== "leads" && (
                 <button
-                  onClick={async () => { await syncSpendData({ start_date: windowStart, end_date: windowEnd }); await loadReport(); }}
+                  onClick={async () => { await syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true }); await loadReport(); }}
                   disabled={syncingSpend}
                   className="flex h-[34px] items-center gap-1.5 rounded-lg bg-brand-600 px-3 text-[13px] font-semibold text-white transition-colors hover:bg-brand-700 disabled:opacity-50"
                 >
@@ -516,14 +555,6 @@ export default function DashboardPage() {
                 </button>
               )}
 
-              {section === "dashboard" && (
-                <button
-                  title="Widget customization coming soon"
-                  className="flex h-[34px] items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface)] px-3 text-[13px] font-medium text-ink-dim transition-colors hover:border-white/20 hover:text-ink"
-                >
-                  <Plus size={14} /> Add widget
-                </button>
-              )}
             </div>
           </div>
         </div>
