@@ -1,0 +1,27 @@
+[tool.pytest.ini_options]
+# Make the repo root importable so `import attributionops` / `import backend` work.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: tests that exercise the FastAPI app end-to-end",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["attributionops", "backend"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "\\.\\.\\.",
+]
