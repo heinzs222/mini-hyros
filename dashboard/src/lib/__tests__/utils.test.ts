@@ -1,0 +1,188 @@
+import { describe, it, expect } from "vitest";
+import {
+  cn,
+  formatMoney,
+  formatNumber,
+  formatPercent,
+  formatPercentValue,
+  formatRatio,
+  formatSeconds,
+  profitColor,
+  daysAgo,
+} from "@/lib/utils";
+
+describe("cn", () => {
+  it("merges and dedupes tailwind classes", () => {
+    expect(cn("p-2", "p-4")).toBe("p-4");
+    expect(cn("text-white", false && "hidden", "font-bold")).toBe("text-white font-bold");
+  });
+});
+
+describe("formatMoney", () => {
+  it("returns the em dash placeholder for null/undefined", () => {
+    expect(formatMoney(null)).toBe("—");
+    expect(formatMoney(undefined)).toBe("—");
+  });
+
+  it("formats values >= 1M with an M suffix (1 decimal)", () => {
+    expect(formatMoney(1_000_000)).toBe("$1.0M");
+    expect(formatMoney(1_500_000)).toBe("$1.5M");
+    expect(formatMoney(2_340_000)).toBe("$2.3M");
+  });
+
+  it("formats values >= 1K (and < 1M) with a K suffix (1 decimal)", () => {
+    expect(formatMoney(1_000)).toBe("$1.0K");
+    expect(formatMoney(1_500)).toBe("$1.5K");
+    expect(formatMoney(12_345)).toBe("$12.3K");
+    expect(formatMoney(999_999)).toBe("$1000.0K");
+  });
+
+  it("formats values < 1000 with two decimals", () => {
+    expect(formatMoney(0)).toBe("$0.00");
+    expect(formatMoney(9.5)).toBe("$9.50");
+    expect(formatMoney(999.99)).toBe("$999.99");
+    expect(formatMoney(123.456)).toBe("$123.46");
+  });
+
+  it("handles negative values with a leading minus sign", () => {
+    expect(formatMoney(-50)).toBe("-$50.00");
+    expect(formatMoney(-1_500)).toBe("-$1.5K");
+    expect(formatMoney(-2_000_000)).toBe("-$2.0M");
+    expect(formatMoney(-0.5)).toBe("-$0.50");
+  });
+});
+
+describe("formatNumber", () => {
+  it("returns the em dash for null/undefined", () => {
+    expect(formatNumber(null)).toBe("—");
+    expect(formatNumber(undefined)).toBe("—");
+  });
+
+  it("uses locale formatting with thousands separators", () => {
+    expect(formatNumber(0)).toBe("0");
+    expect(formatNumber(1234)).toBe((1234).toLocaleString());
+    expect(formatNumber(1_234_567)).toBe((1_234_567).toLocaleString());
+  });
+});
+
+describe("formatPercent", () => {
+  it("returns the em dash for null/undefined", () => {
+    expect(formatPercent(null)).toBe("—");
+    expect(formatPercent(undefined)).toBe("—");
+  });
+
+  it("multiplies a fraction by 100 and appends % (1 decimal)", () => {
+    expect(formatPercent(0)).toBe("0.0%");
+    expect(formatPercent(0.5)).toBe("50.0%");
+    expect(formatPercent(0.1234)).toBe("12.3%");
+    expect(formatPercent(1)).toBe("100.0%");
+  });
+});
+
+describe("formatPercentValue", () => {
+  it("returns the em dash for null/undefined", () => {
+    expect(formatPercentValue(null)).toBe("—");
+    expect(formatPercentValue(undefined)).toBe("—");
+  });
+
+  it("treats the value as an already-scaled percentage", () => {
+    expect(formatPercentValue(0)).toBe("0.0%");
+    expect(formatPercentValue(12.34)).toBe("12.3%");
+    expect(formatPercentValue(80)).toBe("80.0%");
+  });
+
+  it("honors the digits argument", () => {
+    expect(formatPercentValue(12.345, 2)).toBe("12.35%");
+    expect(formatPercentValue(50, 0)).toBe("50%");
+  });
+});
+
+describe("formatRatio", () => {
+  it("returns the em dash for null/undefined", () => {
+    expect(formatRatio(null)).toBe("—");
+    expect(formatRatio(undefined)).toBe("—");
+  });
+
+  it("appends an x suffix (default 2 decimals)", () => {
+    expect(formatRatio(0)).toBe("0.00x");
+    expect(formatRatio(1.5)).toBe("1.50x");
+    expect(formatRatio(3.456)).toBe("3.46x");
+  });
+
+  it("honors the digits argument", () => {
+    expect(formatRatio(2.5, 1)).toBe("2.5x");
+    expect(formatRatio(2, 0)).toBe("2x");
+  });
+});
+
+describe("formatSeconds", () => {
+  it("returns the em dash for null/undefined", () => {
+    expect(formatSeconds(null)).toBe("—");
+    expect(formatSeconds(undefined)).toBe("—");
+  });
+
+  it("formats sub-minute durations in seconds (1 decimal)", () => {
+    expect(formatSeconds(0)).toBe("0.0s");
+    expect(formatSeconds(5)).toBe("5.0s");
+    expect(formatSeconds(59.9)).toBe("59.9s");
+  });
+
+  it("formats durations >= 60s as minutes and seconds", () => {
+    expect(formatSeconds(60)).toBe("1m 0s");
+    expect(formatSeconds(90)).toBe("1m 30s");
+    expect(formatSeconds(125)).toBe("2m 5s");
+  });
+
+  it("rounds the remaining seconds", () => {
+    expect(formatSeconds(119.4)).toBe("1m 59s");
+    // 119.6 rounds the remainder (59.6) up to 60.
+    expect(formatSeconds(119.6)).toBe("1m 60s");
+  });
+});
+
+describe("profitColor", () => {
+  it("returns gray for null/undefined", () => {
+    expect(profitColor(null)).toBe("text-gray-400");
+    expect(profitColor(undefined)).toBe("text-gray-400");
+  });
+
+  it("returns emerald for positive values", () => {
+    expect(profitColor(1)).toBe("text-emerald-400");
+    expect(profitColor(0.01)).toBe("text-emerald-400");
+  });
+
+  it("returns red for negative values", () => {
+    expect(profitColor(-1)).toBe("text-red-400");
+    expect(profitColor(-0.01)).toBe("text-red-400");
+  });
+
+  it("returns gray for exactly zero", () => {
+    expect(profitColor(0)).toBe("text-gray-400");
+  });
+});
+
+describe("daysAgo", () => {
+  function expected(n: number): string {
+    const d = new Date();
+    d.setDate(d.getDate() - n);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  it("returns a zero-padded YYYY-MM-DD string", () => {
+    const result = daysAgo(0);
+    expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(result).toBe(expected(0));
+  });
+
+  it("offsets backwards by the given number of days", () => {
+    expect(daysAgo(7)).toBe(expected(7));
+    expect(daysAgo(30)).toBe(expected(30));
+  });
+
+  it("produces an earlier date for a larger offset", () => {
+    expect(daysAgo(10) < daysAgo(1)).toBe(true);
+  });
+});
