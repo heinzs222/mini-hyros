@@ -3,7 +3,7 @@ import "./globals.css";
 import { ToastProvider } from "@/components/Toast";
 
 export const metadata: Metadata = {
-  title: "Mini Hyros – Attribution Dashboard",
+  title: "VIGIL – Attribution Dashboard",
   description: "Self-hosted ad attribution tracking for Meta, Google & TikTok",
 };
 

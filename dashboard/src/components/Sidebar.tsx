@@ -17,18 +17,12 @@ const NAV: NavItem[] = [
   { key: "settings", label: "Settings", icon: <Plug size={18} /> },
 ];
 
-/** Hyros candlestick-style logo mark. */
-function LogoMark() {
+/** VIGIL logo mark: a ring with a single dot inside (a watchful eye / orbit). */
+export function LogoMark({ size = 26 }: { size?: number }) {
   return (
-    <svg width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden>
-      <rect x="2" y="9" width="3" height="11" rx="1" fill="#e9eaf0" />
-      <rect x="2" y="6" width="3" height="3" rx="1" fill="#8b5cf6" />
-      <rect x="7.5" y="5" width="3" height="15" rx="1" fill="#e9eaf0" />
-      <rect x="7.5" y="14" width="3" height="3" rx="1" fill="#8b5cf6" />
-      <rect x="13" y="11" width="3" height="9" rx="1" fill="#e9eaf0" />
-      <rect x="13" y="8" width="3" height="3" rx="1" fill="#8b5cf6" />
-      <rect x="18.5" y="3" width="3" height="17" rx="1" fill="#e9eaf0" />
-      <rect x="18.5" y="16" width="3" height="3" rx="1" fill="#8b5cf6" />
+    <svg width={size} height={size} viewBox="0 0 26 26" fill="none" aria-hidden>
+      <circle cx="13" cy="13" r="9.5" stroke="#e9eaf0" strokeWidth="1.9" />
+      <circle cx="16.7" cy="10.6" r="2.3" fill="#e9eaf0" />
     </svg>
   );
 }
@@ -57,7 +51,7 @@ export default function Sidebar({
     .filter(Boolean)
     .slice(0, 2)
     .map((p) => p[0]?.toUpperCase())
-    .join("") || "MH";
+    .join("") || "V";
 
   return (
     <aside
@@ -69,8 +63,8 @@ export default function Sidebar({
       <div className={`flex items-center gap-2.5 px-4 py-5 ${collapsed ? "justify-center px-0" : ""}`}>
         <LogoMark />
         {!collapsed && (
-          <span className="text-[17px] font-bold tracking-tight text-ink-bright">
-            MINI HYROS
+          <span className="text-[19px] font-bold tracking-[0.22em] text-ink-bright">
+            VIGIL
           </span>
         )}
       </div>

@@ -3,7 +3,8 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { fetchAuthMe, loginWithPassword } from "@/lib/api";
-import { Lock, LogIn, RefreshCw } from "lucide-react";
+import { LogIn, RefreshCw } from "lucide-react";
+import { LogoMark } from "@/components/Sidebar";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -61,12 +62,10 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center px-4">
       <div className="w-full max-w-sm rounded-2xl border border-[var(--card-border)] bg-[var(--card)] p-6 shadow-xl">
-        <div className="flex items-center gap-2 mb-4">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-purple-600 flex items-center justify-center">
-            <Lock size={15} className="text-white" />
-          </div>
+        <div className="flex items-center gap-2.5 mb-5">
+          <LogoMark size={28} />
           <div>
-            <h1 className="text-sm font-semibold text-white">Secure Login</h1>
+            <h1 className="text-[17px] font-bold tracking-[0.22em] text-white">VIGIL</h1>
             <p className="text-[11px] text-gray-500">Authorized users only</p>
           </div>
         </div>
