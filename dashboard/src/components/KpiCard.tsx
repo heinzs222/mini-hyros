@@ -33,13 +33,13 @@ export default function KpiCard({
   const deltaBg = isGood ? "bg-emerald-500/10" : "bg-rose-500/10";
 
   return (
-    <div className="hpanel group relative overflow-hidden p-4">
+    <div className="hpanel group relative overflow-hidden p-4 transition-colors hover:border-white/10">
       <div className="mb-1 flex items-center justify-between">
         <span className="h-label text-ink-dim">{label}</span>
         {showControls && (
           <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-            <Move size={13} className="text-ink-faint" />
-            <MoreHorizontal size={14} className="text-ink-faint" />
+            <button title="Move widget" className="text-ink-faint hover:text-ink"><Move size={13} /></button>
+            <button title="Widget options" className="text-ink-faint hover:text-ink"><MoreHorizontal size={14} /></button>
           </div>
         )}
       </div>

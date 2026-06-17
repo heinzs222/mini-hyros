@@ -1,4 +1,5 @@
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap");
 
 @tailwind base;
 @tailwind components;
@@ -61,6 +62,15 @@ body {
   letter-spacing: 0;
 }
 
+/* Page titles: serif display (Hyros uses P22 Mackinac; Fraunces is the free fallback). */
+.h-title {
+  font-family: "P22 Mackinac", "Fraunces", "Spectral", Georgia, serif;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.2;
+  color: var(--foreground);
+}
+
 .tabular {
   font-variant-numeric: tabular-nums;
 }
@@ -92,6 +102,24 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: #353543;
+}
+
+/* Keyboard focus ring — visible only for keyboard users, not mouse clicks. */
+:focus-visible {
+  outline: 2px solid rgba(139, 92, 246, 0.6);
+  outline-offset: 1px;
+  border-radius: 6px;
+}
+button,
+[role="button"],
+a,
+select,
+summary {
+  cursor: pointer;
+}
+button:disabled,
+[disabled] {
+  cursor: not-allowed;
 }
 
 /* Native date input calendar icon -> light, so it reads on dark inputs */

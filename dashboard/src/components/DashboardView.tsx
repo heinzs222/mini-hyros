@@ -86,7 +86,9 @@ function WidgetHeader({ title }: { title: string }) {
         <ImageIcon size={15} className="text-ink-faint" />
         <span className="text-[15px] font-semibold text-ink-bright">{title}</span>
       </div>
-      <Move size={14} className="text-ink-faint opacity-0 transition-opacity group-hover:opacity-100" />
+      <button title="Move widget" className="text-ink-faint opacity-0 transition-opacity hover:text-ink group-hover:opacity-100">
+        <Move size={14} />
+      </button>
     </div>
   );
 }
@@ -236,7 +238,7 @@ export default function DashboardView({ report, compareReport, compareCaption }:
       {/* Widget row */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         {/* New Customers */}
-        <div className="hpanel group p-4">
+        <div className="hpanel group p-4 transition-colors hover:border-white/10">
           <WidgetHeader title="New Customers" />
           <div className="mb-1 flex items-baseline gap-2">
             <span className="h-num text-[34px]">{formatNumber(d.orders)}</span>
@@ -270,7 +272,7 @@ export default function DashboardView({ report, compareReport, compareCaption }:
         </div>
 
         {/* Clicks + Sales */}
-        <div className="hpanel group p-4">
+        <div className="hpanel group p-4 transition-colors hover:border-white/10">
           <WidgetHeader title="Clicks + Sales" />
           <div className="h-[150px]">
             <ResponsiveContainer width="100%" height="100%">
@@ -291,7 +293,7 @@ export default function DashboardView({ report, compareReport, compareCaption }:
         </div>
 
         {/* Average Order Value */}
-        <div className="hpanel group p-4">
+        <div className="hpanel group p-4 transition-colors hover:border-white/10">
           <WidgetHeader title="Average Order Value" />
           <div className="mb-1 flex items-baseline gap-2">
             <span className="h-num text-[26px]">{d.aov == null ? "—" : formatMoney(num(d.aov))}</span>

@@ -458,7 +458,7 @@ export default function DashboardPage() {
         {/* Top controls strip */}
         <div className="sticky top-0 z-40 border-b border-[var(--card-border)] bg-[var(--background)]/85 backdrop-blur-xl">
           <div className="flex flex-wrap items-center gap-3 px-6 py-3">
-            <h1 className="text-[20px] font-semibold tracking-tight text-ink-bright">
+            <h1 className="h-title text-[26px]">
               {SECTION_TITLES[section]}
             </h1>
 
@@ -517,7 +517,10 @@ export default function DashboardPage() {
               )}
 
               {section === "dashboard" && (
-                <button className="flex h-[34px] items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface)] px-3 text-[13px] font-medium text-ink-dim hover:text-ink">
+                <button
+                  title="Widget customization coming soon"
+                  className="flex h-[34px] items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface)] px-3 text-[13px] font-medium text-ink-dim transition-colors hover:border-white/20 hover:text-ink"
+                >
                   <Plus size={14} /> Add widget
                 </button>
               )}

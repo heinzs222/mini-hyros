@@ -693,8 +693,9 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
           {/* Metric filter */}
           <div className="relative" ref={filterMenuRef}>
             <button
+              title="Filter rows by a metric threshold"
               onClick={() => { setShowFilterMenu((s) => !s); setShowColsMenu(false); }}
-              className={`flex items-center gap-1.5 h-8 rounded-lg border px-2.5 text-[12px] ${
+              className={`flex items-center gap-1.5 h-8 rounded-lg border px-2.5 text-[12px] transition-colors ${
                 filterActive
                   ? "border-brand-500/50 bg-brand-500/10 text-brand-300"
                   : "border-[var(--card-border)] bg-[var(--surface-2)] text-ink-dim hover:text-ink"
@@ -755,8 +756,9 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
           {/* Columns chooser */}
           <div className="relative" ref={colsMenuRef}>
             <button
+              title="Show or hide metric columns"
               onClick={() => { setShowColsMenu((s) => !s); setShowFilterMenu(false); }}
-              className="flex items-center gap-1.5 h-8 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim hover:text-ink"
+              className="flex items-center gap-1.5 h-8 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim transition-colors hover:text-ink hover:border-white/20"
             >
               <Columns3 size={13} /> Columns
             </button>
