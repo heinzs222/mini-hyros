@@ -317,3 +317,49 @@ def test_attribution_day_totals_groups_by_conversion_date(empty_db):
     assert by_day["2026-01-15"]["orders"] == 1.0
     assert by_day["2026-01-16"]["revenue"] == 50.00
     assert by_day["2026-01-16"]["total_revenue"] == 60.00
+
+
+def test_attribution_day_totals_click_basis_groups_by_click_date(empty_db):
+    insert_rows(empty_db, "touchpoints", [touchpoint("2026-01-14T09:00:00Z", "c1", ad_id="ad1")])
+    insert_rows(empty_db, "orders", [order("o1", "2026-01-15T12:00:00Z", "c1", net=100)])
+    result = attribution_day_totals(
+        empty_db,
+        model="last_click",
+        start_date=JAN,
+        end_date=JAN_END,
+        lookback_days=30,
+        conversion_type="Purchase",
+        date_basis="click",
+    )
+    by_day = {r["date"]: r for r in result["rows"]}
+    # Revenue lands on the click date (Jan 14), not the conversion date (Jan 15).
+    assert "2026-01-14" in by_day
+    assert by_day["2026-01-14"]["revenue"] == 100.00
+    assert "2026-01-15" not in by_day
+
+
+def test_attribution_day_totals_invalid_date_basis_raises(empty_db):
+    with pytest.raises(ValueError, match="date_basis"):
+        attribution_day_totals(
+            empty_db,
+            model="last_click",
+            start_date=JAN,
+            end_date=JAN_END,
+            lookback_days=30,
+            conversion_type="Purchase",
+            date_basis="bad",
+        )
+
+
+def test_attribution_day_totals_counts_unattributed(empty_db):
+    insert_rows(empty_db, "orders", [order("o1", "2026-01-15T12:00:00Z", "c1", net=100)])
+    result = attribution_day_totals(
+        empty_db,
+        model="last_click",
+        start_date=JAN,
+        end_date=JAN_END,
+        lookback_days=30,
+        conversion_type="Purchase",
+    )
+    assert result["unattributed_orders"] == 1
+    assert result["rows"] == []
