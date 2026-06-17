@@ -1,8 +1,8 @@
 "use client";
 
-import { LayoutGrid, FileBarChart2, Users, LogOut, ChevronRight, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { LayoutGrid, FileBarChart2, Users, Plug, LogOut, ChevronRight, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
-export type Section = "dashboard" | "reports" | "leads";
+export type Section = "dashboard" | "reports" | "leads" | "settings";
 
 interface NavItem {
   key: Section;
@@ -14,6 +14,7 @@ const NAV: NavItem[] = [
   { key: "dashboard", label: "Dashboard", icon: <LayoutGrid size={18} /> },
   { key: "reports", label: "Reports", icon: <FileBarChart2 size={18} /> },
   { key: "leads", label: "Leads", icon: <Users size={18} /> },
+  { key: "settings", label: "Settings", icon: <Plug size={18} /> },
 ];
 
 /** Hyros candlestick-style logo mark. */

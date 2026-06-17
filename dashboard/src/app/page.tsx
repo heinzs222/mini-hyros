@@ -8,6 +8,7 @@ import Sidebar, { Section } from "@/components/Sidebar";
 import DateRangePicker from "@/components/DateRangePicker";
 import DashboardView from "@/components/DashboardView";
 import LeadsView from "@/components/LeadsView";
+import ConnectionsView from "@/components/ConnectionsView";
 import SummaryCards from "@/components/SummaryCards";
 import PerformanceChart from "@/components/PerformanceChart";
 import TrafficValueChart from "../components/TrafficValueChart";
@@ -124,6 +125,7 @@ const SECTION_TITLES: Record<Section, string> = {
   dashboard: "Dashboard",
   reports: "Performance Report",
   leads: "",
+  settings: "Settings",
 };
 
 export default function DashboardPage() {
@@ -530,7 +532,7 @@ export default function DashboardPage() {
                 </>
               )}
 
-              {section !== "leads" && (
+              {section !== "leads" && section !== "settings" && (
                 <button
                   onClick={() => setAutoRefresh((v) => !v)}
                   className={`flex h-[34px] items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium transition-colors ${
@@ -544,7 +546,7 @@ export default function DashboardPage() {
                 </button>
               )}
 
-              {section !== "leads" && (
+              {section !== "leads" && section !== "settings" && (
                 <button
                   onClick={async () => { await syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true }); await loadReport(); }}
                   disabled={syncingSpend}
@@ -579,6 +581,9 @@ export default function DashboardPage() {
 
           {/* ───────── Leads ───────── */}
           {section === "leads" && <LeadsView startDate={windowStart} endDate={windowEnd} />}
+
+          {/* ───────── Settings ───────── */}
+          {section === "settings" && <ConnectionsView />}
 
           {/* ───────── Reports ───────── */}
           {section === "reports" && (
