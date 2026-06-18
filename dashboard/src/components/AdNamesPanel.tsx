@@ -200,6 +200,7 @@ export default function AdNamesPanel() {
               <span key={p} className="block">
                 {p}: {r.synced || 0} synced
                 {r.campaigns != null && ` (${r.campaigns} campaigns, ${r.adsets || r.adgroups || 0} adsets, ${r.ads || 0} ads)`}
+                {r.warning && ` | warning: ${r.warning}`}
                 {r.error && ` — ${r.error}`}
               </span>
             ))}

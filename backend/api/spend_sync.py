@@ -924,6 +924,10 @@ def _write_meta_spend_rows(db_path: str, ad_account_id: str, start_date: str, en
     account_id = ad_account_id.replace("act_", "").strip()
     synced_at = _now()
     inserted = 0
+    name_rows: dict[tuple[str, str], tuple[str, str]] = {}
+
+    _ensure_spend_table(db_path)
+    _ensure_ad_names_table(db_path)
 
     with connect(db_path) as conn:
         deleted = conn.execute(
@@ -945,15 +949,18 @@ def _write_meta_spend_rows(db_path: str, ad_account_id: str, start_date: str, en
             campaign_id = str(r.get("campaign_id") or "").strip()
             adset_id = str(r.get("adset_id") or "").strip()
             ad_id = str(r.get("ad_id") or "").strip()
+            campaign_name = str(r.get("campaign_name") or "").strip()
+            adset_name = str(r.get("adset_name") or "").strip()
+            ad_name = str(r.get("ad_name") or "").strip()
             clicks = str(r.get("clicks") or "0").strip()
             spend = str(r.get("spend") or "0").strip()
             impressions = str(r.get("impressions") or "0").strip()
 
             metadata = json.dumps(
                 {
-                    "campaign_name": str(r.get("campaign_name") or "").strip(),
-                    "adset_name": str(r.get("adset_name") or "").strip(),
-                    "ad_name": str(r.get("ad_name") or "").strip(),
+                    "campaign_name": campaign_name,
+                    "adset_name": adset_name,
+                    "ad_name": ad_name,
                     "source": "meta_insights_api",
                     "synced_at": synced_at,
                 },
@@ -984,9 +991,35 @@ def _write_meta_spend_rows(db_path: str, ad_account_id: str, start_date: str, en
             )
             inserted += 1
 
+            if campaign_id and campaign_name:
+                name_rows[("campaign", campaign_id)] = (campaign_name, "")
+            if adset_id and adset_name:
+                name_rows[("adset", adset_id)] = (adset_name, campaign_id)
+            if ad_id and ad_name:
+                name_rows[("ad", ad_id)] = (ad_name, adset_id)
+
+        for (entity_type, entity_id), (name, parent_id) in name_rows.items():
+            conn.execute(
+                """
+                INSERT INTO ad_names (
+                    platform, entity_type, entity_id, name, parent_id, source, updated_at
+                ) VALUES ('meta', ?, ?, ?, ?, 'meta_insights_api', ?)
+                ON CONFLICT(platform, entity_type, entity_id) DO UPDATE SET
+                    name = excluded.name,
+                    parent_id = excluded.parent_id,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at
+                """,
+                (entity_type, entity_id, name, parent_id, synced_at),
+            )
+
         conn.commit()
 
-    return {"deleted": int(deleted if deleted is not None and deleted > 0 else 0), "inserted": inserted}
+    return {
+        "deleted": int(deleted if deleted is not None and deleted > 0 else 0),
+        "inserted": inserted,
+        "names_upserted": len(name_rows),
+    }
 
 
 async def _sync_meta_spend(start_date: str, end_date: str) -> dict[str, Any]:
@@ -1009,6 +1042,7 @@ async def _sync_meta_spend(start_date: str, end_date: str) -> dict[str, Any]:
             "synced": write_stats["inserted"],
             "fetched": len(api_rows),
             "deleted": write_stats["deleted"],
+            "names_upserted": write_stats["names_upserted"],
             "date_range": {"start": start_date, "end": end_date},
             "account_id": ad_account_id.replace("act_", ""),
         }
