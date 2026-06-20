@@ -10,6 +10,7 @@ import DateRangePicker from "@/components/DateRangePicker";
 import DashboardView from "@/components/DashboardView";
 import LeadsView from "@/components/LeadsView";
 import ConnectionsView from "@/components/ConnectionsView";
+import ReportsView from "@/components/ReportsView";
 import SummaryCards from "@/components/SummaryCards";
 import AttributionTable from "@/components/AttributionTable";
 import TrackingHealth from "@/components/TrackingHealth";
@@ -29,6 +30,8 @@ import {
   Grid3x3,
   Send,
   Tag,
+  Home,
+  Plus,
 } from "lucide-react";
 
 // Code-split heavy client components so recharts and the feature panels load on demand.
@@ -562,6 +565,8 @@ export default function DashboardPage() {
       />
 
       <main className="flex-1 overflow-y-auto">
+        {section !== "reports" && (
+        <>
         {/* Top controls strip */}
         <div className="sticky top-0 z-40 border-b border-[var(--card-border)] bg-[var(--background)]/85 backdrop-blur-xl">
           <div className="flex flex-wrap items-center gap-3 px-6 py-3">
@@ -651,281 +656,66 @@ export default function DashboardPage() {
           {/* ───────── Settings ───────── */}
           {section === "settings" && <ConnectionsView />}
 
-          {/* ───────── Reports ───────── */}
-          {section === "reports" && (
-            <div className="space-y-5">
-              {/* Report sub-tabs */}
-              <div className="flex items-center gap-1 overflow-x-auto border-b border-[var(--card-border)]">
-                {REPORT_TABS.map((tab) => (
-                  <button
-                    key={tab.key}
-                    onClick={() => setMainTab(tab.key)}
-                    className={`-mb-px flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-[13px] transition-colors ${
-                      mainTab === tab.key
-                        ? "border-brand-500 font-medium text-ink-bright"
-                        : "border-transparent text-ink-dim hover:text-ink"
-                    }`}
-                  >
-                    {tab.icon} {tab.label}
-                  </button>
-                ))}
-              </div>
-
-              {mainTab === "funnel" && <FunnelPanel />}
-              {mainTab === "ltv" && <LtvPanel />}
-              {mainTab === "journey" && <JourneyPanel startDate={windowStart} endDate={windowEnd} />}
-              {mainTab === "cohort" && <CohortPanel />}
-              {mainTab === "capi" && <CapiPanel />}
-              {mainTab === "spend" && (
-                <SpendImportPanel startDate={windowStart} endDate={windowEnd} onImported={loadReport} />
-              )}
-              {mainTab === "names" && <AdNamesPanel />}
-
-              {mainTab === "attribution" && (
-                <>
-                  {/* Sync status */}
-                  <div className="flex items-center gap-3 text-[11px]">
-                    <span className="text-ink-faint">
-                      {syncingSpend ? (
-                        <span className="flex items-center gap-1 text-brand-400"><RefreshCw size={10} className="animate-spin" /> Syncing all platforms...</span>
-                      ) : lastAutoSyncAt ? (
-                        <span className="text-ink-dim">Last sync: {new Date(lastAutoSyncAt).toLocaleTimeString()} · Auto every 10m</span>
-                      ) : (
-                        <span className="text-ink-faint">Syncing on load...</span>
-                      )}
-                    </span>
-                    {syncErrors.length > 0 && (
-                      <div className="max-h-24 min-w-0 flex-1 overflow-auto rounded-lg border border-yellow-500/25 bg-yellow-500/10 px-2.5 py-2 text-[10px] text-yellow-300">
-                        <div className="font-semibold uppercase tracking-wide">Sync needs attention</div>
-                        <div className="mt-1 space-y-1">
-                          {syncErrors.map((syncError, index) => (
-                            <div key={`${syncError}-${index}`} className="break-words">{compactSyncError(syncError)}</div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {report && (
-                    <>
-                      <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                        <span className="rounded-md bg-white/5 px-2 py-1 text-ink-dim">Model: {modelLabel(model)}</span>
-                        <span className="rounded-md bg-white/5 px-2 py-1 text-ink-dim">Window: {activeWindowLabel}</span>
-                        <span className="rounded-md bg-white/5 px-2 py-1 text-ink-dim">Basis: {useClickDate ? "Click Date" : "Conversion Date"}</span>
-                      </div>
-
-                      <SummaryCards
-                        totals={report.summary_totals}
-                        compareTotals={compareReport?.summary_totals}
-                        compareLabel={compareLabel}
-                        showCompareBanner={false}
-                      />
-
-                      <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-3">
-                        <div className="space-y-6 lg:col-span-2">
-                          <PlatformComparisonTable
-                            rows={report.platform_comparison?.rows || []}
-                            compareRows={compareReport?.platform_comparison?.rows || []}
-                            compareLabel={compareLabel}
-                          />
-                          <PerformanceChart
-                            data={report.charts?.time_series || []}
-                            compareData={compareReport?.charts?.time_series || []}
-                            compareLabel={compareLabel}
-                          />
-                          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-                            <TrafficValueChart
-                              data={report.charts?.time_series || []}
-                              compareData={compareReport?.charts?.time_series || []}
-                              compareLabel={compareLabel}
-                            />
-                            <CumulativePerformanceChart
-                              data={report.charts?.time_series || []}
-                              compareData={compareReport?.charts?.time_series || []}
-                              compareLabel={compareLabel}
-                            />
-                          </div>
-                          <PlatformMixChart
-                            rows={report.platform_comparison?.rows || []}
-                            compareRows={compareReport?.platform_comparison?.rows || []}
-                            compareLabel={compareLabel}
-                          />
-                        </div>
-                        <div className="space-y-4">
-                          <FunnelSnapshotTable
-                            rows={report.funnels?.rows || []}
-                            compareRows={compareReport?.funnels?.rows || []}
-                            compareLabel={compareLabel}
-                          />
-                          <TrackingHealth
-                            tracking={report.tracking}
-                            freshness={report.diagnostics?.data_freshness}
-                            wsConnected={wsConnected}
-                          />
-                          <LiveFeed events={liveEvents} connected={wsConnected} />
-                        </div>
-                      </div>
-
-                      {/* Advanced comparison controls */}
-                      <div className="rounded-xl border border-[var(--card-border)] bg-[var(--surface)] p-3">
-                        <div className="flex flex-wrap items-end gap-2">
-                          <div className="min-w-[170px]">
-                            <div className="mb-1 text-[10px] uppercase tracking-wide text-ink-dim">Compare</div>
-                            <select
-                              value={effectiveCompareMode}
-                              onChange={(e) => {
-                                const v = e.target.value as CompareMode;
-                                if (v === "none") {
-                                  setCompareEnabled(false);
-                                } else {
-                                  setCompareEnabled(true);
-                                  setAutoCompare(v === "previous_period");
-                                  setCompareMode(v);
-                                }
-                              }}
-                              className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-xs text-ink focus:border-brand-500 focus:outline-none"
-                            >
-                              <option value="none">No Comparison</option>
-                              <option value="previous_period">Previous Period</option>
-                              <option value="custom_range">Custom Range</option>
-                              <option value="model">Another Model</option>
-                            </select>
-                          </div>
-
-                          {effectiveCompareMode === "custom_range" && (
-                            <div className="min-w-[290px]">
-                              <div className="mb-1 text-[10px] uppercase tracking-wide text-ink-dim">Comparison Range</div>
-                              <div className="grid grid-cols-2 gap-2">
-                                <input type="date" value={compareStartDate} onChange={(e) => setCompareStartDate(e.target.value)}
-                                  className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-xs text-ink focus:border-brand-500 focus:outline-none" />
-                                <input type="date" value={compareEndDate} onChange={(e) => setCompareEndDate(e.target.value)}
-                                  className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-xs text-ink focus:border-brand-500 focus:outline-none" />
-                              </div>
-                            </div>
-                          )}
-
-                          {effectiveCompareMode === "model" && (
-                            <div className="min-w-[170px]">
-                              <div className="mb-1 text-[10px] uppercase tracking-wide text-ink-dim">Comparison Model</div>
-                              <select value={compareModel} onChange={(e) => setCompareModel(e.target.value)}
-                                className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-xs text-ink focus:border-brand-500 focus:outline-none">
-                                {MODELS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-                              </select>
-                            </div>
-                          )}
-
-                          <div className="ml-auto text-[11px]">
-                            <span className={`rounded px-2 py-1 ${compareReport ? "bg-blue-500/15 text-blue-300" : "bg-white/5 text-ink-faint"}`}>
-                              {compareReport ? `Comparing vs ${compareLabel}` : "Comparison Off"}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <AttributionTable
-                        columns={report.table.columns}
-                        rows={report.table.rows}
-                        totals={report.table.totals_row}
-                        compareRows={compareReport?.table?.rows || []}
-                        compareLabel={compareLabel}
-                        activeTab={activeTab}
-                        onTabChange={handleTabChange}
-                        startDate={windowStart}
-                        endDate={windowEnd}
-                        model={model}
-                        lookbackDays={30}
-                        useClickDate={useClickDate}
-                        platformFilter={platformFilter}
-                        onPlatformFilterChange={setPlatformFilter}
-                      />
-
-                      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                        <div className="hpanel p-4">
-                          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-emerald-400">
-                            <BarChart3 size={14} /> Top Winners
-                          </h3>
-                          <div className="space-y-2">
-                            {(report.charts?.top_winners || []).map((w: any, i: number) => (
-                              <div key={i} className="flex items-center justify-between text-xs">
-                                <span className="max-w-[200px] truncate text-ink">{w.name}</span>
-                                <span className="font-medium text-emerald-400">
-                                  ${Number(w.profit).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                        <div className="hpanel p-4">
-                          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-rose-400">
-                            <BarChart3 size={14} /> Top Losers
-                          </h3>
-                          <div className="space-y-2">
-                            {(report.charts?.top_losers || []).map((w: any, i: number) => (
-                              <div key={i} className="flex items-center justify-between text-xs">
-                                <span className="max-w-[200px] truncate text-ink">{w.name}</span>
-                                <span className="font-medium text-rose-400">
-                                  ${Number(w.profit).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-
-                      {report.action_plan && report.action_plan.length > 0 && (
-                        <div className="hpanel p-4">
-                          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-ink">
-                            <Settings size={14} /> Recommended Actions
-                          </h3>
-                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
-                            {report.action_plan.map((a: any, i: number) => (
-                              <div key={i} className="rounded-lg border border-[var(--card-border)] bg-white/[0.01] p-3">
-                                <div className="mb-1 text-xs font-semibold text-ink-bright">{a.title}</div>
-                                <div className="mb-2 text-[11px] text-ink-dim">{a.why}</div>
-                                <div className="flex gap-2 text-[10px]">
-                                  <span className={`rounded px-1.5 py-0.5 ${a.expected_impact === "high" ? "bg-emerald-500/10 text-emerald-400" : "bg-yellow-500/10 text-yellow-400"}`}>
-                                    Impact: {a.expected_impact}
-                                  </span>
-                                  <span className="rounded bg-blue-500/10 px-1.5 py-0.5 text-blue-400">Effort: {a.effort}</span>
-                                </div>
-                                <ul className="mt-2 space-y-0.5">
-                                  {a.steps.map((s: string, j: number) => (
-                                    <li key={j} className="flex gap-1 text-[11px] text-ink-dim">
-                                      <span className="text-ink-faint">•</span> {s}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {report.diagnostics && (
-                        <div className="hpanel p-4 text-xs text-ink-dim">
-                          <h3 className="mb-2 text-sm font-semibold text-ink">Diagnostics</h3>
-                          <div className="space-y-1">
-                            <p>Model: {report.report_meta?.attribution_model} | Lookback: {report.report_meta?.filters_applied?.lookback_days}d | Date basis: {report.report_meta?.use_date_of_click_attribution ? "Click" : "Conversion"}</p>
-                            <p>Last event: {report.diagnostics.data_freshness?.last_event_ts || "—"} | Last spend: {report.diagnostics.data_freshness?.last_spend_ts || "—"}</p>
-                            {report.diagnostics.anomalies?.map((a: any, i: number) => (
-                              <p key={i} className="text-yellow-500">⚠ {a.what} — {a.likely_cause}</p>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </>
-                  )}
-
-                  {loading && !report && (
-                    <div className="flex items-center justify-center py-24">
-                      <RefreshCw size={24} className="animate-spin text-brand-500" />
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          )}
         </div>
+        </>
+        )}
+
+        {/* ───────── Reports (Hyros performance report) ───────── */}
+        {section === "reports" && (
+          <div className="flex min-h-full flex-col">
+            <div className="flex items-center gap-1 overflow-x-auto border-b border-[var(--card-border)] bg-[#0a0a0e] px-3 py-2">
+              <button onClick={() => setMainTab("attribution")} title="Performance report" className="mr-1 flex h-7 w-7 items-center justify-center rounded-md text-ink-dim hover:bg-white/5 hover:text-ink"><Home size={15} /></button>
+              {REPORT_TABS.map((tab) => (
+                <button key={tab.key} onClick={() => setMainTab(tab.key)} className={`flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] transition-colors ${mainTab === tab.key ? "bg-white/[0.06] font-medium text-ink-bright" : "text-ink-dim hover:text-ink"}`}>{tab.icon} {tab.label}</button>
+              ))}
+              <button disabled title="New report — coming soon" className="ml-1 flex h-7 w-7 items-center justify-center rounded-md text-ink-faint opacity-60"><Plus size={15} /></button>
+            </div>
+            {error && (
+              <div className="mx-6 mt-4 rounded-xl border border-rose-500/30 bg-rose-500/5 p-4 text-sm text-rose-400">{error} — Check API URL, CORS, and backend logs.</div>
+            )}
+            {mainTab !== "attribution" && (
+              <div className="px-6 py-6">
+                {mainTab === "funnel" && <FunnelPanel />}
+                {mainTab === "ltv" && <LtvPanel />}
+                {mainTab === "journey" && <JourneyPanel startDate={windowStart} endDate={windowEnd} />}
+                {mainTab === "cohort" && <CohortPanel />}
+                {mainTab === "capi" && <CapiPanel />}
+                {mainTab === "spend" && <SpendImportPanel startDate={windowStart} endDate={windowEnd} onImported={loadReport} />}
+                {mainTab === "names" && <AdNamesPanel />}
+              </div>
+            )}
+            {mainTab === "attribution" && (
+              <ReportsView
+                report={report}
+                compareReport={compareReport}
+                compareLabel={compareLabel}
+                loading={loading}
+                model={model}
+                onModelChange={setModel}
+                range={{ start: primaryStartDate, end: primaryEndDate }}
+                onRangeChange={setRange}
+                compareRange={compareRange}
+                compareEnabled={compareEnabled}
+                onCompareEnabledChange={setCompareEnabled}
+                autoCompare={autoCompare}
+                onAutoCompareChange={setAutoCompare}
+                useClickDate={useClickDate}
+                onUseClickDateChange={setUseClickDate}
+                activeTab={activeTab}
+                onTabChange={handleTabChange}
+                platformFilter={platformFilter}
+                onPlatformFilterChange={setPlatformFilter}
+                startDate={windowStart}
+                endDate={windowEnd}
+                autoRefresh={autoRefresh}
+                onToggleAutoRefresh={() => setAutoRefresh((v) => !v)}
+                syncing={syncingSpend}
+                onSync={async () => { await syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true }); await loadReport(); }}
+                onReload={loadReport}
+              />
+            )}
+          </div>
+        )}
       </main>
     </div>
   );
