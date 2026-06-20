@@ -9,14 +9,21 @@ them with monkeypatch. The module makes no DB access and no outbound HTTP.
 
 from __future__ import annotations
 
+import asyncio
+
 import api.connections as connections
 
-# Every env var the module reads (platform creds + webhook secrets).
+# Every env var the module reads (platform creds + Stripe key + webhook secrets).
 ALL_ENV_VARS = [
     env_var
     for keys in connections.PLATFORM_ENV_KEYS.values()
     for env_var in keys.values()
-] + ["SHOPIFY_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET"]
+] + [
+    "STRIPE_API_SECRET_KEY",
+    "STRIPE_SECRET_KEY",
+    "SHOPIFY_WEBHOOK_SECRET",
+    "STRIPE_WEBHOOK_SECRET",
+]
 
 
 def _clear_all(monkeypatch):
@@ -34,13 +41,14 @@ def test_status_all_disconnected_by_default(client, monkeypatch):
     body = r.json()
 
     names = [p["platform"] for p in body["platforms"]]
-    assert names == ["meta", "google", "tiktok"]
+    assert names == ["meta", "google", "tiktok", "stripe"]
     for p in body["platforms"]:
-        assert p["connected"] is False
+        assert p["configured"] is False
+        assert p["state"] == "not_configured"
         # Each field reflects whether its env var is set (all False here).
         assert all(v is False for v in p["fields"].values())
-        assert p["notes"].endswith(f"connect {p['platform']}.")
-        assert p["env_keys"]  # mapping of field -> env var name is exposed
+        assert p["detail"] == "Required credentials are not set."
+        assert p["required_env"]  # required env-var names are exposed
 
     assert body["webhooks"]["shopify"]["configured"] is False
     assert body["webhooks"]["shopify"]["endpoint"] == "/api/webhooks/shopify"
@@ -59,7 +67,7 @@ def test_status_meta_fully_connected(client, monkeypatch):
     by_platform = {p["platform"]: p for p in body["platforms"]}
 
     meta = by_platform["meta"]
-    assert meta["connected"] is True
+    assert meta["configured"] is True
     assert meta["fields"] == {
         "access_token": True,
         "app_secret": True,
@@ -67,8 +75,8 @@ def test_status_meta_fully_connected(client, monkeypatch):
         "ad_account_id": True,
     }
     # Other platforms remain disconnected.
-    assert by_platform["google"]["connected"] is False
-    assert by_platform["tiktok"]["connected"] is False
+    assert by_platform["google"]["configured"] is False
+    assert by_platform["tiktok"]["configured"] is False
 
 
 def test_status_partial_creds_not_connected(client, monkeypatch):
@@ -77,12 +85,12 @@ def test_status_partial_creds_not_connected(client, monkeypatch):
     monkeypatch.setenv("META_ACCESS_TOKEN", "tok")
 
     meta = next(p for p in client.get("/api/connections/status").json()["platforms"] if p["platform"] == "meta")
-    assert meta["connected"] is False
+    assert meta["configured"] is False
     assert meta["fields"]["access_token"] is True
     assert meta["fields"]["app_secret"] is False
 
 
-def test_status_google_and_tiktok_connected(client, monkeypatch):
+def test_status_google_and_tiktok_configured(client, monkeypatch):
     _clear_all(monkeypatch)
     for var in connections.PLATFORM_ENV_KEYS["google"].values():
         monkeypatch.setenv(var, "x")
@@ -90,9 +98,9 @@ def test_status_google_and_tiktok_connected(client, monkeypatch):
         monkeypatch.setenv(var, "y")
 
     by_platform = {p["platform"]: p for p in client.get("/api/connections/status").json()["platforms"]}
-    assert by_platform["google"]["connected"] is True
-    assert by_platform["tiktok"]["connected"] is True
-    assert by_platform["meta"]["connected"] is False
+    assert by_platform["google"]["configured"] is True
+    assert by_platform["tiktok"]["configured"] is True
+    assert by_platform["meta"]["configured"] is False
 
 
 def test_status_webhooks_configured(client, monkeypatch):
@@ -105,16 +113,17 @@ def test_status_webhooks_configured(client, monkeypatch):
     assert webhooks["stripe"]["configured"] is True
 
 
-# ── unit: _get_connection_status edge cases ─────────────────────────────────────
+# ── unit: _platform_status edge cases ───────────────────────────────────────────
 
 
-def test_get_connection_status_unknown_platform(monkeypatch):
-    # No env keys for an unknown platform -> never "connected".
-    status = connections._get_connection_status("snapchat")
+def test_platform_status_unknown_platform():
+    # An unknown platform has no env-key mapping; the non-validate path returns
+    # structural defaults without any live API call.
+    status = asyncio.run(connections._platform_status("snapchat", validate=False, client=None))
     assert status["platform"] == "snapchat"
-    assert status["connected"] is False
     assert status["fields"] == {}
-    assert status["env_keys"] == {}
+    assert status["required_env"] == []
+    assert status["checked_at"] is None
 
 
 # ── GET /setup-guide ─────────────────────────────────────────────────────────────
