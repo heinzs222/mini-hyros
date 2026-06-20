@@ -3,9 +3,12 @@
   GET /api/connections/status       — platform + webhook connection status
   GET /api/connections/setup-guide  — static setup instructions
 
-Without ?validate=true the status is derived from credential presence (env vars,
-plus stored credentials for GHL) and makes no outbound HTTP, so configured-but-
-unverified platforms report state "unknown" rather than "connected".
+Without ``?validate=true`` the status endpoint derives everything from
+credential presence (env vars, plus stored credentials for GHL) with no
+outbound HTTP, so tests toggle the relevant vars with monkeypatch. Each
+platform reports ``configured`` (its required credentials are present) and a
+``state`` that is ``not_configured`` until configured and ``unknown`` until a
+live validation is run.
 """
 
 from __future__ import annotations
@@ -14,16 +17,13 @@ import asyncio
 
 import api.connections as connections
 
-# Every credential env var the module reads (ad platforms + stripe + GHL + webhooks).
-ALL_ENV_VARS = [
-    env_var
-    for keys in connections.PLATFORM_ENV_KEYS.values()
-    for env_var in keys.values()
-] + [
-    "STRIPE_API_SECRET_KEY", "STRIPE_SECRET_KEY",
-    "SHOPIFY_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET",
-    "GHL_API_TOKEN", "GHL_ACCESS_TOKEN", "GHL_LOCATION_ID",
-]
+# Every credential the module reads (ad platforms + Stripe + GHL + webhook secrets).
+ALL_ENV_VARS = (
+    [env_var for keys in connections.PLATFORM_ENV_KEYS.values() for env_var in keys.values()]
+    + ["STRIPE_API_SECRET_KEY", "STRIPE_SECRET_KEY"]
+    + ["SHOPIFY_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET"]
+    + ["GHL_API_TOKEN", "GHL_ACCESS_TOKEN", "GHL_LOCATION_ID"]
+)
 
 EXPECTED_PLATFORMS = ["meta", "google", "tiktok", "stripe", "ghl"]
 
@@ -45,28 +45,32 @@ def test_status_all_disconnected_by_default(client, monkeypatch):
     names = [p["platform"] for p in body["platforms"]]
     assert names == EXPECTED_PLATFORMS
     for p in body["platforms"]:
-        # Without any credentials set, nothing is configured (env-only path never
-        # reaches a live check, so state is "not_configured").
+        # Without any credentials set, nothing is configured and the env-only
+        # path never reaches a live check, so state is "not_configured".
         assert p["configured"] is False
         assert p["state"] == "not_configured"
+        assert p["checked_at"] is None
         # Each field reflects whether its credential is set (all False here).
         assert all(v is False for v in p["fields"].values())
         assert isinstance(p["required_env"], list)
+        assert p["detail"] == "Required credentials are not set."
 
     assert body["webhooks"]["shopify"]["configured"] is False
     assert body["webhooks"]["shopify"]["endpoint"] == "/api/webhooks/shopify"
     assert body["webhooks"]["stripe"]["configured"] is False
     assert body["webhooks"]["stripe"]["endpoint"] == "/api/webhooks/stripe"
-    assert body["summary"]["total"] == len(EXPECTED_PLATFORMS)
-    assert body["summary"]["configured"] == 0
+
+    # Without ?validate=true the response is not validated.
     assert body["validated"] is False
+    assert body["summary"]["connected"] == 0
+    assert body["summary"]["configured"] == 0
+    assert body["summary"]["total"] == len(EXPECTED_PLATFORMS)
 
 
 def test_status_meta_configured(client, monkeypatch):
     _clear_all(monkeypatch)
+    # Meta only requires an access token + ad account id to be "configured".
     monkeypatch.setenv("META_ACCESS_TOKEN", "tok")
-    monkeypatch.setenv("META_APP_SECRET", "sec")
-    monkeypatch.setenv("META_PIXEL_ID", "px")
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "act_1")
 
     body = client.get("/api/connections/status").json()
@@ -74,17 +78,19 @@ def test_status_meta_configured(client, monkeypatch):
 
     meta = by_platform["meta"]
     assert meta["configured"] is True
-    # Without validate=true the live check is skipped, so state stays "unknown".
+    # Configured but not yet live-validated.
     assert meta["state"] == "unknown"
     assert meta["fields"] == {
         "access_token": True,
-        "app_secret": True,
-        "pixel_id": True,
+        "app_secret": False,
+        "pixel_id": False,
         "ad_account_id": True,
     }
     # Other platforms remain unconfigured.
     assert by_platform["google"]["configured"] is False
     assert by_platform["tiktok"]["configured"] is False
+    assert by_platform["stripe"]["configured"] is False
+    assert by_platform["ghl"]["configured"] is False
 
 
 def test_status_partial_creds_not_configured(client, monkeypatch):
@@ -94,8 +100,9 @@ def test_status_partial_creds_not_configured(client, monkeypatch):
 
     meta = next(p for p in client.get("/api/connections/status").json()["platforms"] if p["platform"] == "meta")
     assert meta["configured"] is False
+    assert meta["state"] == "not_configured"
     assert meta["fields"]["access_token"] is True
-    assert meta["fields"]["app_secret"] is False
+    assert meta["fields"]["ad_account_id"] is False
 
 
 def test_status_google_and_tiktok_configured(client, monkeypatch):
@@ -117,7 +124,7 @@ def test_status_stripe_configured(client, monkeypatch):
 
     stripe = next(p for p in client.get("/api/connections/status").json()["platforms"] if p["platform"] == "stripe")
     assert stripe["configured"] is True
-    assert stripe["fields"]["secret_key"] is True
+    assert stripe["fields"] == {"secret_key": True}
 
 
 def test_status_ghl_configured_via_env(client, monkeypatch):
@@ -145,8 +152,9 @@ def test_status_webhooks_configured(client, monkeypatch):
 
 
 def test_platform_status_unknown_platform(monkeypatch):
-    # Unknown platform has no field map; the env-only path performs no live check,
-    # so it is never "connected".
+    _clear_all(monkeypatch)
+    # An unknown platform has no field map; with validation off it returns its
+    # base record without touching the network, so it is never "connected".
     status = asyncio.run(connections._platform_status("snapchat", validate=False, client=None))
     assert status["platform"] == "snapchat"
     assert status["state"] != "connected"

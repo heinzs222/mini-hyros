@@ -85,6 +85,11 @@ interface Props {
   compareLabel?: string;
   platformFilter?: string;
   onPlatformFilterChange?: (p: string) => void;
+  /** When embedded inside ReportsView, hide the internal tab bar + toolbar (chrome is provided outside). */
+  embedded?: boolean;
+  densityValue?: "compact" | "comfortable";
+  searchValue?: string;
+  hiddenColumnKeys?: string[];
 }
 
 const PLATFORM_META: Record<string, { label: string; dot: string }> = {
@@ -240,7 +245,7 @@ function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; curr
 
 type FilterOp = ">=" | "<=";
 
-function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "", platformFilter = "all", onPlatformFilterChange }: Props) {
+function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "", platformFilter = "all", onPlatformFilterChange, embedded = false, densityValue, searchValue, hiddenColumnKeys }: Props) {
   const [sortKey, setSortKey] = useState("profit");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [search, setSearch] = useState("");
@@ -255,11 +260,15 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
   // Cache fetched lightbox video URLs by video_id so reopening doesn't refetch.
   const videoUrlCacheRef = useRef<Record<string, string>>({});
 
-  // Debounce the search value used for filtering/sorting (input stays responsive).
+  // When embedded in ReportsView the search box is a controlled prop; otherwise
+  // the table owns its own search state.
+  const effSearch = searchValue !== undefined ? searchValue : search;
+
+  // Debounce the effective search used for filtering/sorting (input stays responsive).
   useEffect(() => {
-    const id = setTimeout(() => setDebouncedSearch(search), 200);
+    const id = setTimeout(() => setDebouncedSearch(effSearch), 200);
     return () => clearTimeout(id);
-  }, [search]);
+  }, [effSearch]);
 
   // Hyros-style table controls
   const [density, setDensity] = useState<"compact" | "comfortable">("compact");
@@ -272,12 +281,19 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
   const colsMenuRef = useRef<HTMLDivElement>(null);
   const filterMenuRef = useRef<HTMLDivElement>(null);
 
+  // Effective control values: prefer external (controlled) props when embedded in ReportsView.
+  const effDensity = densityValue ?? density;
+  const effHidden = useMemo(
+    () => (hiddenColumnKeys ? new Set(hiddenColumnKeys) : hiddenCols),
+    [hiddenColumnKeys, hiddenCols],
+  );
+
   const metricCols = useMemo(() => columns.filter((c) => c.type !== "dimension"), [columns]);
-  const shownCols = useMemo(() => metricCols.filter((c) => !hiddenCols.has(c.key)), [metricCols, hiddenCols]);
+  const shownCols = useMemo(() => metricCols.filter((c) => !effHidden.has(c.key)), [metricCols, effHidden]);
   const dimensionCol = useMemo(() => columns.find((c) => c.type === "dimension"), [columns]);
   const compareById = useMemo(() => new Map(compareRows.map((r) => [r.id, r])), [compareRows]);
   const querySignature = `${activeTab}|${startDate || ""}|${endDate || ""}|${model || ""}|${lookbackDays || ""}|${useClickDate ? "click" : "conversion"}`;
-  const cellPad = density === "compact" ? "py-1.5" : "py-3";
+  const cellPad = effDensity === "compact" ? "py-1.5" : "py-3";
   const filterActive = Boolean(filterKey && filterVal !== "");
 
   const filtered = useMemo(() => {
@@ -653,6 +669,8 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
         </div>
       )}
 
+      {!embedded && (
+      <>
       {/* Grouping tabs (segmented control) */}
       <div className="flex items-center gap-2 px-4 pt-4 pb-3 overflow-x-auto">
         <div className="flex items-center gap-1 rounded-xl border border-[var(--card-border)] bg-[var(--surface-2)] p-1">
@@ -833,6 +851,8 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
           </div>
         </div>
       </div>
+      </>
+      )}
 
       {/* Table */}
       <div className="overflow-x-auto">
