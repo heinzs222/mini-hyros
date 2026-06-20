@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { formatMoney, formatNumber, formatPercentValue, formatRatio, profitColor } from "@/lib/utils";
 
 interface PlatformRow {
@@ -29,7 +30,7 @@ const PLATFORM_STYLES: Record<string, string> = {
   tiktok: "bg-pink-500/15 text-pink-300 border border-pink-500/30",
 };
 
-export default function PlatformComparisonTable({ rows, compareRows = [], compareLabel = "" }: Props) {
+function PlatformComparisonTable({ rows, compareRows = [], compareLabel = "" }: Props) {
   const compareByPlatform = new Map(compareRows.map((r) => [r.platform, r]));
 
   const deltaClass = (delta: number | null | undefined) => {
@@ -146,3 +147,5 @@ export default function PlatformComparisonTable({ rows, compareRows = [], compar
     </div>
   );
 }
+
+export default memo(PlatformComparisonTable);

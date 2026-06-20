@@ -22,7 +22,9 @@ import {
   Layers3,
   Check,
 } from "lucide-react";
-import { useState, useCallback, useEffect, useRef } from "react";
+import { memo, useState, useCallback, useEffect, useMemo, useRef } from "react";
+
+const BACKEND = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type MetricValues = {
   impressions?: number;
@@ -238,10 +240,11 @@ function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; curr
 
 type FilterOp = ">=" | "<=";
 
-export default function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "", platformFilter = "all", onPlatformFilterChange }: Props) {
+function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "", platformFilter = "all", onPlatformFilterChange }: Props) {
   const [sortKey, setSortKey] = useState("profit");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [childRows, setChildRows] = useState<Record<string, TableRow[]>>({});
   const [loadingChildren, setLoadingChildren] = useState<Record<string, boolean>>({});
@@ -249,6 +252,14 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoLoading, setVideoLoading] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Cache fetched lightbox video URLs by video_id so reopening doesn't refetch.
+  const videoUrlCacheRef = useRef<Record<string, string>>({});
+
+  // Debounce the search value used for filtering/sorting (input stays responsive).
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedSearch(search), 200);
+    return () => clearTimeout(id);
+  }, [search]);
 
   // Hyros-style table controls
   const [density, setDensity] = useState<"compact" | "comfortable">("compact");
@@ -261,34 +272,43 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   const colsMenuRef = useRef<HTMLDivElement>(null);
   const filterMenuRef = useRef<HTMLDivElement>(null);
 
-  const metricCols = columns.filter((c) => c.type !== "dimension");
-  const shownCols = metricCols.filter((c) => !hiddenCols.has(c.key));
-  const dimensionCol = columns.find((c) => c.type === "dimension");
-  const compareById = new Map(compareRows.map((r) => [r.id, r]));
+  const metricCols = useMemo(() => columns.filter((c) => c.type !== "dimension"), [columns]);
+  const shownCols = useMemo(() => metricCols.filter((c) => !hiddenCols.has(c.key)), [metricCols, hiddenCols]);
+  const dimensionCol = useMemo(() => columns.find((c) => c.type === "dimension"), [columns]);
+  const compareById = useMemo(() => new Map(compareRows.map((r) => [r.id, r])), [compareRows]);
   const querySignature = `${activeTab}|${startDate || ""}|${endDate || ""}|${model || ""}|${lookbackDays || ""}|${useClickDate ? "click" : "conversion"}`;
   const cellPad = density === "compact" ? "py-1.5" : "py-3";
   const filterActive = Boolean(filterKey && filterVal !== "");
 
-  const filtered = rows.filter((r) => {
-    const needle = search.toLowerCase().trim();
-    const matchSearch = !needle
-      || r.name.toLowerCase().includes(needle)
-      || r.id.toLowerCase().includes(needle)
-      || (r.raw_id || "").toLowerCase().includes(needle);
-    const matchPlatform = platformFilter === "all" || platformFromRow(r) === platformFilter;
-    let matchMetric = true;
-    if (filterActive) {
-      const v = Number((r.metrics as any)[filterKey] ?? 0);
-      const threshold = Number(filterVal);
-      matchMetric = filterOp === ">=" ? v >= threshold : v <= threshold;
-    }
-    return matchSearch && matchPlatform && matchMetric;
-  });
+  const filtered = useMemo(() => {
+    const needle = debouncedSearch.toLowerCase().trim();
+    return rows.filter((r) => {
+      const matchSearch = !needle
+        || r.name.toLowerCase().includes(needle)
+        || r.id.toLowerCase().includes(needle)
+        || (r.raw_id || "").toLowerCase().includes(needle);
+      const matchPlatform = platformFilter === "all" || platformFromRow(r) === platformFilter;
+      let matchMetric = true;
+      if (filterActive) {
+        const v = Number((r.metrics as any)[filterKey] ?? 0);
+        const threshold = Number(filterVal);
+        matchMetric = filterOp === ">=" ? v >= threshold : v <= threshold;
+      }
+      return matchSearch && matchPlatform && matchMetric;
+    });
+  }, [rows, debouncedSearch, platformFilter, filterActive, filterKey, filterOp, filterVal]);
 
-  const platformsInData = Array.from(new Set(rows.map((r) => platformFromRow(r)).filter(Boolean)));
+  const platformsInData = useMemo(
+    () => Array.from(new Set(rows.map((r) => platformFromRow(r)).filter(Boolean))),
+    [rows],
+  );
   const platformsKey = platformsInData.join("|");
-  const visibleTotals = search.trim() || platformFilter !== "all" || filterActive ? recalcTotals(filtered) : (totals as MetricValues);
-  const totalsLabel = search.trim() || platformFilter !== "all" || filterActive ? "Total (visible)" : "Total";
+  const isFiltering = Boolean(debouncedSearch.trim()) || platformFilter !== "all" || filterActive;
+  const visibleTotals = useMemo(
+    () => (isFiltering ? recalcTotals(filtered) : (totals as MetricValues)),
+    [isFiltering, filtered, totals],
+  );
+  const totalsLabel = isFiltering ? "Total (visible)" : "Total";
 
   useEffect(() => {
     setExpanded({});
@@ -312,11 +332,15 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
     return () => document.removeEventListener("mousedown", onDown);
   }, [showColsMenu, showFilterMenu]);
 
-  const sorted = [...filtered].sort((a, b) => {
-    const av = (a.metrics as any)[sortKey] ?? 0;
-    const bv = (b.metrics as any)[sortKey] ?? 0;
-    return sortDir === "desc" ? bv - av : av - bv;
-  });
+  const sorted = useMemo(
+    () =>
+      [...filtered].sort((a, b) => {
+        const av = (a.metrics as any)[sortKey] ?? 0;
+        const bv = (b.metrics as any)[sortKey] ?? 0;
+        return sortDir === "desc" ? bv - av : av - bv;
+      }),
+    [filtered, sortKey, sortDir],
+  );
 
   const handleSort = (key: string) => {
     if (sortKey === key) {
@@ -405,20 +429,37 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
     }
   }, []);
 
-  const BACKEND = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
   useEffect(() => {
     if (!lightbox?.video_id || lightbox.type !== "video") return;
+    const videoId = lightbox.video_id;
+
+    // Reuse the cached URL if we already fetched it for this video_id.
+    const cached = videoUrlCacheRef.current[videoId];
+    if (cached) {
+      setVideoUrl(cached);
+      setVideoLoading(false);
+      return;
+    }
+
+    let cancelled = false;
     setVideoLoading(true);
     const token = typeof window !== "undefined" ? (window.localStorage.getItem("hyros_auth_token") || "") : "";
-    fetch(`${BACKEND}/api/ad-names/video-url?video_id=${lightbox.video_id}`, {
+    fetch(`${BACKEND}/api/ad-names/video-url?video_id=${videoId}`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
       .then((r) => r.json())
-      .then((d) => { if (d.video_url) setVideoUrl(d.video_url); })
+      .then((d) => {
+        if (cancelled) return;
+        if (d.video_url) {
+          videoUrlCacheRef.current[videoId] = d.video_url;
+          setVideoUrl(d.video_url);
+        }
+      })
       .catch(() => {})
-      .finally(() => setVideoLoading(false));
-  }, [lightbox?.video_id, lightbox?.type, BACKEND]);
+      .finally(() => { if (!cancelled) setVideoLoading(false); });
+
+    return () => { cancelled = true; };
+  }, [lightbox?.video_id, lightbox?.type]);
 
   // Render a single data row
   const renderRow = (row: TableRow, depth: number, parentKey?: string): React.ReactNode => {
@@ -840,3 +881,5 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
     </>
   );
 }
+
+export default memo(AttributionTable);

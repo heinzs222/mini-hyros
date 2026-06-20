@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
-
 from attributionops.db import query
-from attributionops.util import parse_iso_ts
 
 
 def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int = 30) -> dict[str, object]:
@@ -20,43 +17,28 @@ def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int =
 
     orders_total = query(db_path, "SELECT COUNT(*) AS n FROM orders;").rows[0]["n"]
 
-    # orders_with_source = orders that have at least one touchpoint for that customer within lookback window
-    # before the order timestamp.
-    rows = query(
+    # orders_with_source = orders that have at least one touchpoint for that
+    # customer within the lookback window before the order timestamp. This was
+    # previously a full touchpoints load + O(orders × touches) Python loop with
+    # repeated timestamp parsing; SQLite can do it directly with an EXISTS
+    # subquery backed by the touchpoints(customer_key, ts) index. The ts columns
+    # are ISO-8601 strings, so strftime reproduces the exact stored format for a
+    # sargable lexical comparison.
+    orders_with_source = query(
         db_path,
-        "SELECT order_id, ts, customer_key FROM orders WHERE COALESCE(customer_key,'') <> '';",
-    ).rows
-
-    # Preload touchpoints per customer (ts only) for speed.
-    tp_rows = query(
-        db_path,
-        "SELECT customer_key, ts, channel, platform, campaign_id, adset_id, ad_id FROM touchpoints WHERE COALESCE(customer_key,'') <> '';",
-    ).rows
-    tps_by_customer: dict[str, list[dict[str, str]]] = {}
-    for tp in tp_rows:
-        ck = str(tp["customer_key"])
-        tps_by_customer.setdefault(ck, []).append(tp)
-    for ck in tps_by_customer:
-        tps_by_customer[ck].sort(key=lambda r: r["ts"])
-
-    lookback = timedelta(days=lookback_days_for_order_source)
-    orders_with_source = 0
-    for o in rows:
-        ck = str(o["customer_key"])
-        if ck not in tps_by_customer:
-            continue
-        order_ts = parse_iso_ts(str(o["ts"]))
-        window_start = order_ts - lookback
-        has_tp = False
-        for tp in tps_by_customer[ck]:
-            tp_ts = parse_iso_ts(str(tp["ts"]))
-            if tp_ts < window_start:
-                continue
-            if tp_ts <= order_ts:
-                has_tp = True
-                break
-        if has_tp:
-            orders_with_source += 1
+        """
+        SELECT COUNT(*) AS n
+        FROM orders o
+        WHERE COALESCE(o.customer_key, '') <> ''
+          AND EXISTS (
+            SELECT 1 FROM touchpoints t
+            WHERE t.customer_key = o.customer_key
+              AND t.ts <= o.ts
+              AND t.ts >= strftime('%Y-%m-%dT%H:%M:%SZ', o.ts, :lookback)
+          );
+        """,
+        {"lookback": f"-{int(lookback_days_for_order_source)} days"},
+    ).rows[0]["n"]
 
     # Freshness
     last_session_ts = query(db_path, "SELECT MAX(ts) AS max_ts FROM sessions;").rows[0]["max_ts"]
