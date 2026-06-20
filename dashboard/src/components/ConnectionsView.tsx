@@ -11,7 +11,7 @@ import {
   Plug,
   Webhook,
 } from "lucide-react";
-import { fetchConnections, fetchTikTokConnectUrl, refreshTikTokToken } from "@/lib/api";
+import { fetchConnections, fetchTikTokConnectUrl, refreshTikTokToken, connectGhl } from "@/lib/api";
 import { useToast } from "@/components/Toast";
 
 type ConnState = "connected" | "expired" | "invalid" | "error" | "not_configured" | "unknown";
@@ -48,6 +48,7 @@ export default function ConnectionsView() {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [tiktokBusy, setTiktokBusy] = useState(false);
+  const [ghl, setGhl] = useState({ token: "", location: "", busy: false });
 
   const load = async (notify = false) => {
     setLoading(true);
@@ -114,6 +115,28 @@ export default function ConnectionsView() {
       toast.error("TikTok refresh failed", { description: e?.message || "Request failed." });
     } finally {
       setTiktokBusy(false);
+    }
+  };
+
+  const connectGhlHandler = async () => {
+    if (!ghl.token.trim() || !ghl.location.trim()) {
+      toast.error("Missing GHL details", { description: "Enter both the API token and Location ID." });
+      return;
+    }
+    setGhl((g) => ({ ...g, busy: true }));
+    try {
+      const res = await connectGhl({ api_token: ghl.token.trim(), location_id: ghl.location.trim() });
+      if (res?.connected) {
+        toast.success("GoHighLevel connected", { description: "Leads & opportunities will sync on the next refresh." });
+        setGhl({ token: "", location: "", busy: false });
+        await load(false);
+      } else {
+        toast.error("GHL connection failed", { description: res?.error || "Could not validate token." });
+        setGhl((g) => ({ ...g, busy: false }));
+      }
+    } catch (e: any) {
+      toast.error("GHL connection failed", { description: e?.message || "Request failed." });
+      setGhl((g) => ({ ...g, busy: false }));
     }
   };
 
@@ -215,9 +238,39 @@ export default function ConnectionsView() {
                     )}
                   </div>
 
-                  {needsAction && p.required_env?.length > 0 && p.platform !== "tiktok" && (
+                  {needsAction && p.required_env?.length > 0 && p.platform !== "tiktok" && p.platform !== "ghl" && (
                     <div className="mt-2 rounded-lg bg-white/[0.02] p-2 text-[10px] text-ink-faint">
                       Set in environment: <span className="font-mono text-ink-dim">{p.required_env.join(", ")}</span>
+                    </div>
+                  )}
+
+                  {p.platform === "ghl" && (
+                    <div className="mt-3 space-y-2 rounded-lg border border-[var(--card-border)] bg-white/[0.02] p-2.5">
+                      <div className="text-[10px] uppercase tracking-wide text-ink-dim">
+                        Connect via Private Integration token
+                      </div>
+                      <input
+                        type="password"
+                        value={ghl.token}
+                        onChange={(e) => setGhl((g) => ({ ...g, token: e.target.value }))}
+                        placeholder="API token (pit-…)"
+                        className="w-full rounded-md border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-[12px] text-ink placeholder:text-ink-faint focus:border-brand-500 focus:outline-none"
+                      />
+                      <input
+                        type="text"
+                        value={ghl.location}
+                        onChange={(e) => setGhl((g) => ({ ...g, location: e.target.value }))}
+                        placeholder="Location ID"
+                        className="w-full rounded-md border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-[12px] text-ink placeholder:text-ink-faint focus:border-brand-500 focus:outline-none"
+                      />
+                      <button
+                        onClick={connectGhlHandler}
+                        disabled={ghl.busy}
+                        className="flex w-full items-center justify-center gap-1.5 rounded-md bg-brand-600 px-2.5 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-brand-700 disabled:opacity-50"
+                      >
+                        {ghl.busy ? <RefreshCw size={12} className="animate-spin" /> : null}
+                        {ghl.busy ? "Connecting…" : "Connect GoHighLevel"}
+                      </button>
                     </div>
                   )}
                 </div>

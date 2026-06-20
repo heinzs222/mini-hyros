@@ -26,6 +26,7 @@ import {
 import { fetchLeadJourneys, fetchRefundSummary } from "@/lib/api";
 import { formatMoney } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
+import CustomerProfileModal from "@/components/CustomerProfileModal";
 
 function rowKey(r: { customer_key: string; conversion_ts: string; order_id: string }): string {
   return `${r.customer_key}|${r.conversion_ts}|${r.order_id}`;
@@ -153,6 +154,7 @@ export default function LeadsView({ startDate, endDate }: Props) {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const [profile, setProfile] = useState<{ customerKey: string; label: string } | null>(null);
   const filterMenuRef = useRef<HTMLDivElement>(null);
   const filterActive = statusFilter !== "all";
 
@@ -542,10 +544,16 @@ export default function LeadsView({ startDate, endDate }: Props) {
                       <td className="max-w-[190px] truncate px-4 py-3 text-ink-dim" title={origin}>{origin}</td>
                       <td className="max-w-[190px] truncate px-4 py-3 text-ink-dim" title={last}>{last}</td>
                       <td className="whitespace-nowrap px-4 py-3">
-                        <span className="inline-flex items-center gap-1.5 text-ink-dim">
+                        <button
+                          type="button"
+                          onClick={() => r.customer_key && setProfile({ customerKey: r.customer_key, label: nameOf(r) })}
+                          disabled={!r.customer_key}
+                          title="Open customer details"
+                          className="inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-ink-dim transition-colors hover:bg-white/5 hover:text-brand-300 disabled:cursor-default disabled:hover:bg-transparent"
+                        >
                           <Mail size={12} className="text-ink-faint" />
-                          <span className="tabular">{r.customer_key_short}</span>
-                        </span>
+                          <span className="tabular underline-offset-2 hover:underline">{r.customer_key_short}</span>
+                        </button>
                       </td>
                       <td className="whitespace-nowrap px-4 py-3">
                         {attributed ? (
@@ -626,6 +634,14 @@ export default function LeadsView({ startDate, endDate }: Props) {
           </span>
         </div>
       </div>
+
+      {profile && (
+        <CustomerProfileModal
+          customerKey={profile.customerKey}
+          label={profile.label}
+          onClose={() => setProfile(null)}
+        />
+      )}
     </div>
   );
 }

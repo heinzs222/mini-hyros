@@ -20,10 +20,14 @@ type TsRow = {
   date: string;
   cost: number;
   revenue: number;
+  tracked_revenue?: number;
   profit: number;
   clicks: number;
   orders: number;
+  tracked_orders?: number;
+  new_customers?: number;
   roas: number | null;
+  blended_roas?: number | null;
   cvr: number | null;
 };
 
@@ -130,10 +134,17 @@ export default function DashboardView({ report, compareReport, compareCaption }:
     const orders = trackedOrders(sum);
     const roas = sum.blended_roas ?? sum.roas ?? (cost > 0 ? revenue / cost : null);
     const aov = sum.blended_aov ?? (orders > 0 ? revenue / orders : null);
-    const totalLeads = (report?.funnels?.rows || []).reduce((a: number, r: any) => a + num(r.leads), 0);
-    const cpl = totalLeads > 0 ? cost / totalLeads : sum.cpa ?? (orders > 0 ? cost / orders : null);
-    const cac = sum.cac ?? (orders > 0 ? cost / orders : null);
     const clicks = num(sum.clicks);
+
+    // New customers = net-new (first-time) buyers, distinct from Sales (order count).
+    const newCustomers = sum.new_customers != null ? num(sum.new_customers) : orders;
+    // Leads come from lead/opt-in conversions; fall back to the funnel snapshot.
+    const funnelLeads = (report?.funnels?.rows || []).reduce((a: number, r: any) => a + num(r.leads), 0);
+    const leads = sum.leads != null ? num(sum.leads) : funnelLeads;
+    // Cost per Lead = spend / leads. NET CAC = spend / net-new customers. Both are
+    // distinct from CPA (spend / orders) — the backend now provides them directly.
+    const cpl = sum.cpl != null ? num(sum.cpl) : leads > 0 ? cost / leads : null;
+    const cac = sum.cac != null ? num(sum.cac) : newCustomers > 0 ? cost / newCustomers : null;
 
     const cCost = csum ? num(csum.cost) : null;
     const cRevenue = csum ? trackedRevenue(csum) : null;
@@ -141,34 +152,55 @@ export default function DashboardView({ report, compareReport, compareCaption }:
     const cRoas = csum ? (csum.blended_roas ?? csum.roas ?? (cCost ? cRevenue! / cCost : null)) : null;
     const cAov = csum ? (csum.blended_aov ?? (cOrders ? cRevenue! / cOrders : null)) : null;
     const cClicks = csum ? num(csum.clicks) : null;
-    const cCac = csum ? (csum.cac ?? (cOrders ? cCost! / cOrders : null)) : null;
-    const cLeads = (compareReport?.funnels?.rows || []).reduce((a: number, r: any) => a + num(r.leads), 0);
-    const cCpl = csum
-      ? cLeads > 0
-        ? cCost! / cLeads
-        : csum.cpa ?? (cOrders ? cCost! / cOrders : null)
+    const cNewCustomers = csum ? (csum.new_customers != null ? num(csum.new_customers) : cOrders) : null;
+    const cLeadsFunnel = (compareReport?.funnels?.rows || []).reduce((a: number, r: any) => a + num(r.leads), 0);
+    const cLeads = csum ? (csum.leads != null ? num(csum.leads) : cLeadsFunnel) : null;
+    const cCac = csum
+      ? csum.cac != null
+        ? num(csum.cac)
+        : cNewCustomers && cNewCustomers > 0
+        ? cCost! / cNewCustomers
+        : null
       : null;
+    const cCpl = csum
+      ? csum.cpl != null
+        ? num(csum.cpl)
+        : cLeads && cLeads > 0
+        ? cCost! / cLeads
+        : null
+      : null;
+
+    // Charts use tracked (all-orders) per-day figures so they match the headline
+    // tracked numbers even when attribution is incomplete (falling back to
+    // attributed values when tracked-by-day isn't available).
+    const dayRevenue = (r: any) => num(r.tracked_revenue ?? r.revenue);
+    const dayOrders = (r: any) => num(r.tracked_orders ?? r.orders);
 
     let running = 0;
     const cumulative = ts.map((r) => {
-      running += num(r.revenue);
+      running += dayRevenue(r);
       return { date: r.date, label: shortAxisDate(r.date), v: Math.round(running * 100) / 100 };
     });
-    const series = ts.map((r) => ({
-      date: r.date,
-      label: shortAxisDate(r.date),
-      cost: num(r.cost),
-      revenue: num(r.revenue),
-      orders: num(r.orders),
-      clicks: num(r.clicks),
-      roas: r.roas == null ? 0 : num(r.roas),
-      aov: num(r.orders) > 0 ? Math.round((num(r.revenue) / num(r.orders)) * 100) / 100 : 0,
-      cpa: num(r.orders) > 0 ? Math.round((num(r.cost) / num(r.orders)) * 100) / 100 : 0,
-    }));
+    const series = ts.map((r) => {
+      const rev = dayRevenue(r);
+      const ord = dayOrders(r);
+      return {
+        date: r.date,
+        label: shortAxisDate(r.date),
+        cost: num(r.cost),
+        revenue: rev,
+        orders: ord,
+        newCustomers: num((r as any).new_customers ?? 0),
+        clicks: num(r.clicks),
+        roas: num((r as any).blended_roas ?? r.roas ?? 0),
+        aov: ord > 0 ? Math.round((rev / ord) * 100) / 100 : 0,
+        cpa: ord > 0 ? Math.round((num(r.cost) / ord) * 100) / 100 : 0,
+      };
+    });
 
     return {
-      cost, revenue, orders, roas, aov, cpl, cac, clicks,
-      cCost, cRevenue, cOrders, cRoas, cAov, cClicks, cCac, cCpl,
+      cost, revenue, orders, roas, aov, cpl, cac, clicks, newCustomers, leads,
+      cCost, cRevenue, cOrders, cRoas, cAov, cClicks, cCac, cCpl, cNewCustomers, cLeads,
       cumulative, series,
     };
   }, [sum, csum, ts, report, compareReport]);
@@ -233,14 +265,14 @@ export default function DashboardView({ report, compareReport, compareCaption }:
         <div className="hpanel group p-4 transition-colors hover:border-white/10">
           <WidgetHeader title="New Customers" />
           <div className="mb-1 flex items-baseline gap-2">
-            <span className="h-num text-[34px]">{formatNumber(d.orders)}</span>
-            {deltaPct(d.orders, d.cOrders) != null && (
+            <span className="h-num text-[34px]">{formatNumber(d.newCustomers)}</span>
+            {deltaPct(d.newCustomers, d.cNewCustomers) != null && (
               <span
                 className={`text-[12px] font-semibold ${
-                  d.orders >= (d.cOrders ?? 0) ? "text-emerald-400" : "text-rose-400"
+                  d.newCustomers >= (d.cNewCustomers ?? 0) ? "text-emerald-400" : "text-rose-400"
                 }`}
               >
-                {d.orders >= (d.cOrders ?? 0) ? "▲" : "▼"} {Math.abs(deltaPct(d.orders, d.cOrders)!).toFixed(0)}%
+                {d.newCustomers >= (d.cNewCustomers ?? 0) ? "▲" : "▼"} {Math.abs(deltaPct(d.newCustomers, d.cNewCustomers)!).toFixed(0)}%
               </span>
             )}
           </div>
@@ -257,7 +289,7 @@ export default function DashboardView({ report, compareReport, compareCaption }:
                 <XAxis dataKey="label" tick={{ fill: "#595c68", fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={24} />
                 <YAxis tick={{ fill: "#595c68", fontSize: 10 }} tickLine={false} axisLine={false} width={42} />
                 <Tooltip content={<ChartTooltip fmt={formatNumber} />} />
-                <Area type="monotone" name="New Customers" dataKey="orders" stroke={COLORS.purple} strokeWidth={2} fill="url(#g-cust)" isAnimationActive={false} dot={false} />
+                <Area type="monotone" name="New Customers" dataKey="newCustomers" stroke={COLORS.purple} strokeWidth={2} fill="url(#g-cust)" isAnimationActive={false} dot={false} />
               </AreaChart>
             </ResponsiveContainer>
           </div>

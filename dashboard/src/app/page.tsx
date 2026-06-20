@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncAdNames, syncStripe } from "@/lib/api";
+import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncAdNames, syncStripe, syncGhl } from "@/lib/api";
 import { daysAgo } from "@/lib/utils";
 import Sidebar, { Section } from "@/components/Sidebar";
 import DateRangePicker from "@/components/DateRangePicker";
@@ -301,10 +301,11 @@ export default function DashboardPage() {
       : 0;
 
     try {
-      const [spendResult, namesResult, stripeResult] = await Promise.allSettled([
+      const [spendResult, namesResult, stripeResult, ghlResult] = await Promise.allSettled([
         syncSpend({ platform: "all", start_date: syncStart, end_date: syncEnd }),
         syncAdNames("all"),
         syncStripe({ start_date: syncStart, end_date: syncEnd }),
+        syncGhl({ start_date: syncStart, end_date: syncEnd }),
       ]);
       const errors: string[] = [];
       const addSyncErrors = (scope: string, result: PromiseSettledResult<any>) => {
@@ -319,6 +320,7 @@ export default function DashboardPage() {
       addSyncErrors("Spend", spendResult);
       addSyncErrors("Names", namesResult);
       addSyncErrors("Stripe", stripeResult);
+      addSyncErrors("Leads", ghlResult);
       setSyncErrors(errors);
       setLastAutoSyncAt(new Date().toISOString());
 
