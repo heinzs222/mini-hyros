@@ -1,5 +1,6 @@
 "use client";
 
+import { memo, useMemo } from "react";
 import {
   AreaChart,
   Area,
@@ -68,8 +69,8 @@ function CustomTooltip({ active, payload, label, compareLabel }: any) {
   );
 }
 
-export default function PerformanceChart({ data, compareData = [], compareLabel = "" }: Props) {
-  const chartData = buildAlignedSeries(data, compareData);
+function PerformanceChart({ data, compareData = [], compareLabel = "" }: Props) {
+  const chartData = useMemo(() => buildAlignedSeries(data, compareData), [data, compareData]);
 
   return (
     <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-4">
@@ -121,6 +122,7 @@ export default function PerformanceChart({ data, compareData = [], compareLabel 
               fill="url(#colorRevenue)"
               strokeWidth={2}
               name="Revenue"
+              isAnimationActive={false}
             />
             <Area
               type="monotone"
@@ -129,6 +131,7 @@ export default function PerformanceChart({ data, compareData = [], compareLabel 
               fill="url(#colorCost)"
               strokeWidth={2}
               name="Cost"
+              isAnimationActive={false}
             />
             <Area
               type="monotone"
@@ -137,6 +140,7 @@ export default function PerformanceChart({ data, compareData = [], compareLabel 
               fill="url(#colorProfit)"
               strokeWidth={2}
               name="Profit"
+              isAnimationActive={false}
             />
             {compareData.length > 0 && (
               <>
@@ -148,6 +152,7 @@ export default function PerformanceChart({ data, compareData = [], compareLabel 
                   strokeDasharray="4 4"
                   strokeWidth={2}
                   name="Revenue (Compare)"
+                  isAnimationActive={false}
                 />
                 <Area
                   type="monotone"
@@ -157,6 +162,7 @@ export default function PerformanceChart({ data, compareData = [], compareLabel 
                   strokeDasharray="4 4"
                   strokeWidth={2}
                   name="Profit (Compare)"
+                  isAnimationActive={false}
                 />
               </>
             )}
@@ -166,3 +172,5 @@ export default function PerformanceChart({ data, compareData = [], compareLabel 
     </div>
   );
 }
+
+export default memo(PerformanceChart);

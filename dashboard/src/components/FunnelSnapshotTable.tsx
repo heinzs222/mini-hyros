@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { formatMoney, formatNumber, formatPercentValue } from "@/lib/utils";
 
 interface FunnelRow {
@@ -41,7 +42,7 @@ function moneyDelta(current: number | null | undefined, previous: number | null 
   return `${sign}${formatMoney(Math.abs(diff))}`;
 }
 
-export default function FunnelSnapshotTable({ rows, compareRows = [], compareLabel = "" }: Props) {
+function FunnelSnapshotTable({ rows, compareRows = [], compareLabel = "" }: Props) {
   const compareById = new Map(compareRows.map((r) => [r.funnel_id, r]));
 
   return (
@@ -125,3 +126,5 @@ export default function FunnelSnapshotTable({ rows, compareRows = [], compareLab
     </div>
   );
 }
+
+export default memo(FunnelSnapshotTable);

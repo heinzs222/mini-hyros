@@ -156,31 +156,27 @@ async def email_sms_attribution(
             ORDER BY clicked DESC
         """, params)
 
-        # Enrich with revenue data
-        for row in rows:
-            seq = row["sequence_name"]
-            # Find customers who clicked this sequence and then purchased
-            clickers = db_query(db_path, """
-                SELECT DISTINCT e.customer_key
-                FROM email_sms_events e
-                WHERE e.sequence_name = ? AND e.event_type IN ('clicked', 'click')
-            """, [seq])
+        # Revenue per sequence in one JOIN (was 2 queries per sequence): orders
+        # of customers who clicked each sequence. Equivalent to the previous
+        # per-sequence "customers who clicked → SUM(gross) over their orders".
+        rev_rows = db_query(db_path, """
+            SELECT e.sequence_name AS seq,
+                   COUNT(DISTINCT o.order_id) AS orders,
+                   SUM(CAST(o.gross AS REAL)) AS revenue
+            FROM (
+                SELECT DISTINCT sequence_name, customer_key
+                FROM email_sms_events
+                WHERE event_type IN ('clicked', 'click') AND sequence_name != ''
+            ) e
+            JOIN orders o ON o.customer_key = e.customer_key
+            GROUP BY e.sequence_name
+        """)
+        rev_by_seq = {r["seq"]: r for r in rev_rows}
 
-            ck_set = {c["customer_key"] for c in clickers}
-            if ck_set:
-                ck_list = list(ck_set)
-                placeholders = ",".join(["?"] * len(ck_list))
-                rev = db_query(db_path, f"""
-                    SELECT COUNT(DISTINCT order_id) as orders,
-                           SUM(CAST(gross AS REAL)) as revenue
-                    FROM orders WHERE customer_key IN ({placeholders})
-                """, ck_list)
-                r = rev[0] if rev else {}
-                row["attributed_orders"] = int(r.get("orders", 0) or 0)
-                row["attributed_revenue"] = round(float(r.get("revenue", 0) or 0), 2)
-            else:
-                row["attributed_orders"] = 0
-                row["attributed_revenue"] = 0
+        for row in rows:
+            r = rev_by_seq.get(row["sequence_name"], {})
+            row["attributed_orders"] = int(r.get("orders", 0) or 0)
+            row["attributed_revenue"] = round(float(r.get("revenue", 0) or 0), 2)
 
             # Rates
             sent = int(row.get("sent", 0) or 0)

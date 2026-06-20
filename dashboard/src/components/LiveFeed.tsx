@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Radio, ShoppingCart, MousePointerClick } from "lucide-react";
 
 interface LiveEvent {
+  _id?: number;
   type: string;
   ts: string;
   order_id?: string;
@@ -49,7 +50,7 @@ export default function LiveFeed({ events, connected }: Props) {
         )}
         {events.map((ev, i) => (
           <div
-            key={i}
+            key={ev._id ?? `${ev.ts}-${ev.order_id ?? ev.session_id ?? i}`}
             className="flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg bg-white/[0.02] animate-[fadeIn_0.3s_ease-out]"
           >
             {ev.type === "new_order" ? (
