@@ -3,6 +3,7 @@
 import { fetchAdNames, upsertAdName, deleteAdName, syncAdNames, fetchTikTokStatus, fetchTikTokConnectUrl, refreshTikTokToken } from "@/lib/api";
 import { RefreshCw, Plus, Trash2, Download, Edit2, Check, X, ExternalLink, Zap } from "lucide-react";
 import { useEffect, useState, useCallback } from "react";
+import { useToast } from "@/components/Toast";
 
 interface NameRow {
   platform: string;
@@ -19,6 +20,7 @@ const SYNC_PLATFORMS = ["meta", "google", "tiktok"];
 const ENTITY_TYPES = ["campaign", "adset", "ad", "funnel"];
 
 export default function AdNamesPanel() {
+  const toast = useToast();
   const [rows, setRows] = useState<NameRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -96,26 +98,38 @@ export default function AdNamesPanel() {
   const handleSync = async (platform = "all") => {
     setSyncing(true);
     setSyncResult(null);
+    const toastId = toast.loading(`Syncing ad names${platform === "all" ? "" : ` · ${platform}`}…`);
     try {
       const result = await syncAdNames(platform);
       setSyncResult(result);
       await load();
+      const errs: string[] = result?.errors || [];
+      if (errs.length) {
+        toast.update(toastId, { type: "error", title: "Ad name sync had issues", description: errs.slice(0, 4).join("\n"), duration: 12000 });
+      } else {
+        toast.update(toastId, { type: "success", title: "Ad names synced", description: `Imported ${result?.imported ?? result?.count ?? "the latest"} mappings.`, duration: 4500 });
+      }
     } catch (err: any) {
       setSyncResult({ errors: [err.message] });
+      toast.update(toastId, { type: "error", title: "Ad name sync failed", description: err?.message || "Could not sync ad names.", duration: 11000 });
     } finally {
       setSyncing(false);
     }
   };
 
   const handleAdd = async () => {
-    if (!newMapping.entity_id || !newMapping.name) return;
+    if (!newMapping.entity_id || !newMapping.name) {
+      toast.info("Add a name first", { description: "Both an entity ID and a display name are required." });
+      return;
+    }
     try {
       await upsertAdName(newMapping);
+      toast.success("Mapping added", { description: `${newMapping.platform} ${newMapping.entity_type} → “${newMapping.name}”.` });
       setNewMapping({ platform: "meta", entity_type: "campaign", entity_id: "", name: "", parent_id: "" });
       setShowAdd(false);
       await load();
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      toast.error("Couldn’t add mapping", { description: err?.message || "The mapping could not be saved." });
     }
   };
 
@@ -123,9 +137,10 @@ export default function AdNamesPanel() {
     if (!confirm(`Delete "${row.name}" (${row.entity_id})?`)) return;
     try {
       await deleteAdName({ platform: row.platform, entity_type: row.entity_type, entity_id: row.entity_id });
+      toast.success("Mapping deleted", { description: `Removed “${row.name}” (${row.entity_type}).` });
       await load();
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      toast.error("Couldn’t delete mapping", { description: err?.message || "The mapping could not be removed." });
     }
   };
 
@@ -143,10 +158,11 @@ export default function AdNamesPanel() {
         name: editName,
         parent_id: row.parent_id,
       });
+      toast.success("Mapping updated", { description: `Renamed to “${editName}”.` });
       setEditingKey(null);
       await load();
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      toast.error("Couldn’t update mapping", { description: err?.message || "The change could not be saved." });
     }
   };
 
@@ -211,6 +227,7 @@ export default function AdNamesPanel() {
               <span key={p} className="block">
                 {p}: {r.synced || 0} synced
                 {r.campaigns != null && ` (${r.campaigns} campaigns, ${r.adsets || r.adgroups || 0} adsets, ${r.ads || 0} ads)`}
+                {r.warning && ` | warning: ${r.warning}`}
                 {r.error && ` — ${r.error}`}
               </span>
             ))}

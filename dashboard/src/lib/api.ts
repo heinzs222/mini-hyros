@@ -166,8 +166,8 @@ export async function fetchVideoSummary(params: {
   return res.json();
 }
 
-export async function fetchConnections() {
-  const res = await apiFetch(`${API_BASE}/api/connections/status`);
+export async function fetchConnections(validate = false) {
+  const res = await apiFetch(`${API_BASE}/api/connections/status${validate ? "?validate=true" : ""}`);
   if (!res.ok) throw new Error(`Connections fetch failed: ${res.status}`);
   return res.json();
 }

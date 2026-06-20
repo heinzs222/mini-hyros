@@ -1,9 +1,11 @@
 "use client";
 import { useEffect, useState } from "react";
 import { fetchCapiStatus, triggerCapiSync, fetchCapiLog } from "@/lib/api";
-import { Send, CheckCircle, XCircle, AlertTriangle } from "lucide-react";
+import { Send, CheckCircle, XCircle } from "lucide-react";
+import { useToast } from "@/components/Toast";
 
 export default function CapiPanel() {
+  const toast = useToast();
   const [status, setStatus] = useState<any>(null);
   const [log, setLog] = useState<any[]>([]);
   const [syncing, setSyncing] = useState(false);
@@ -31,12 +33,30 @@ export default function CapiPanel() {
   async function handleSync() {
     setSyncing(true);
     setSyncResult(null);
+    const toastId = toast.loading("Pushing conversions to platforms…");
     try {
       const result = await triggerCapiSync();
       setSyncResult(result);
       await load();
+      const failed = Number(result?.failed || 0);
+      if (failed > 0) {
+        toast.update(toastId, {
+          type: "error",
+          title: `CAPI sync: ${failed} failed`,
+          description: `Pushed ${result?.pushed || 0}, skipped ${result?.skipped || 0}. Check platform connections in Settings.`,
+          duration: 12000,
+        });
+      } else {
+        toast.update(toastId, {
+          type: "success",
+          title: "Conversions pushed",
+          description: `Pushed ${result?.pushed || 0} · skipped ${result?.skipped || 0}.`,
+          duration: 4500,
+        });
+      }
     } catch (e: any) {
       setSyncResult({ error: e.message });
+      toast.update(toastId, { type: "error", title: "CAPI sync failed", description: e?.message || "Could not push conversions.", duration: 11000 });
     }
     setSyncing(false);
   }
@@ -65,9 +85,14 @@ export default function CapiPanel() {
       {/* Platform Status */}
       <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-6">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-            <Send size={14} className="text-brand-400" /> Conversion API Status
-          </h3>
+          <div>
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+              <Send size={14} className="text-brand-400" /> Conversion API Status
+            </h3>
+            <p className="mt-1 text-[11px] text-gray-500">
+              “Configured” = credentials present. Verify live token validity in Settings → Connections.
+            </p>
+          </div>
           <button
             onClick={handleSync}
             disabled={syncing}
@@ -98,7 +123,7 @@ export default function CapiPanel() {
                 )}
               </div>
               <div className={`text-xs ${info.configured ? "text-emerald-400" : "text-gray-500"}`}>
-                {info.configured ? "Connected" : "Not configured"}
+                {info.configured ? "Configured" : "Not configured"}
               </div>
               {!info.configured && (
                 <div className="mt-2 text-[10px] text-gray-600">

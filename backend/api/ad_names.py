@@ -404,7 +404,7 @@ async def _meta_fetch_all(
     access_token: str,
     endpoint: str,
     fields: str,
-    limit: int = 500,
+    limit: int = 100,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     next_url: str | None = _meta_url(f"act_{account_id}/{endpoint}")
@@ -437,6 +437,66 @@ async def _meta_fetch_all(
     return rows
 
 
+def _sync_meta_names_from_spend(db_path: str) -> int:
+    """Populate Meta name mappings from names already returned by Insights."""
+    try:
+        spend_rows = sql_rows(
+            db_path,
+            """
+            SELECT campaign_id, adset_id, ad_id, metadata
+            FROM spend
+            WHERE platform = 'meta'
+              AND COALESCE(metadata, '') <> ''
+            """,
+        )
+    except Exception:
+        return 0
+
+    mappings: dict[tuple[str, str], tuple[str, str]] = {}
+    for row in spend_rows:
+        try:
+            metadata = json.loads(str(row.get("metadata") or "{}"))
+        except Exception:
+            metadata = {}
+
+        campaign_id = str(row.get("campaign_id") or "").strip()
+        adset_id = str(row.get("adset_id") or "").strip()
+        ad_id = str(row.get("ad_id") or "").strip()
+        campaign_name = str(metadata.get("campaign_name") or "").strip()
+        adset_name = str(metadata.get("adset_name") or "").strip()
+        ad_name = str(metadata.get("ad_name") or "").strip()
+
+        if campaign_id and campaign_name:
+            mappings[("campaign", campaign_id)] = (campaign_name, "")
+        if adset_id and adset_name:
+            mappings[("adset", adset_id)] = (adset_name, campaign_id)
+        if ad_id and ad_name:
+            mappings[("ad", ad_id)] = (ad_name, adset_id)
+
+    if not mappings:
+        return 0
+
+    now = _now()
+    with connect(db_path) as conn:
+        for (entity_type, entity_id), (name, parent_id) in mappings.items():
+            conn.execute(
+                """
+                INSERT INTO ad_names (
+                    platform, entity_type, entity_id, name, parent_id, source, updated_at
+                ) VALUES ('meta', ?, ?, ?, ?, 'meta_insights_api', ?)
+                ON CONFLICT(platform, entity_type, entity_id) DO UPDATE SET
+                    name = excluded.name,
+                    parent_id = excluded.parent_id,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at
+                """,
+                (entity_type, entity_id, name, parent_id, now),
+            )
+        conn.commit()
+
+    return len(mappings)
+
+
 async def _sync_meta() -> dict:
     """Fetch campaign/adset/ad names from Meta Marketing API."""
     access_token = os.environ.get("META_ACCESS_TOKEN", "")
@@ -448,7 +508,8 @@ async def _sync_meta() -> dict:
 
     db_path = _db()
     _ensure_table(db_path)
-    synced = 0
+    spend_names_synced = _sync_meta_names_from_spend(db_path)
+    synced = spend_names_synced
     now = _now()
     campaigns: list[dict[str, Any]] = []
     adsets: list[dict[str, Any]] = []
@@ -463,6 +524,7 @@ async def _sync_meta() -> dict:
                 access_token=access_token,
                 endpoint="campaigns",
                 fields="id,name,status",
+                limit=100,
             )
             with connect(db_path) as conn:
                 for c in campaigns:
@@ -481,6 +543,7 @@ async def _sync_meta() -> dict:
                 access_token=access_token,
                 endpoint="adsets",
                 fields="id,name,campaign_id,status",
+                limit=100,
             )
             with connect(db_path) as conn:
                 for a in adsets:
@@ -492,13 +555,15 @@ async def _sync_meta() -> dict:
                     synced += 1
                 conn.commit()
 
-            # Fetch ads with inline creative thumbnail data
+            # Keep the bulk request light. Creative media is refreshed lazily by
+            # /api/ad-names/thumbnail when an ad preview is opened.
             ads = await _meta_fetch_all(
                 client=client,
                 account_id=account_id,
                 access_token=access_token,
                 endpoint="ads",
-                fields="id,name,adset_id,campaign_id,status,creative{id,thumbnail_url,image_url,object_type,video_id}",
+                fields="id,name,adset_id,campaign_id,status,creative{id}",
+                limit=50,
             )
             with connect(db_path) as conn:
                 for a in ads:
@@ -520,10 +585,18 @@ async def _sync_meta() -> dict:
                 conn.commit()
 
     except Exception as e:
-        return {"synced": synced, "error": str(e)}
+        result = {
+            "synced": synced,
+            "spend_names": spend_names_synced,
+            "warning": str(e),
+        }
+        if synced == 0:
+            result["error"] = str(e)
+        return result
 
     return {
         "synced": synced,
+        "spend_names": spend_names_synced,
         "campaigns": len(campaigns),
         "adsets": len(adsets),
         "ads": len(ads),
