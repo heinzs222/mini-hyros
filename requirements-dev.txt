@@ -1,0 +1,8 @@
+# Development / test dependencies.
+# Install with:  pip install -r requirements-dev.txt
+-r backend/requirements.txt
+
+pytest>=8,<10
+pytest-cov>=5
+pytest-randomly>=3.15   # shuffles test order to catch isolation/state leaks
+respx>=0.21
