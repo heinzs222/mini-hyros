@@ -22,6 +22,7 @@ import {
   PhoneCall,
   Mail,
   Hash,
+  Info,
 } from "lucide-react";
 import { fetchLeadJourneys, fetchRefundSummary } from "@/lib/api";
 import { formatMoney } from "@/lib/utils";
@@ -364,7 +365,7 @@ export default function LeadsView({ startDate, endDate }: Props) {
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="h-title text-[30px]">Leads</h1>
+          <h1 className="h-title text-[30px]">CRM</h1>
           <p className="mt-1 text-[13px] text-ink-dim">All tracked sales, leads and booked calls</p>
         </div>
         <div className="flex items-center gap-2">
@@ -420,9 +421,11 @@ export default function LeadsView({ startDate, endDate }: Props) {
             <SegPill label="Recurring sales" value={counts.recurring} active={subFilter === "recurring"} onClick={() => setSubFilter("recurring")} />
           </div>
         ) : (
-          <div className="rounded-xl border border-[var(--card-border)] bg-[var(--surface)] px-4 py-2 text-[13px]">
+          <div className="flex items-center gap-2 rounded-xl border border-[var(--card-border)] bg-[var(--surface)] px-4 py-2 text-[13px] text-ink-dim">
             {TABS.find((t) => t.key === tab)?.label}
-            <span className="ml-2 font-semibold text-ink-bright">{counts[tab] ?? 0}</span>
+            <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[12px] font-semibold tabular text-ink-bright">
+              {(counts[tab] ?? 0).toLocaleString()}
+            </span>
           </div>
         )}
 
@@ -432,6 +435,7 @@ export default function LeadsView({ startDate, endDate }: Props) {
             className="flex items-center gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--surface)] px-3 h-9 text-[13px] text-ink-dim hover:text-ink"
             title="Collapse line items belonging to the same order into one row"
           >
+            <Info size={13} className="text-ink-faint" />
             Group into orders
             <span className={`relative inline-flex h-[20px] w-[36px] items-center rounded-full transition-colors ${groupOrders ? "bg-emerald-500" : "bg-white/15"}`}>
               <span className={`inline-block h-[14px] w-[14px] transform rounded-full bg-white transition-transform ${groupOrders ? "translate-x-[19px]" : "translate-x-[3px]"}`} />
@@ -549,12 +553,12 @@ export default function LeadsView({ startDate, endDate }: Props) {
                       </td>
                       <td className="whitespace-nowrap px-4 py-3">
                         {attributed ? (
-                          <span className="inline-flex items-center gap-1 text-emerald-400">
-                            <Check size={13} /> Attributed
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[12px] font-medium text-emerald-300">
+                            <Check size={12} /> Attributed
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 text-amber-400">
-                            <AlertCircle size={13} /> Unattributed
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[12px] font-medium text-amber-300">
+                            <AlertCircle size={12} /> Unattributed
                           </span>
                         )}
                       </td>
@@ -643,11 +647,14 @@ function SegPill({
   muted?: boolean;
   onClick?: () => void;
 }) {
-  const base = "rounded-lg px-4 py-1.5 text-[13px] transition-colors";
+  const base = "flex items-center rounded-lg px-3.5 py-1.5 text-[13px] transition-colors";
+  const chip = (tone: string) =>
+    `ml-2 rounded-md border px-2 py-0.5 text-[12px] font-semibold tabular ${tone}`;
   if (muted) {
     return (
       <span className={`${base} cursor-default text-ink-dim`} title="Refunds tracked across all sales">
-        {label} <span className="ml-1.5 font-semibold text-ink-bright">{value.toLocaleString()}</span>
+        {label}
+        <span className={chip("border-white/10 bg-white/[0.04] text-ink-bright")}>{value.toLocaleString()}</span>
       </span>
     );
   }
@@ -656,7 +663,10 @@ function SegPill({
       onClick={onClick}
       className={`${base} ${active ? "bg-white/[0.06] text-ink-bright" : "text-ink-dim hover:text-ink"}`}
     >
-      {label} <span className="ml-1.5 font-semibold text-ink-bright">{value.toLocaleString()}</span>
+      {label}
+      <span className={chip(active ? "border-white/15 bg-white/10 text-ink-bright" : "border-white/10 bg-white/[0.04] text-ink-dim")}>
+        {value.toLocaleString()}
+      </span>
     </button>
   );
 }
