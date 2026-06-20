@@ -886,6 +886,63 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         all_orders_cogs = 0.0
         all_orders_fees = 0.0
 
+    # New vs returning customers + leads — these power true NET CAC and Cost-per-Lead.
+    # A "new customer" is one whose first-ever order falls inside the window (not just
+    # any order in the window), so CAC reflects net-new acquisition rather than CPA.
+    new_customers = 0
+    returning_customers = 0
+    leads_count = 0
+    try:
+        _nc = query(
+            db_path,
+            """
+            SELECT COUNT(*) AS cnt FROM (
+                SELECT customer_key, MIN(substr(ts, 1, 10)) AS first_day
+                FROM orders
+                WHERE COALESCE(customer_key, '') != ''
+                GROUP BY customer_key
+            )
+            WHERE first_day BETWEEN :s AND :e
+            """,
+            {"s": inputs.start_date, "e": inputs.end_date},
+        ).rows
+        new_customers = int((_nc[0] if _nc else {}).get("cnt") or 0)
+
+        _cw = query(
+            db_path,
+            """
+            SELECT COUNT(DISTINCT customer_key) AS cnt
+            FROM orders
+            WHERE COALESCE(customer_key, '') != ''
+              AND substr(ts, 1, 10) BETWEEN :s AND :e
+            """,
+            {"s": inputs.start_date, "e": inputs.end_date},
+        ).rows
+        customers_in_window = int((_cw[0] if _cw else {}).get("cnt") or 0)
+        returning_customers = max(customers_in_window - new_customers, 0)
+
+        _ld = query(
+            db_path,
+            """
+            SELECT COUNT(DISTINCT customer_key) AS cnt
+            FROM conversions
+            WHERE COALESCE(customer_key, '') != ''
+              AND substr(ts, 1, 10) BETWEEN :s AND :e
+              AND LOWER(type) IN ('lead', 'formsubmission', 'form_submission', 'signup', 'optin', 'opt_in')
+            """,
+            {"s": inputs.start_date, "e": inputs.end_date},
+        ).rows
+        leads_count = int((_ld[0] if _ld else {}).get("cnt") or 0)
+    except Exception:
+        new_customers = 0
+        returning_customers = 0
+        leads_count = 0
+
+    # NET CAC = ad spend / net-new customers (distinct from CPA = spend / orders).
+    net_cac = safe_div(total_cost, float(new_customers)) if new_customers else None
+    # Cost per Lead = ad spend / leads (distinct from CAC and CPA).
+    cost_per_lead = safe_div(total_cost, float(leads_count)) if leads_count else None
+
     total_clicks = int(totals["clicks"])
     attributed_orders = round(float(totals["_orders"]), 2)
     attributed_revenue = float(totals["revenue"])
@@ -904,8 +961,12 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         **totals_metrics,
         "roas": round_money(roas) if roas is not None else None,
         "mer": round_money(mer) if mer is not None else None,
-        "cac": round_money(cpa) if cpa is not None else None,
+        "cac": round_money(net_cac) if net_cac is not None else None,
         "cpa": round_money(cpa) if cpa is not None else None,
+        "cpl": round_money(cost_per_lead) if cost_per_lead is not None else None,
+        "new_customers": new_customers,
+        "returning_customers": returning_customers,
+        "leads": leads_count,
         "all_orders_count": all_orders_count,
         "all_orders_revenue": round_money(all_orders_revenue),
         "all_orders_gross_revenue": round_money(all_orders_gross_revenue),
@@ -959,6 +1020,44 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     spend_day_map = {r["name"]: r for r in spend_by_day}
     attrib_day_map = {r["date"]: r for r in attrib_by_day}
 
+    # Tracked (all-orders) totals by day + new customers by day. These drive the
+    # blended dashboard charts so they match the headline tracked numbers even
+    # when attribution is incomplete (otherwise the charts read flat at 0).
+    tracked_day_map: dict[str, dict[str, Any]] = {}
+    new_cust_day_map: dict[str, int] = {}
+    try:
+        _td = query(
+            db_path,
+            """
+            SELECT substr(ts, 1, 10) AS day, COUNT(*) AS orders,
+                   COALESCE(SUM(net), 0) AS revenue, COALESCE(SUM(gross), 0) AS gross
+            FROM orders
+            WHERE substr(ts, 1, 10) BETWEEN :s AND :e
+            GROUP BY day
+            """,
+            {"s": inputs.start_date, "e": inputs.end_date},
+        ).rows
+        tracked_day_map = {str(r["day"]): r for r in _td}
+
+        _ncd = query(
+            db_path,
+            """
+            SELECT first_day AS day, COUNT(*) AS cnt FROM (
+                SELECT customer_key, MIN(substr(ts, 1, 10)) AS first_day
+                FROM orders
+                WHERE COALESCE(customer_key, '') != ''
+                GROUP BY customer_key
+            )
+            WHERE first_day BETWEEN :s AND :e
+            GROUP BY first_day
+            """,
+            {"s": inputs.start_date, "e": inputs.end_date},
+        ).rows
+        new_cust_day_map = {str(r["day"]): int(r["cnt"] or 0) for r in _ncd}
+    except Exception:
+        tracked_day_map = {}
+        new_cust_day_map = {}
+
     start_d = date.fromisoformat(inputs.start_date)
     end_d = date.fromisoformat(inputs.end_date)
     all_days: list[str] = []
@@ -971,24 +1070,33 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     for day in all_days:
         s = spend_day_map.get(day, {})
         a = attrib_day_map.get(day, {})
+        t = tracked_day_map.get(day, {})
         cost = to_float(s.get("cost"))
         clicks = to_int(s.get("clicks"))
         revenue = to_float(a.get("revenue"))
         orders = to_float(a.get("orders"))
         cogs = to_float(a.get("cogs"))
         fees = to_float(a.get("fees"))
+        tracked_revenue = to_float(t.get("revenue"))
+        tracked_orders = to_int(t.get("orders"))
+        new_customers_day = int(new_cust_day_map.get(day, 0))
         profit = revenue - cost - cogs - fees
         roas = safe_div(revenue, cost)
+        blended_roas_day = safe_div(tracked_revenue, cost)
         cvr = safe_div(orders, clicks)
         time_series.append(
             {
                 "date": day,
                 "cost": round_money(cost),
                 "revenue": round_money(revenue),
+                "tracked_revenue": round_money(tracked_revenue),
                 "profit": round_money(profit),
                 "clicks": clicks,
                 "orders": round(orders, 2),
+                "tracked_orders": tracked_orders,
+                "new_customers": new_customers_day,
                 "roas": round(roas, 2) if roas is not None else None,
+                "blended_roas": round(blended_roas_day, 2) if blended_roas_day is not None else None,
                 "cvr": round(cvr * 100.0, 2) if cvr is not None else None,
             }
         )
