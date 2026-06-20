@@ -56,6 +56,9 @@ async def cohort_analysis(
     # Map customer → cohort
     customer_cohort = {}
     cohort_meta = defaultdict(lambda: {"customers": set(), "platform": "", "campaign": ""})
+    # First-touch timestamp per customer for O(1) lookup in the orders loop
+    # (previously a linear scan of first_touch per order → O(orders × customers)).
+    first_ts_by_customer = {t["customer_key"]: t["first_ts"] for t in first_touch}
 
     for t in first_touch:
         ck = t["customer_key"]
@@ -97,12 +100,7 @@ async def cohort_analysis(
         revenue = float(order.get("gross", 0) or 0)
 
         # Calculate period offset
-        first_ts = None
-        for t in first_touch:
-            if t["customer_key"] == ck:
-                first_ts = t["first_ts"]
-                break
-
+        first_ts = first_ts_by_customer.get(ck)
         if not first_ts:
             continue
 
@@ -179,6 +177,7 @@ async def cohort_retention(
 
     customer_cohort = {}
     cohort_customers = defaultdict(set)
+    first_ts_by_customer = {t["customer_key"]: t["first_ts"] for t in first_touch}
 
     for t in first_touch:
         ck = t["customer_key"]
@@ -200,12 +199,7 @@ async def cohort_retention(
             continue
 
         cohort_key = customer_cohort[ck]
-        first_ts_str = None
-        for t in first_touch:
-            if t["customer_key"] == ck:
-                first_ts_str = t["first_ts"]
-                break
-
+        first_ts_str = first_ts_by_customer.get(ck)
         if not first_ts_str:
             continue
 

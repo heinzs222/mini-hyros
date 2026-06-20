@@ -41,23 +41,26 @@ def test_status_all_disconnected_by_default(client, monkeypatch):
     names = [p["platform"] for p in body["platforms"]]
     assert names == ["meta", "google", "tiktok", "stripe"]
     for p in body["platforms"]:
+        # Without any env vars set, nothing is configured and the env-only path
+        # never reaches a live check, so state is "not_configured".
         assert p["configured"] is False
         assert p["state"] == "not_configured"
         assert p["checked_at"] is None
-        # No live validation was requested, so each field reflects env presence.
+        # Each field reflects whether its env var is set (all False here).
         assert all(v is False for v in p["fields"].values())
+        assert isinstance(p["required_env"], list)
         assert p["detail"] == "Required credentials are not set."
+
+    assert body["webhooks"]["shopify"]["configured"] is False
+    assert body["webhooks"]["shopify"]["endpoint"] == "/api/webhooks/shopify"
+    assert body["webhooks"]["stripe"]["configured"] is False
+    assert body["webhooks"]["stripe"]["endpoint"] == "/api/webhooks/stripe"
 
     # Without ?validate=true the response is not validated.
     assert body["validated"] is False
     assert body["summary"]["connected"] == 0
     assert body["summary"]["configured"] == 0
     assert body["summary"]["total"] == 4
-
-    assert body["webhooks"]["shopify"]["configured"] is False
-    assert body["webhooks"]["shopify"]["endpoint"] == "/api/webhooks/shopify"
-    assert body["webhooks"]["stripe"]["configured"] is False
-    assert body["webhooks"]["stripe"]["endpoint"] == "/api/webhooks/stripe"
 
 
 def test_status_meta_configured(client, monkeypatch):
@@ -135,9 +138,11 @@ def test_status_webhooks_configured(client, monkeypatch):
 def test_platform_status_unknown_platform(monkeypatch):
     _clear_all(monkeypatch)
     # An unknown platform has no required env and no field map; with validation
-    # off it returns its base record without touching the network.
+    # off it returns its base record without touching the network, so it is
+    # never "connected".
     status = asyncio.run(connections._platform_status("snapchat", validate=False, client=None))
     assert status["platform"] == "snapchat"
+    assert status["state"] != "connected"
     assert status["fields"] == {}
     assert status["checked_at"] is None
 

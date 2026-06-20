@@ -14,7 +14,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { key: "dashboard", label: "Dashboard", icon: <LayoutGrid size={18} /> },
   { key: "reports", label: "Reports", icon: <FileBarChart2 size={18} /> },
-  { key: "leads", label: "Leads", icon: <Users size={18} /> },
+  { key: "leads", label: "CRM", icon: <Users size={18} /> },
   { key: "settings", label: "Settings", icon: <Plug size={18} /> },
 ];
 

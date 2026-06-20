@@ -1,5 +1,6 @@
 "use client";
 
+import { memo, useMemo } from "react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -64,8 +65,8 @@ function align(current: Point[], compare: Point[]) {
   });
 }
 
-export default function CumulativePerformanceChart({ data, compareData = [], compareLabel = "" }: Props) {
-  const chartData = align(data, compareData);
+function CumulativePerformanceChart({ data, compareData = [], compareLabel = "" }: Props) {
+  const chartData = useMemo(() => align(data, compareData), [data, compareData]);
   const hasCompare = compareData.length > 0;
 
   return (
@@ -102,9 +103,9 @@ export default function CumulativePerformanceChart({ data, compareData = [], com
               }}
             />
             <Legend wrapperStyle={{ fontSize: 11 }} />
-            <Line type="monotone" dataKey="cumulative_revenue" name="Cum Revenue" stroke="#22c55e" strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="cumulative_cost" name="Cum Cost" stroke="#ef4444" strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="cumulative_profit" name="Cum Profit" stroke="#6366f1" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="cumulative_revenue" name="Cum Revenue" stroke="#22c55e" strokeWidth={2} dot={false} isAnimationActive={false} />
+            <Line type="monotone" dataKey="cumulative_cost" name="Cum Cost" stroke="#ef4444" strokeWidth={2} dot={false} isAnimationActive={false} />
+            <Line type="monotone" dataKey="cumulative_profit" name="Cum Profit" stroke="#6366f1" strokeWidth={2} dot={false} isAnimationActive={false} />
             {hasCompare && (
               <>
                 <Line
@@ -115,6 +116,7 @@ export default function CumulativePerformanceChart({ data, compareData = [], com
                   strokeWidth={2}
                   dot={false}
                   strokeDasharray="4 4"
+                  isAnimationActive={false}
                 />
                 <Line
                   type="monotone"
@@ -124,6 +126,7 @@ export default function CumulativePerformanceChart({ data, compareData = [], com
                   strokeWidth={2}
                   dot={false}
                   strokeDasharray="4 4"
+                  isAnimationActive={false}
                 />
               </>
             )}
@@ -133,3 +136,5 @@ export default function CumulativePerformanceChart({ data, compareData = [], com
     </div>
   );
 }
+
+export default memo(CumulativePerformanceChart);

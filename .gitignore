@@ -18,6 +18,7 @@ dashboard/coverage/
 node_modules/
 .next/
 dashboard/.next/
+*.tsbuildinfo
 
 # Data (don't commit large SQLite/CSV to git)
 data/dummy/*.sqlite

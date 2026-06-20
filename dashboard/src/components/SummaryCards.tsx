@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { formatMoney, formatNumber, formatPercentValue, formatRatio, profitColor } from "@/lib/utils";
 import {
   DollarSign,
@@ -144,7 +145,7 @@ function Card({
   );
 }
 
-export default function SummaryCards({ totals, compareTotals, compareLabel, showCompareBanner = true }: Props) {
+function SummaryCards({ totals, compareTotals, compareLabel, showCompareBanner = true }: Props) {
   const syncDelta = totals.reported_delta;
 
   const currentTrackedOrders = trackedOrders(totals);
@@ -322,3 +323,5 @@ export default function SummaryCards({ totals, compareTotals, compareLabel, show
     </div>
   );
 }
+
+export default memo(SummaryCards);

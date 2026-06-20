@@ -40,14 +40,20 @@ export default function AdNamesPanel() {
   const [tiktokStatus, setTiktokStatus] = useState<any>(null);
   const [tiktokConnecting, setTiktokConnecting] = useState(false);
 
-  const loadTikTokStatus = useCallback(async () => {
+  const loadTikTokStatus = useCallback(async (signal?: AbortSignal) => {
     try {
-      const s = await fetchTikTokStatus();
+      const s = await fetchTikTokStatus(signal);
       setTiktokStatus(s);
-    } catch {}
+    } catch (err: any) {
+      if (err?.name === "AbortError") return;
+    }
   }, []);
 
-  useEffect(() => { loadTikTokStatus(); }, [loadTikTokStatus]);
+  useEffect(() => {
+    const controller = new AbortController();
+    loadTikTokStatus(controller.signal);
+    return () => controller.abort();
+  }, [loadTikTokStatus]);
 
   const handleTikTokConnect = async () => {
     setTiktokConnecting(true);
@@ -70,19 +76,24 @@ export default function AdNamesPanel() {
     } catch (e: any) { alert(e.message); }
   };
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     try {
-      const data = await fetchAdNames(filterPlatform, filterType);
+      const data = await fetchAdNames(filterPlatform, filterType, signal);
       setRows(data.rows || []);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === "AbortError") return;
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, [filterPlatform, filterType]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
 
   const handleSync = async (platform = "all") => {
     setSyncing(true);
@@ -340,7 +351,7 @@ export default function AdNamesPanel() {
             {ENTITY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
           <button
-            onClick={load}
+            onClick={() => load()}
             className="flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-white"
           >
             <RefreshCw size={11} className={loading ? "animate-spin" : ""} /> Refresh

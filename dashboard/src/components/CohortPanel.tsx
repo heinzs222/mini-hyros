@@ -8,15 +8,19 @@ export default function CohortPanel() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const controller = new AbortController();
     async function load() {
       setLoading(true);
       try {
-        const d = await fetchCohortAnalysis("month");
+        const d = await fetchCohortAnalysis("month", controller.signal);
         setData(d);
-      } catch {}
-      setLoading(false);
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
+      }
+      if (!controller.signal.aborted) setLoading(false);
     }
     load();
+    return () => controller.abort();
   }, []);
 
   if (loading) return <div className="text-center py-12 text-gray-500 text-sm">Loading cohort data...</div>;

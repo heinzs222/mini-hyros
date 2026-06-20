@@ -14,6 +14,7 @@ Supported platforms:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -64,17 +65,26 @@ def _ensure_capi_log_table(db_path: str) -> None:
 
 
 def _log_push(db_path: str, entry: dict) -> None:
+    _log_push_many(db_path, [entry])
+
+
+def _log_push_many(db_path: str, entries: list[dict]) -> None:
+    if not entries:
+        return
     _ensure_capi_log_table(db_path)
     with connect(db_path) as conn:
-        conn.execute(
+        conn.executemany(
             """INSERT OR REPLACE INTO capi_log (id, ts, platform, event_name, customer_key, order_id, value, status, response, error)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                entry["id"], entry["ts"], entry["platform"], entry["event_name"],
-                entry.get("customer_key", ""), entry.get("order_id", ""),
-                str(entry.get("value", 0)), entry["status"],
-                entry.get("response", ""), entry.get("error", ""),
-            ),
+            [
+                (
+                    entry["id"], entry["ts"], entry["platform"], entry["event_name"],
+                    entry.get("customer_key", ""), entry.get("order_id", ""),
+                    str(entry.get("value", 0)), entry["status"],
+                    entry.get("response", ""), entry.get("error", ""),
+                )
+                for entry in entries
+            ],
         )
         conn.commit()
 
@@ -299,36 +309,32 @@ async def auto_sync_conversions():
     db_path = _db()
     _ensure_capi_log_table(db_path)
 
-    # Get all conversions that haven't been pushed yet
-    already_pushed = set()
-    try:
-        pushed_rows = db_query(db_path, "SELECT order_id FROM capi_log WHERE status = 'success'")
-        already_pushed = {r["order_id"] for r in pushed_rows}
-    except Exception:
-        pass
-
-    # Get conversions with their touchpoint data
+    # Conversions not yet successfully pushed. NOT EXISTS avoids building an
+    # unbounded `NOT IN ('id', ...)` string (which grows with history and is an
+    # injection vector) and lets SQLite use the order_id index.
     conversions = db_query(db_path, """
         SELECT c.conversion_id, c.ts, c.type, c.value, c.order_id, c.customer_key,
                t.platform, t.gclid, t.fbclid, t.ttclid, t.campaign_id, t.session_id
         FROM conversions c
         LEFT JOIN touchpoints t ON c.customer_key = t.customer_key
-        WHERE c.order_id NOT IN ({})
+        WHERE NOT EXISTS (
+            SELECT 1 FROM capi_log l WHERE l.order_id = c.order_id AND l.status = 'success'
+        )
         GROUP BY c.order_id
         ORDER BY c.ts DESC
         LIMIT 100
-    """.format(",".join(f"'{oid}'" for oid in already_pushed) if already_pushed else "'__none__'"))
+    """)
 
     results = {"total": 0, "pushed": 0, "failed": 0, "skipped": 0, "details": []}
 
+    # Collect the events to push (counting unsupported/empty platforms as skips).
+    pending: list[tuple[dict, dict]] = []
     for conv in conversions:
         results["total"] += 1
         platform = (conv.get("platform") or "").lower()
-
         if not platform or platform not in PLATFORM_PUSHERS:
             results["skipped"] += 1
             continue
-
         event = {
             "platform": platform,
             "event_name": "Purchase" if conv.get("type") == "Purchase" else conv.get("type", "Lead"),
@@ -340,30 +346,48 @@ async def auto_sync_conversions():
             "fbclid": conv.get("fbclid", ""),
             "ttclid": conv.get("ttclid", ""),
         }
+        pending.append((conv, event))
 
-        try:
-            result = await PLATFORM_PUSHERS[platform](event)
-            now = _iso_ts(datetime.now(UTC))
-            log_id = _sha256(f"autosync|{platform}|{conv['order_id']}|{now}")[:32]
-            status = "success" if result.get("ok") else "failed"
-            _log_push(db_path, {
-                "id": log_id, "ts": now, "platform": platform,
-                "event_name": event["event_name"],
-                "customer_key": event["customer_key"],
-                "order_id": event["order_id"],
-                "value": event["value"],
-                "status": status,
-                "response": json.dumps(result.get("response", {}))[:500],
-                "error": result.get("error", ""),
-            })
-            if result.get("ok"):
-                results["pushed"] += 1
-            else:
-                results["failed"] += 1
-            results["details"].append({"order_id": conv["order_id"], "platform": platform, "status": status})
-        except Exception as e:
+    # Push concurrently (bounded) instead of awaiting each round-trip in series.
+    sem = asyncio.Semaphore(8)
+
+    async def _run(conv: dict, event: dict):
+        async with sem:
+            try:
+                return conv, event, await PLATFORM_PUSHERS[event["platform"]](event), None
+            except Exception as e:  # noqa: BLE001 — recorded per-event below
+                return conv, event, None, e
+
+    outcomes = await asyncio.gather(*[_run(conv, event) for conv, event in pending])
+
+    # Record results in input order; write all log rows in a single transaction.
+    now = _iso_ts(datetime.now(UTC))
+    log_entries: list[dict] = []
+    for conv, event, result, exc in outcomes:
+        platform = event["platform"]
+        if exc is not None:
             results["failed"] += 1
-            results["details"].append({"order_id": conv["order_id"], "platform": platform, "status": "error", "error": str(e)})
+            results["details"].append({"order_id": conv["order_id"], "platform": platform, "status": "error", "error": str(exc)})
+            continue
+        status = "success" if result.get("ok") else "failed"
+        log_entries.append({
+            "id": _sha256(f"autosync|{platform}|{conv['order_id']}|{now}")[:32],
+            "ts": now, "platform": platform,
+            "event_name": event["event_name"],
+            "customer_key": event["customer_key"],
+            "order_id": event["order_id"],
+            "value": event["value"],
+            "status": status,
+            "response": json.dumps(result.get("response", {}))[:500],
+            "error": result.get("error", ""),
+        })
+        if result.get("ok"):
+            results["pushed"] += 1
+        else:
+            results["failed"] += 1
+        results["details"].append({"order_id": conv["order_id"], "platform": platform, "status": status})
+
+    _log_push_many(db_path, log_entries)
 
     return results
 
