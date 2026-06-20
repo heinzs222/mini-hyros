@@ -1,6 +1,7 @@
 "use client";
 
-import { LayoutGrid, FileBarChart2, Users, Plug, LogOut, ChevronRight, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { LayoutGrid, FileBarChart2, Users, Plug, LogOut, ChevronRight, PanelLeftClose, PanelLeftOpen, Settings as SettingsIcon } from "lucide-react";
 
 export type Section = "dashboard" | "reports" | "leads" | "settings";
 
@@ -53,6 +54,17 @@ export default function Sidebar({
     .map((p) => p[0]?.toUpperCase())
     .join("") || "V";
 
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [menuOpen]);
+
   return (
     <aside
       className={`relative flex h-screen shrink-0 flex-col border-r border-[var(--card-border)] bg-[#0a0a0e] transition-[width] duration-200 ${
@@ -103,11 +115,37 @@ export default function Sidebar({
       </button>
 
       {/* Account card */}
-      <div className="border-t border-[var(--card-border)] p-3">
-        <div
-          className={`flex items-center gap-3 rounded-xl border border-[var(--card-border)] bg-[var(--surface)] p-2.5 ${
-            collapsed ? "justify-center" : ""
-          }`}
+      <div className="relative border-t border-[var(--card-border)] p-3" ref={menuRef}>
+        {menuOpen && (
+          <div className="animate-hpop absolute bottom-[68px] left-3 right-3 z-50 overflow-hidden rounded-xl border border-[var(--card-border)] bg-[#0c0c11] p-1 shadow-2xl">
+            {!collapsed && (
+              <div className="border-b border-[var(--card-border)] px-3 py-2">
+                <div className="truncate text-[13px] font-medium text-ink-bright">{userName || "Account"}</div>
+                <div className="text-[11px] text-ink-dim">Signed in</div>
+              </div>
+            )}
+            <button
+              onClick={() => { onSectionChange("settings"); setMenuOpen(false); }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] text-ink hover:bg-white/5"
+            >
+              <SettingsIcon size={14} className="text-ink-dim" /> Settings
+            </button>
+            <button
+              onClick={() => { setMenuOpen(false); onLogout?.(); }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] text-rose-300 hover:bg-rose-500/10"
+            >
+              <LogOut size={14} /> Log out
+            </button>
+          </div>
+        )}
+        <button
+          onClick={() => setMenuOpen((o) => !o)}
+          title="Account menu"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          className={`flex w-full items-center gap-3 rounded-xl border bg-[var(--surface)] p-2.5 text-left transition-colors hover:border-white/15 hover:bg-white/[0.04] ${
+            menuOpen ? "border-white/15" : "border-[var(--card-border)]"
+          } ${collapsed ? "justify-center" : ""}`}
         >
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-500 via-fuchsia-500 to-amber-400 text-[12px] font-bold text-white">
             {initials}
@@ -118,20 +156,11 @@ export default function Sidebar({
                 {userName || "Account"}
               </div>
               <div className="flex items-center gap-1 text-[11px] text-ink-dim">
-                Account <ChevronRight size={11} />
+                Account <ChevronRight size={11} className={`transition-transform ${menuOpen ? "rotate-90" : ""}`} />
               </div>
             </div>
           )}
-          {!collapsed && authEnabled && (
-            <button
-              onClick={onLogout}
-              title="Log out"
-              className="rounded-md p-1.5 text-ink-dim hover:bg-white/10 hover:text-ink"
-            >
-              <LogOut size={14} />
-            </button>
-          )}
-        </div>
+        </button>
       </div>
     </aside>
   );

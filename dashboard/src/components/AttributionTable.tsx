@@ -83,6 +83,11 @@ interface Props {
   compareLabel?: string;
   platformFilter?: string;
   onPlatformFilterChange?: (p: string) => void;
+  /** When embedded inside ReportsView, hide the internal tab bar + toolbar (chrome is provided outside). */
+  embedded?: boolean;
+  densityValue?: "compact" | "comfortable";
+  searchValue?: string;
+  hiddenColumnKeys?: string[];
 }
 
 const PLATFORM_META: Record<string, { label: string; dot: string }> = {
@@ -238,7 +243,7 @@ function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; curr
 
 type FilterOp = ">=" | "<=";
 
-export default function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "", platformFilter = "all", onPlatformFilterChange }: Props) {
+export default function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "", platformFilter = "all", onPlatformFilterChange, embedded = false, densityValue, searchValue, hiddenColumnKeys }: Props) {
   const [sortKey, setSortKey] = useState("profit");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [search, setSearch] = useState("");
@@ -261,16 +266,21 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   const colsMenuRef = useRef<HTMLDivElement>(null);
   const filterMenuRef = useRef<HTMLDivElement>(null);
 
+  // Effective control values: prefer external (controlled) props when embedded in ReportsView.
+  const effDensity = densityValue ?? density;
+  const effSearch = searchValue !== undefined ? searchValue : search;
+  const effHidden = hiddenColumnKeys ? new Set(hiddenColumnKeys) : hiddenCols;
+
   const metricCols = columns.filter((c) => c.type !== "dimension");
-  const shownCols = metricCols.filter((c) => !hiddenCols.has(c.key));
+  const shownCols = metricCols.filter((c) => !effHidden.has(c.key));
   const dimensionCol = columns.find((c) => c.type === "dimension");
   const compareById = new Map(compareRows.map((r) => [r.id, r]));
   const querySignature = `${activeTab}|${startDate || ""}|${endDate || ""}|${model || ""}|${lookbackDays || ""}|${useClickDate ? "click" : "conversion"}`;
-  const cellPad = density === "compact" ? "py-1.5" : "py-3";
+  const cellPad = effDensity === "compact" ? "py-1.5" : "py-3";
   const filterActive = Boolean(filterKey && filterVal !== "");
 
   const filtered = rows.filter((r) => {
-    const needle = search.toLowerCase().trim();
+    const needle = effSearch.toLowerCase().trim();
     const matchSearch = !needle
       || r.name.toLowerCase().includes(needle)
       || r.id.toLowerCase().includes(needle)
@@ -287,8 +297,8 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
 
   const platformsInData = Array.from(new Set(rows.map((r) => platformFromRow(r)).filter(Boolean)));
   const platformsKey = platformsInData.join("|");
-  const visibleTotals = search.trim() || platformFilter !== "all" || filterActive ? recalcTotals(filtered) : (totals as MetricValues);
-  const totalsLabel = search.trim() || platformFilter !== "all" || filterActive ? "Total (visible)" : "Total";
+  const visibleTotals = effSearch.trim() || platformFilter !== "all" || filterActive ? recalcTotals(filtered) : (totals as MetricValues);
+  const totalsLabel = effSearch.trim() || platformFilter !== "all" || filterActive ? "Total (visible)" : "Total";
 
   useEffect(() => {
     setExpanded({});
@@ -612,6 +622,8 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
         </div>
       )}
 
+      {!embedded && (
+      <>
       {/* Grouping tabs (segmented control) */}
       <div className="flex items-center gap-2 px-4 pt-4 pb-3 overflow-x-auto">
         <div className="flex items-center gap-1 rounded-xl border border-[var(--card-border)] bg-[var(--surface-2)] p-1">
@@ -792,6 +804,8 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
           </div>
         </div>
       </div>
+      </>
+      )}
 
       {/* Table */}
       <div className="overflow-x-auto">

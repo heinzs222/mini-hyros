@@ -1,0 +1,617 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import DateRangePicker from "./DateRangePicker";
+import ModelSelect, { modelLabel } from "./ModelSelect";
+import AttributionTable from "./AttributionTable";
+import PerformanceChart from "./PerformanceChart";
+import PlatformMixChart from "./PlatformMixChart";
+import {
+  Megaphone,
+  Copy,
+  MoreHorizontal,
+  Save,
+  SlidersHorizontal,
+  Search,
+  Columns3,
+  LayoutGrid,
+  ListTree,
+  LineChart,
+  ChevronDown,
+  X,
+  Globe,
+  Building2,
+  Layers3,
+  Image as ImageIcon,
+  RefreshCw,
+  PanelLeftClose,
+  BookOpen,
+  Info,
+  Check,
+  Filter as FilterIcon,
+} from "lucide-react";
+
+interface Range {
+  start: string;
+  end: string;
+}
+
+interface Props {
+  report: any;
+  compareReport?: any;
+  compareLabel?: string;
+  loading?: boolean;
+  model: string;
+  onModelChange: (m: string) => void;
+  range: Range;
+  onRangeChange: (r: Range) => void;
+  compareRange?: Range | null;
+  compareEnabled: boolean;
+  onCompareEnabledChange: (v: boolean) => void;
+  autoCompare: boolean;
+  onAutoCompareChange: (v: boolean) => void;
+  useClickDate: boolean;
+  onUseClickDateChange: (v: boolean) => void;
+  activeTab: string;
+  onTabChange: (t: string) => void;
+  platformFilter: string;
+  onPlatformFilterChange: (p: string) => void;
+  startDate: string;
+  endDate: string;
+  autoRefresh: boolean;
+  onToggleAutoRefresh: () => void;
+  syncing: boolean;
+  onSync: () => void;
+  onReload: () => void;
+}
+
+/* ── helpers ── */
+function pad(n: number) {
+  return String(n).padStart(2, "0");
+}
+function fmtDot(iso: string): string {
+  if (!iso) return "—";
+  const d = new Date(`${iso}T00:00:00`);
+  return `${pad(d.getMonth() + 1)}.${pad(d.getDate())}.${d.getFullYear()}`;
+}
+function fmtPill(iso: string): string {
+  if (!iso) return "—";
+  const d = new Date(`${iso}T00:00:00`);
+  return `${pad(d.getMonth() + 1)}.${pad(d.getDate())}`;
+}
+function todayIso(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+function addDaysIso(iso: string, n: number): string {
+  const d = new Date(`${iso}T00:00:00`);
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+function hashId(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h.toString(16).padStart(6, "0").slice(0, 6);
+}
+
+const GROUP_TABS = [
+  { key: "traffic_source", label: "Traffic source", icon: <Globe size={14} /> },
+  { key: "ad_account", label: "Ad Account", icon: <Building2 size={14} /> },
+  { key: "campaign", label: "Campaign", icon: <Megaphone size={14} /> },
+  { key: "ad_set", label: "Ad Set", icon: <Layers3 size={14} /> },
+  { key: "ad", label: "Ad", icon: <ImageIcon size={14} /> },
+];
+
+const SOURCE_OPTIONS = [
+  { value: "all", label: "All sources" },
+  { value: "meta", label: "Meta" },
+  { value: "google", label: "Google" },
+  { value: "tiktok", label: "TikTok" },
+];
+
+/* Column categorisation for the "Choose report columns" modal. */
+const COLUMN_CATEGORIES: { key: string; label: string; match: (key: string) => boolean }[] = [
+  { key: "all", label: "All", match: () => true },
+  { key: "general", label: "General", match: (k) => ["clicks", "cost", "cpc", "cpm", "ctr", "impressions"].includes(k) },
+  { key: "ecom", label: "E-Commerce", match: (k) => ["revenue", "total_revenue", "orders", "aov", "rpc", "roas", "profit", "net_profit", "margin_pct", "cpa", "cvr"].includes(k) },
+  { key: "sync", label: "Reported", match: (k) => ["reported", "reported_delta"].includes(k) },
+];
+
+export default function ReportsView(props: Props) {
+  const {
+    report, compareReport, compareLabel, model, onModelChange, range, onRangeChange,
+    compareRange, compareEnabled, onCompareEnabledChange, autoCompare, onAutoCompareChange,
+    useClickDate, onUseClickDateChange, activeTab, onTabChange, platformFilter,
+    onPlatformFilterChange, startDate, endDate, autoRefresh, onToggleAutoRefresh, syncing, onSync, onReload,
+  } = props;
+
+  const [filtersOpen, setFiltersOpen] = useState(true);
+  const [openByDefault, setOpenByDefault] = useState(true);
+  const [viewMode, setViewMode] = useState<"tabs" | "nested" | "chart">("tabs");
+  const [search, setSearch] = useState("");
+  const [density, setDensity] = useState<"compact" | "comfortable">("compact");
+  const [showDensity, setShowDensity] = useState(false);
+  const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set());
+  const [showColumns, setShowColumns] = useState(false);
+  const [optimize, setOptimize] = useState(true);
+  const densityRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const pref = window.localStorage.getItem("vigil_filters_open");
+    if (pref != null) {
+      setOpenByDefault(pref === "1");
+      setFiltersOpen(pref === "1");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!showDensity) return;
+    const onDown = (e: MouseEvent) => {
+      if (densityRef.current && !densityRef.current.contains(e.target as Node)) setShowDensity(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [showDensity]);
+
+  const columns = report?.table?.columns || [];
+  const metricCols = useMemo(() => columns.filter((c: any) => c.type !== "dimension"), [columns]);
+  const sourceCount = report?.platform_comparison?.rows?.length ?? 0;
+  const reportId = useMemo(
+    () => hashId(`${model}|${range.start}|${range.end}|${activeTab}|${useClickDate}`),
+    [model, range, activeTab, useClickDate],
+  );
+
+  const today = todayIso();
+  const quickPresets = [
+    { label: "Today", range: { start: today, end: today } },
+    { label: "Yesterday", range: { start: addDaysIso(today, -1), end: addDaysIso(today, -1) } },
+    { label: "7 days", range: { start: addDaysIso(today, -6), end: today } },
+    { label: "30 days", range: { start: addDaysIso(today, -29), end: today } },
+  ];
+  const activePreset = quickPresets.find((p) => p.range.start === range.start && p.range.end === range.end)?.label;
+
+  const toggleColumn = (key: string) => {
+    setHiddenCols((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const setFiltersOpenPref = (open: boolean) => {
+    setOpenByDefault(open);
+    if (typeof window !== "undefined") window.localStorage.setItem("vigil_filters_open", open ? "1" : "0");
+  };
+  const clearFilters = () => {
+    setSearch("");
+    onPlatformFilterChange("all");
+    setHiddenCols(new Set());
+  };
+
+  return (
+    <div className="flex w-full flex-col">
+      {/* ── Report header ── */}
+      <div className="border-b border-[var(--card-border)] px-6 py-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <span className="mt-1 flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400">
+              <Megaphone size={18} />
+            </span>
+            <div>
+              <h1 className="h-title text-[26px] leading-tight">
+                Performance Report · {fmtDot(range.start)}—{fmtDot(range.end)}
+              </h1>
+              <div className="mt-1 flex items-center gap-2 text-[12px] text-ink-dim">
+                <span className="text-amber-400">{modelLabel(model)}</span>
+                <span className="text-ink-faint">/</span>
+                <span>Id: {reportId}</span>
+                <button
+                  title="Copy report id"
+                  onClick={() => navigator.clipboard?.writeText(reportId)}
+                  className="text-ink-faint hover:text-ink"
+                >
+                  <Copy size={12} />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Quick presets */}
+            <div className="flex items-center gap-1 text-[13px]">
+              {quickPresets.map((p) => (
+                <button
+                  key={p.label}
+                  onClick={() => onRangeChange(p.range)}
+                  className={`rounded-md px-2.5 py-1.5 transition-colors ${
+                    activePreset === p.label ? "bg-white/[0.06] text-ink-bright" : "text-ink-dim hover:text-ink"
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <DateRangePicker
+              value={range}
+              onChange={onRangeChange}
+              compareRange={compareRange}
+              compareEnabled={compareEnabled}
+              onCompareEnabledChange={onCompareEnabledChange}
+              autoCompare={autoCompare}
+              onAutoCompareChange={onAutoCompareChange}
+              showCompareControls={false}
+            />
+            <ModelSelect value={model} onChange={onModelChange} />
+            <button
+              onClick={onToggleAutoRefresh}
+              title={autoRefresh ? "Live refresh on" : "Live refresh off"}
+              className={`flex h-[34px] items-center gap-1.5 rounded-lg px-2.5 text-[13px] font-medium transition-colors ${
+                autoRefresh ? "bg-emerald-500/15 text-emerald-300" : "bg-white/5 text-ink-dim hover:text-ink"
+              }`}
+            >
+              <RefreshCw size={13} /> {autoRefresh ? "Live" : "Off"}
+            </button>
+            <button
+              onClick={onSync}
+              disabled={syncing}
+              title="Sync all platforms"
+              className="flex h-[34px] items-center gap-1.5 rounded-lg bg-brand-600 px-3 text-[13px] font-semibold text-white transition-colors hover:bg-brand-700 disabled:opacity-50"
+            >
+              <RefreshCw size={13} className={syncing ? "animate-spin" : ""} /> Sync
+            </button>
+            <button title="More" className="flex h-[34px] w-9 items-center justify-center rounded-lg border border-[var(--card-border)] bg-[var(--surface)] text-ink-dim hover:text-ink">
+              <MoreHorizontal size={16} />
+            </button>
+            <button title="Save report" className="flex h-[34px] w-9 items-center justify-center rounded-lg border border-[var(--card-border)] bg-[var(--surface)] text-ink-dim hover:text-ink">
+              <Save size={15} />
+            </button>
+            <button
+              onClick={() => setFiltersOpen((o) => !o)}
+              className={`flex h-[34px] items-center gap-1.5 rounded-lg border px-3 text-[13px] font-medium transition-colors ${
+                filtersOpen ? "border-brand-500/50 bg-brand-500/10 text-brand-300" : "border-[var(--card-border)] bg-[var(--surface)] text-ink-dim hover:text-ink"
+              }`}
+            >
+              <FilterIcon size={14} /> Filters
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Body: filter rail + main ── */}
+      <div className="flex">
+        {filtersOpen && (
+          <aside className="w-[300px] shrink-0 border-r border-[var(--card-border)] p-4">
+            <div className="mb-4 flex items-center justify-between">
+              <button onClick={() => setFiltersOpen(false)} title="Collapse filters" className="text-ink-dim hover:text-ink">
+                <PanelLeftClose size={16} />
+              </button>
+              <label className="flex items-center gap-2 text-[12px] text-ink-dim">
+                Open filter by default
+                <Toggle on={openByDefault} onClick={() => setFiltersOpenPref(!openByDefault)} />
+              </label>
+            </div>
+
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-[15px] font-semibold text-ink-bright">Filters</h3>
+              <button onClick={clearFilters} className="text-[12px] text-ink-dim hover:text-ink">Clear</button>
+            </div>
+
+            {/* Attribute filters */}
+            <div className="mb-4 rounded-xl border border-[var(--card-border)] p-3">
+              <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink">
+                Attribute filters <ChevronDown size={13} className="text-ink-faint" />
+              </div>
+              <p className="mt-1 text-[11px] leading-snug text-ink-dim">Filter results by certain sources, products, tags, etc</p>
+              <button className="mt-2 w-full rounded-lg border border-dashed border-[var(--card-border)] py-2 text-[12px] text-ink-dim hover:text-ink">
+                + Specify Attributes
+              </button>
+            </div>
+
+            <Row label={<span className="flex items-center gap-1">Optimize report <Info size={12} className="text-ink-faint" /></span>}>
+              <Toggle on={optimize} onClick={() => setOptimize((v) => !v)} />
+            </Row>
+            <Row label={<span className="flex items-center gap-1">Use date of click attribution <BookOpen size={12} className="text-ink-faint" /></span>}>
+              <Toggle on={useClickDate} onClick={() => onUseClickDateChange(!useClickDate)} />
+            </Row>
+
+            <div className="mt-4">
+              <div className="mb-1.5 text-[12px] text-ink-dim">Base grouping</div>
+              <div className="flex items-center gap-1 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] p-1 text-[12px]">
+                {["Source", "Day", "Week", "Month"].map((g) => {
+                  const isSource = g === "Source";
+                  return (
+                    <button
+                      key={g}
+                      disabled={!isSource}
+                      title={isSource ? undefined : "Time grouping coming soon"}
+                      className={`flex-1 rounded-md py-1.5 transition-colors ${
+                        isSource ? "bg-white/[0.07] text-ink-bright" : "text-ink-faint cursor-not-allowed"
+                      }`}
+                    >
+                      {g}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <div className="mb-1.5 text-[12px] text-ink-dim">Source configuration</div>
+              <select
+                value={platformFilter}
+                onChange={(e) => onPlatformFilterChange(e.target.value)}
+                className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-2 text-[13px] text-ink focus:outline-none"
+              >
+                {SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+
+            <div className="mt-3">
+              <div className="mb-1.5 text-[12px] text-ink-dim">New customer configuration</div>
+              <select disabled className="w-full cursor-not-allowed rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-2 text-[13px] text-ink-dim focus:outline-none">
+                <option>All Customers</option>
+              </select>
+            </div>
+
+            <div className="mt-4 flex items-center gap-2">
+              <button onClick={onReload} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface)] py-2 text-[13px] text-ink hover:bg-white/5">
+                Generate new report
+              </button>
+              <button onClick={onReload} className="flex items-center gap-1 rounded-lg bg-white px-4 py-2 text-[13px] font-semibold text-black hover:bg-white/90">
+                Apply
+              </button>
+            </div>
+            <div className="mt-3 text-center text-[12px] text-ink-dim">{sourceCount} sources</div>
+          </aside>
+        )}
+
+        {/* Main */}
+        <div className="min-w-0 flex-1 p-6">
+          {/* View toggle + controls */}
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-1 text-[13px]">
+              <ViewTab active={viewMode === "tabs"} onClick={() => setViewMode("tabs")} icon={<LayoutGrid size={14} />} label="Tabs" />
+              <ViewTab active={viewMode === "nested"} onClick={() => setViewMode("nested")} icon={<ListTree size={14} />} label="Nested" />
+              <ViewTab active={viewMode === "chart"} onClick={() => setViewMode("chart")} icon={<LineChart size={14} />} label="Chart" />
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="flex h-8 items-center gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5">
+                <Search size={13} className="text-ink-faint" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search…"
+                  className="w-32 bg-transparent text-[12px] text-ink placeholder:text-ink-faint focus:outline-none"
+                />
+              </div>
+              <div className="relative" ref={densityRef}>
+                <button
+                  onClick={() => setShowDensity((s) => !s)}
+                  className="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim hover:text-ink"
+                >
+                  Density: <span className="capitalize text-ink">{density}</span> <ChevronDown size={12} />
+                </button>
+                {showDensity && (
+                  <div className="animate-hpop absolute right-0 z-30 mt-2 w-[160px] rounded-lg border border-[var(--card-border)] bg-[#0c0c11] p-1 shadow-2xl">
+                    {(["compact", "comfortable"] as const).map((d) => (
+                      <button
+                        key={d}
+                        onClick={() => { setDensity(d); setShowDensity(false); }}
+                        className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-[12px] capitalize text-ink hover:bg-white/5"
+                      >
+                        {d}
+                        {density === d && <Check size={13} className="text-brand-400" />}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button className="flex h-8 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim opacity-70" title="Column presets coming soon">
+                Preset: <span className="text-ink">Custom</span> <ChevronDown size={12} />
+              </button>
+              <button
+                onClick={() => setShowColumns(true)}
+                className="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim hover:text-ink hover:border-white/20"
+              >
+                <Columns3 size={13} /> Columns
+              </button>
+            </div>
+          </div>
+
+          {/* Grouping breadcrumb tabs */}
+          {viewMode !== "chart" && (
+            <div className="mb-3 flex items-center gap-1 overflow-x-auto rounded-xl border border-[var(--card-border)] bg-[var(--surface)] p-1">
+              {GROUP_TABS.map((t) => {
+                const active = activeTab === t.key;
+                return (
+                  <button
+                    key={t.key}
+                    onClick={() => { onTabChange(t.key); onPlatformFilterChange("all"); }}
+                    className={`flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${
+                      active ? "bg-white/[0.06] text-ink-bright" : "text-ink-dim hover:text-ink"
+                    }`}
+                  >
+                    <span className={active ? "text-brand-400" : "text-ink-faint"}>{t.icon}</span>
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Content */}
+          {!report ? (
+            <div className="flex items-center justify-center py-24">
+              <RefreshCw size={22} className="animate-spin text-brand-500" />
+            </div>
+          ) : viewMode === "chart" ? (
+            <div className="space-y-6">
+              <PerformanceChart
+                data={report.charts?.time_series || []}
+                compareData={compareReport?.charts?.time_series || []}
+                compareLabel={compareLabel}
+              />
+              <PlatformMixChart
+                rows={report.platform_comparison?.rows || []}
+                compareRows={compareReport?.platform_comparison?.rows || []}
+                compareLabel={compareLabel}
+              />
+            </div>
+          ) : (
+            <AttributionTable
+              columns={report.table.columns}
+              rows={report.table.rows}
+              totals={report.table.totals_row}
+              compareRows={compareReport?.table?.rows || []}
+              compareLabel={compareLabel}
+              activeTab={activeTab}
+              onTabChange={onTabChange}
+              startDate={startDate}
+              endDate={endDate}
+              model={model}
+              lookbackDays={30}
+              useClickDate={useClickDate}
+              platformFilter={platformFilter}
+              onPlatformFilterChange={onPlatformFilterChange}
+              embedded
+              densityValue={density}
+              searchValue={search}
+              hiddenColumnKeys={Array.from(hiddenCols)}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* ── Columns modal ── */}
+      {showColumns && (
+        <ColumnsModal
+          metricCols={metricCols}
+          hiddenCols={hiddenCols}
+          onToggle={toggleColumn}
+          onClose={() => setShowColumns(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ── small components ── */
+
+function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={on}
+      className={`relative inline-flex h-[20px] w-[36px] items-center rounded-full transition-colors ${on ? "bg-emerald-500" : "bg-white/15"}`}
+    >
+      <span className={`inline-block h-[14px] w-[14px] transform rounded-full bg-white transition-transform ${on ? "translate-x-[19px]" : "translate-x-[3px]"}`} />
+    </button>
+  );
+}
+
+function Row({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="mt-3 flex items-center justify-between rounded-lg border border-[var(--card-border)] px-3 py-2.5 text-[13px] text-ink">
+      <span>{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function ViewTab({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-medium transition-colors ${active ? "bg-white/[0.06] text-ink-bright" : "text-ink-dim hover:text-ink"}`}
+    >
+      <span className={active ? "text-brand-400" : "text-ink-faint"}>{icon}</span>
+      {label}
+    </button>
+  );
+}
+
+function ColumnsModal({
+  metricCols,
+  hiddenCols,
+  onToggle,
+  onClose,
+}: {
+  metricCols: any[];
+  hiddenCols: Set<string>;
+  onToggle: (key: string) => void;
+  onClose: () => void;
+}) {
+  const [cat, setCat] = useState("all");
+  const [q, setQ] = useState("");
+  const catDef = COLUMN_CATEGORIES.find((c) => c.key === cat) || COLUMN_CATEGORIES[0];
+  const filtered = metricCols.filter((c) => catDef.match(c.key) && c.label.toLowerCase().includes(q.toLowerCase()));
+  const selected = metricCols.filter((c) => !hiddenCols.has(c.key));
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div className="animate-hpop flex h-[560px] w-[920px] max-w-[95vw] flex-col rounded-2xl border border-[var(--card-border)] bg-[#0c0c11] shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-[var(--card-border)] px-5 py-4">
+          <h3 className="flex items-center gap-2 text-[16px] font-semibold text-ink-bright">
+            <BookOpen size={16} className="text-emerald-400" /> Choose report columns
+          </h3>
+          <button onClick={onClose} className="text-ink-dim hover:text-ink"><X size={18} /></button>
+        </div>
+        <div className="flex min-h-0 flex-1">
+          {/* Categories */}
+          <div className="w-[200px] shrink-0 space-y-0.5 border-r border-[var(--card-border)] p-3">
+            {COLUMN_CATEGORIES.map((c) => (
+              <button
+                key={c.key}
+                onClick={() => setCat(c.key)}
+                className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[13px] transition-colors ${
+                  cat === c.key ? "bg-white/[0.06] text-ink-bright" : "text-ink-dim hover:bg-white/5 hover:text-ink"
+                }`}
+              >
+                {c.label} <ChevronDown size={13} className="-rotate-90 text-ink-faint" />
+              </button>
+            ))}
+          </div>
+          {/* Available */}
+          <div className="min-w-0 flex-1 border-r border-[var(--card-border)] p-3">
+            <div className="mb-2 flex h-8 items-center gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5">
+              <Search size={13} className="text-ink-faint" />
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search columns…" className="w-full bg-transparent text-[12px] text-ink placeholder:text-ink-faint focus:outline-none" />
+            </div>
+            <div className="max-h-[420px] space-y-0.5 overflow-auto">
+              {filtered.map((c) => {
+                const visible = !hiddenCols.has(c.key);
+                return (
+                  <button key={c.key} onClick={() => onToggle(c.key)} className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-[13px] text-ink hover:bg-white/5">
+                    {c.label}
+                    <span className={`flex h-4 w-4 items-center justify-center rounded border ${visible ? "border-brand-500 bg-brand-500" : "border-[var(--card-border)]"}`}>
+                      {visible && <Check size={11} className="text-white" />}
+                    </span>
+                  </button>
+                );
+              })}
+              {filtered.length === 0 && <div className="px-2 py-6 text-center text-[12px] text-ink-dim">No columns.</div>}
+            </div>
+          </div>
+          {/* Selected */}
+          <div className="w-[300px] shrink-0 p-3">
+            <div className="mb-2 text-[12px] font-medium text-ink-dim">{selected.length} columns selected</div>
+            <div className="max-h-[420px] space-y-1 overflow-auto">
+              {selected.map((c) => (
+                <div key={c.key} className="flex items-center justify-between rounded-lg border border-[var(--card-border)] bg-white/[0.02] px-2.5 py-2 text-[13px] text-ink">
+                  <span className="flex items-center gap-2"><SlidersHorizontal size={12} className="text-ink-faint" /> {c.label}</span>
+                  <button onClick={() => onToggle(c.key)} className="text-ink-faint hover:text-rose-400" title="Remove column"><X size={14} /></button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center justify-between border-t border-[var(--card-border)] px-5 py-3">
+          <button onClick={onClose} className="rounded-lg border border-[var(--card-border)] px-4 py-1.5 text-[13px] text-ink-dim hover:text-ink">Cancel</button>
+          <button onClick={onClose} className="rounded-lg bg-white px-5 py-1.5 text-[13px] font-semibold text-black hover:bg-white/90">Apply</button>
+        </div>
+      </div>
+    </div>
+  );
+}
