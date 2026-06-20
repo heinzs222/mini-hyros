@@ -50,13 +50,31 @@ REQUIRED_ENV = {
     "tiktok": ["TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID"],
 }
 
-PLATFORM_LABELS = {"meta": "Meta", "google": "Google Ads", "tiktok": "TikTok", "stripe": "Stripe"}
+PLATFORM_LABELS = {
+    "meta": "Meta", "google": "Google Ads", "tiktok": "TikTok",
+    "stripe": "Stripe", "ghl": "GoHighLevel",
+}
+
+GHL_API_BASE = "https://services.leadconnectorhq.com"
+GHL_API_VERSION = "2021-07-28"
 
 HTTP_TIMEOUT = 8.0
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _ghl_credentials() -> tuple[str, str]:
+    """Return (token, location_id) for GHL from the warehouse or env."""
+    try:
+        from api.ghl_sync import get_ghl_credentials
+        from attributionops.config import default_db_path
+        db_path = os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+        return get_ghl_credentials(db_path)
+    except Exception:
+        token = (os.environ.get("GHL_API_TOKEN", "") or os.environ.get("GHL_ACCESS_TOKEN", "")).strip()
+        return token, os.environ.get("GHL_LOCATION_ID", "").strip()
 
 
 def _missing_env(platform: str) -> list[str]:
@@ -159,11 +177,32 @@ async def _validate_stripe(client: httpx.AsyncClient) -> tuple[str, str]:
         return "error", f"Could not reach Stripe API: {exc}"
 
 
+async def _validate_ghl(client: httpx.AsyncClient) -> tuple[str, str]:
+    token, location_id = _ghl_credentials()
+    if not token or not location_id:
+        return "not_configured", "GHL API token or location id not set."
+    try:
+        resp = await client.get(
+            f"{GHL_API_BASE}/locations/{location_id}",
+            headers={"Authorization": f"Bearer {token}", "Version": GHL_API_VERSION, "Accept": "application/json"},
+        )
+        if resp.status_code == 200:
+            return "connected", "API token valid for this location."
+        if resp.status_code in (401, 403):
+            return "invalid", "Token rejected — invalid or missing scope."
+        if resp.status_code == 404:
+            return "invalid", "Location not found for this token."
+        return "error", f"GHL API returned HTTP {resp.status_code}."
+    except Exception as exc:
+        return "error", f"Could not reach GHL API: {exc}"
+
+
 _VALIDATORS = {
     "meta": _validate_meta,
     "google": _validate_google,
     "tiktok": _validate_tiktok,
     "stripe": _validate_stripe,
+    "ghl": _validate_ghl,
 }
 
 
@@ -176,6 +215,11 @@ async def _platform_status(platform: str, validate: bool, client: httpx.AsyncCli
         configured = bool(_stripe_key())
         required = ["STRIPE_API_SECRET_KEY (or STRIPE_SECRET_KEY)"]
         fields = {"secret_key": configured}
+    elif platform == "ghl":
+        token, location_id = _ghl_credentials()
+        configured = bool(token and location_id)
+        required = ["GHL_API_TOKEN + GHL_LOCATION_ID (or connect in Settings)"]
+        fields = {"api_token": bool(token), "location_id": bool(location_id)}
     else:
         missing = _missing_env(platform)
         configured = not missing
@@ -211,7 +255,7 @@ async def connections_status(validate: bool = False):
     configured platform is checked against its live API so the UI can show
     Connected / Expired / Invalid-scope / Error instead of just 'configured'.
     """
-    platform_names = ["meta", "google", "tiktok", "stripe"]
+    platform_names = ["meta", "google", "tiktok", "stripe", "ghl"]
 
     if validate:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
@@ -290,5 +334,15 @@ async def setup_guide():
                 "3. Set URL to https://your-domain.com/api/webhooks/shopify",
                 "4. Copy the webhook secret and set SHOPIFY_WEBHOOK_SECRET in .env",
             ],
+        },
+        "ghl": {
+            "steps": [
+                "1. In GoHighLevel → Settings → Private Integrations, create a token",
+                "2. Grant the contacts.readonly and opportunities.readonly scopes",
+                "3. Copy your Location ID from Settings → Business Profile",
+                "4. In Settings → Connections here, paste the token + Location ID and Connect",
+                "5. Leads, opportunities and booked calls then sync into the warehouse",
+            ],
+            "api_docs": "https://highlevel.stoplight.io/docs/integrations/",
         },
     }
