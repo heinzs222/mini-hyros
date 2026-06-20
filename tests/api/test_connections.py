@@ -3,23 +3,25 @@
   GET /api/connections/status       — platform + webhook connection status
   GET /api/connections/setup-guide  — static setup instructions
 
-Status is derived from env vars (and, for GHL, stored credentials). Without
-``?validate=true`` no outbound HTTP is made, so configured-but-unverified
-platforms report state "unknown" rather than "connected".
+Without ?validate=true the status is derived from credential presence (env vars,
+plus stored credentials for GHL) and makes no outbound HTTP, so configured-but-
+unverified platforms report state "unknown" rather than "connected".
 """
 
 from __future__ import annotations
 
+import asyncio
+
 import api.connections as connections
 
-# Every env var the module reads for the ad platforms.
+# Every credential env var the module reads (ad platforms + stripe + GHL + webhooks).
 ALL_ENV_VARS = [
     env_var
     for keys in connections.PLATFORM_ENV_KEYS.values()
     for env_var in keys.values()
 ] + [
-    "SHOPIFY_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET",
     "STRIPE_API_SECRET_KEY", "STRIPE_SECRET_KEY",
+    "SHOPIFY_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET",
     "GHL_API_TOKEN", "GHL_ACCESS_TOKEN", "GHL_LOCATION_ID",
 ]
 
@@ -43,17 +45,21 @@ def test_status_all_disconnected_by_default(client, monkeypatch):
     names = [p["platform"] for p in body["platforms"]]
     assert names == EXPECTED_PLATFORMS
     for p in body["platforms"]:
+        # Without any credentials set, nothing is configured (env-only path never
+        # reaches a live check, so state is "not_configured").
         assert p["configured"] is False
         assert p["state"] == "not_configured"
         # Each field reflects whether its credential is set (all False here).
         assert all(v is False for v in p["fields"].values())
-        assert p["required_env"]  # required credential names are exposed
+        assert isinstance(p["required_env"], list)
 
     assert body["webhooks"]["shopify"]["configured"] is False
     assert body["webhooks"]["shopify"]["endpoint"] == "/api/webhooks/shopify"
     assert body["webhooks"]["stripe"]["configured"] is False
     assert body["webhooks"]["stripe"]["endpoint"] == "/api/webhooks/stripe"
     assert body["summary"]["total"] == len(EXPECTED_PLATFORMS)
+    assert body["summary"]["configured"] == 0
+    assert body["validated"] is False
 
 
 def test_status_meta_configured(client, monkeypatch):
@@ -105,6 +111,15 @@ def test_status_google_and_tiktok_configured(client, monkeypatch):
     assert by_platform["meta"]["configured"] is False
 
 
+def test_status_stripe_configured(client, monkeypatch):
+    _clear_all(monkeypatch)
+    monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
+
+    stripe = next(p for p in client.get("/api/connections/status").json()["platforms"] if p["platform"] == "stripe")
+    assert stripe["configured"] is True
+    assert stripe["fields"]["secret_key"] is True
+
+
 def test_status_ghl_configured_via_env(client, monkeypatch):
     _clear_all(monkeypatch)
     monkeypatch.setenv("GHL_API_TOKEN", "pit-token")
@@ -126,7 +141,17 @@ def test_status_webhooks_configured(client, monkeypatch):
     assert webhooks["stripe"]["configured"] is True
 
 
-# ── unit: env-field helpers ─────────────────────────────────────────────────────
+# ── unit: status/field-helper edge cases ────────────────────────────────────────
+
+
+def test_platform_status_unknown_platform(monkeypatch):
+    # Unknown platform has no field map; the env-only path performs no live check,
+    # so it is never "connected".
+    status = asyncio.run(connections._platform_status("snapchat", validate=False, client=None))
+    assert status["platform"] == "snapchat"
+    assert status["state"] != "connected"
+    assert status["fields"] == {}
+    assert status["checked_at"] is None
 
 
 def test_env_fields_unknown_platform_is_empty():

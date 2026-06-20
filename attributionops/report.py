@@ -7,10 +7,21 @@ from typing import Any, Literal
 
 from attributionops.db import query
 from attributionops.tools.ads import ads_get_reported_value, ads_get_spend
-from attributionops.tools.attribution import attribution_day_totals, attribution_run
+from attributionops.tools.attribution import attribution_run_and_day_totals
 from attributionops.tools.integrations import integrations_status
 from attributionops.tools.tracking import tracking_health_check
 from attributionops.util import round_money, safe_div, to_float, to_int
+
+
+def _ts_end_exclusive(end_date: str) -> str:
+    """Exclusive upper bound for sargable ISO-timestamp range filters.
+
+    ``ts`` columns store ISO-8601 strings (e.g. ``2026-06-17T23:40:00Z``), which
+    sort lexicographically by date, so ``ts >= :start AND ts < :end_excl`` is an
+    index-usable replacement for the non-sargable ``date(substr(ts,1,10))
+    BETWEEN :start AND :end`` (which forces a full scan + per-row function call).
+    """
+    return (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
 
 
 TabKey = Literal["traffic_source", "ad_account", "campaign", "ad_set", "ad"]
@@ -221,11 +232,11 @@ def _build_platform_comparison(
           platform,
           COUNT(DISTINCT session_id) AS touch_clicks
         FROM touchpoints
-        WHERE date(substr(ts,1,10)) BETWEEN :start_date AND :end_date
+        WHERE ts >= :start_date AND ts < :end_excl
           AND COALESCE(platform, '') <> ''
         GROUP BY platform;
         """,
-        {"start_date": start_date, "end_date": end_date},
+        {"start_date": start_date, "end_excl": _ts_end_exclusive(end_date)},
     ).rows
 
     by_platform: dict[str, dict[str, float]] = defaultdict(
@@ -312,45 +323,64 @@ def _build_platform_comparison(
 
 
 def _build_funnel_snapshot(db_path: str, *, start_date: str, end_date: str) -> list[dict[str, Any]]:
-    sessions = query(
-        db_path,
-        """
-        SELECT session_id, ts, customer_key, landing_page
-        FROM sessions
-        WHERE date(substr(ts,1,10)) BETWEEN :start_date AND :end_date;
-        """,
-        {"start_date": start_date, "end_date": end_date},
-    ).rows
-
+    end_excl = _ts_end_exclusive(end_date)
     conversions = query(
         db_path,
         """
         SELECT customer_key, type, value
         FROM conversions
-        WHERE date(substr(ts,1,10)) BETWEEN :start_date AND :end_date
+        WHERE ts >= :start_date AND ts < :end_excl
           AND COALESCE(customer_key, '') <> '';
         """,
-        {"start_date": start_date, "end_date": end_date},
+        {"start_date": start_date, "end_excl": end_excl},
     ).rows
 
     funnel_name_map = _funnel_name_map(db_path)
 
-    visits_by_funnel: dict[str, set[str]] = defaultdict(set)
-    first_funnel_by_customer: dict[str, tuple[str, str]] = {}
+    # Visits per funnel = distinct sessions whose landing page maps to that
+    # funnel. A session has exactly one landing page, so grouping by landing_page
+    # in SQL (a handful of distinct values) and summing the distinct-session
+    # counts per funnel is equivalent to building a per-funnel set of every
+    # session_id in Python — but avoids materializing the full sessions table.
+    landing_visit_rows = query(
+        db_path,
+        """
+        SELECT landing_page, COUNT(DISTINCT session_id) AS visits
+        FROM sessions
+        WHERE ts >= :start_date AND ts < :end_excl
+        GROUP BY landing_page;
+        """,
+        {"start_date": start_date, "end_excl": end_excl},
+    ).rows
 
-    for s in sessions:
-        session_id = str(s.get("session_id") or "")
-        ts = str(s.get("ts") or "")
-        customer_key = str(s.get("customer_key") or "")
-        funnel_id = _funnel_key_from_path(str(s.get("landing_page") or "/"))
+    visits_by_funnel: dict[str, int] = defaultdict(int)
+    for r in landing_visit_rows:
+        funnel_id = _funnel_key_from_path(str(r.get("landing_page") or "/"))
+        visits_by_funnel[funnel_id] += to_int(r.get("visits"))
 
-        if session_id:
-            visits_by_funnel[funnel_id].add(session_id)
+    # Each customer's first funnel = the funnel of their earliest in-range
+    # session. Picking the earliest row per customer in SQL returns one row per
+    # customer instead of every session. (ts, rowid) ordering matches the
+    # original "first by timestamp, earliest-inserted on ties" behaviour.
+    first_funnel_rows = query(
+        db_path,
+        """
+        SELECT customer_key, landing_page FROM (
+            SELECT customer_key, landing_page,
+                   ROW_NUMBER() OVER (PARTITION BY customer_key ORDER BY ts, rowid) AS rn
+            FROM sessions
+            WHERE ts >= :start_date AND ts < :end_excl
+              AND COALESCE(customer_key, '') <> ''
+        ) WHERE rn = 1;
+        """,
+        {"start_date": start_date, "end_excl": end_excl},
+    ).rows
 
+    first_funnel_by_customer: dict[str, str] = {}
+    for r in first_funnel_rows:
+        customer_key = str(r.get("customer_key") or "")
         if customer_key:
-            prev = first_funnel_by_customer.get(customer_key)
-            if prev is None or ts < prev[0]:
-                first_funnel_by_customer[customer_key] = (ts, funnel_id)
+            first_funnel_by_customer[customer_key] = _funnel_key_from_path(str(r.get("landing_page") or "/"))
 
     lead_customers: dict[str, set[str]] = defaultdict(set)
     purchase_customers: dict[str, set[str]] = defaultdict(set)
@@ -360,10 +390,9 @@ def _build_funnel_snapshot(db_path: str, *, start_date: str, end_date: str) -> l
         customer_key = str(c.get("customer_key") or "")
         if not customer_key:
             continue
-        owner = first_funnel_by_customer.get(customer_key)
-        if owner is None:
+        funnel_id = first_funnel_by_customer.get(customer_key)
+        if funnel_id is None:
             continue
-        funnel_id = owner[1]
         conv_type = str(c.get("type") or "").lower()
         value = to_float(c.get("value"))
 
@@ -376,7 +405,7 @@ def _build_funnel_snapshot(db_path: str, *, start_date: str, end_date: str) -> l
     rows: list[dict[str, Any]] = []
     all_funnels = set(visits_by_funnel.keys()) | set(lead_customers.keys()) | set(purchase_customers.keys())
     for funnel_id in all_funnels:
-        visits = len(visits_by_funnel.get(funnel_id, set()))
+        visits = visits_by_funnel.get(funnel_id, 0)
         leads = len(lead_customers.get(funnel_id, set()))
         purchases = len(purchase_customers.get(funnel_id, set()))
         revenue = float(revenue_by_funnel.get(funnel_id, 0.0))
@@ -476,10 +505,13 @@ def _child_count_map(db_path: str, *, start_date: str, end_date: str, active_tab
     if active_tab == "ad":
         return {}
 
+    # Only the DISTINCT entity tuples matter for counting children, so let SQLite
+    # do the dedup: this materializes a few hundred distinct rows instead of
+    # pulling every spend + touchpoint row (~19k) into Python.
     spend_raw = query(
         db_path,
         """
-        SELECT platform, account_id, campaign_id, adset_id, ad_id
+        SELECT DISTINCT platform, account_id, campaign_id, adset_id, ad_id
         FROM spend
         WHERE date BETWEEN :start_date AND :end_date;
         """,
@@ -489,16 +521,16 @@ def _child_count_map(db_path: str, *, start_date: str, end_date: str, active_tab
     touch_raw = query(
         db_path,
         """
-        SELECT
+        SELECT DISTINCT
           platform,
           '' AS account_id,
           campaign_id,
           adset_id,
           ad_id
         FROM touchpoints
-        WHERE date(substr(ts,1,10)) BETWEEN :start_date AND :end_date;
+        WHERE ts >= :start_date AND ts < :end_excl;
         """,
-        {"start_date": start_date, "end_date": end_date},
+        {"start_date": start_date, "end_excl": _ts_end_exclusive(end_date)},
     ).rows
 
     raw_rows = list(spend_raw) + list(touch_raw)
@@ -571,8 +603,9 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         breakdown=breakdown,
     )["rows"]
 
-    # 3) attribution
-    attrib_rows = attribution_run(
+    # 3) attribution — compute the dimension breakdown AND the per-day series in
+    # a single pass over orders/touchpoints (previously two full passes).
+    _attr = attribution_run_and_day_totals(
         db_path,
         model=inputs.attribution_model,
         start_date=inputs.start_date,
@@ -581,7 +614,9 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         conversion_type=inputs.conversion_type,
         value_type="revenue",
         date_basis=date_basis,
-    )["rows"]
+    )
+    attrib_rows = _attr["run"]["rows"]
+    attrib_by_day = _attr["day_totals"]["rows"]
 
     # 4) reported
     reported_rows = ads_get_reported_value(
@@ -674,10 +709,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             """
             SELECT platform, campaign_id, adset_id, ad_id, COUNT(*) AS touches
             FROM touchpoints
-            WHERE date(substr(ts,1,10)) BETWEEN :start_date AND :end_date
+            WHERE ts >= :start_date AND ts < :end_excl
             GROUP BY platform, campaign_id, adset_id, ad_id;
             """,
-            {"start_date": inputs.start_date, "end_date": inputs.end_date},
+            {"start_date": inputs.start_date, "end_excl": _ts_end_exclusive(inputs.end_date)},
         ).rows
 
         for r in touchpoint_rows:
@@ -740,10 +775,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
               END AS traffic_source,
               COUNT(*) AS sessions
             FROM sessions
-            WHERE date(substr(ts,1,10)) BETWEEN :start_date AND :end_date
+            WHERE ts >= :start_date AND ts < :end_excl
             GROUP BY 1;
             """,
-            {"start_date": inputs.start_date, "end_date": inputs.end_date},
+            {"start_date": inputs.start_date, "end_excl": _ts_end_exclusive(inputs.end_date)},
         ).rows
         for r in session_counts:
             key = str(r.get("traffic_source") or "")
@@ -838,6 +873,8 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             totals["_reported_any"] = True
 
     table_rows.sort(key=lambda r: (r["metrics"]["profit"] or 0.0), reverse=True)
+    # Ascending-by-profit view, computed once (stable) and reused for losers below.
+    table_rows_asc = sorted(table_rows, key=lambda r: (r["metrics"]["profit"] or 0.0))
 
     totals_metrics = _format_metrics(
         clicks=int(totals["clicks"]),
@@ -869,9 +906,9 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
               COALESCE(SUM(cogs),0) AS cogs,
               COALESCE(SUM(fees),0) AS fees
             FROM orders
-            WHERE substr(ts,1,10) BETWEEN :s AND :e
+            WHERE ts >= :s AND ts < :e_excl
             """,
-            {"s": inputs.start_date, "e": inputs.end_date},
+            {"s": inputs.start_date, "e_excl": _ts_end_exclusive(inputs.end_date)},
         ).rows
         _ao = _all_orders[0] if _all_orders else {}
         all_orders_count = int(_ao.get("cnt") or 0)
@@ -1007,15 +1044,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         end_date=inputs.end_date,
         breakdown="day",
     )["rows"]
-    attrib_by_day = attribution_day_totals(
-        db_path,
-        model=inputs.attribution_model,
-        start_date=inputs.start_date,
-        end_date=inputs.end_date,
-        lookback_days=inputs.lookback_days,
-        conversion_type=inputs.conversion_type,
-        date_basis=date_basis,
-    )["rows"]
+    # attrib_by_day already computed above in the single attribution pass.
 
     spend_day_map = {r["name"]: r for r in spend_by_day}
     attrib_day_map = {r["date"]: r for r in attrib_by_day}
@@ -1102,7 +1131,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         )
 
     top_winners = [{"name": r["name"], "profit": r["metrics"]["profit"]} for r in table_rows[:5]]
-    top_losers = [{"name": r["name"], "profit": r["metrics"]["profit"]} for r in sorted(table_rows, key=lambda r: (r["metrics"]["profit"] or 0.0))[:5]]
+    top_losers = [{"name": r["name"], "profit": r["metrics"]["profit"]} for r in table_rows_asc[:5]]
 
     charts = {"time_series": time_series, "top_winners": top_winners, "top_losers": top_losers}
 
@@ -1143,7 +1172,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
 
     # Action plan
     action_plan: list[dict[str, Any]] = []
-    losers = [r for r in sorted(table_rows, key=lambda r: (r["metrics"]["profit"] or 0.0)) if (r["metrics"]["profit"] or 0.0) < 0 and (r["metrics"]["cost"] or 0.0) > 50]
+    losers = [r for r in table_rows_asc if (r["metrics"]["profit"] or 0.0) < 0 and (r["metrics"]["cost"] or 0.0) > 50]
     winners = [r for r in table_rows if (r["metrics"]["profit"] or 0.0) > 0 and (r["metrics"]["cost"] or 0.0) > 50]
 
     if losers:

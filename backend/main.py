@@ -13,9 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 # Add parent dir so we can import attributionops
@@ -140,6 +141,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Compress large JSON payloads (the /api/report response in particular is large).
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
 app.include_router(webhooks_router, prefix="/api/webhooks", tags=["webhooks"])
 app.include_router(video_router, prefix="/api/video", tags=["video"])
 app.include_router(connections_router, prefix="/api/connections", tags=["connections"])
@@ -202,6 +206,21 @@ def _db() -> str:
     return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
 
 
+# The report endpoints run as sync `def` so FastAPI executes them in its
+# threadpool (keeping the event loop / websockets responsive). Report assembly
+# is CPU-bound Python, which the GIL serializes, so an unbounded burst of
+# concurrent reports would only thrash the GIL. This dependency caps how many
+# report builds run at once; excess requests wait on the semaphore in the event
+# loop (non-blocking) instead of piling onto the threadpool.
+_REPORT_CONCURRENCY = int(os.environ.get("REPORT_CONCURRENCY") or max(2, os.cpu_count() or 2))
+_report_semaphore = asyncio.Semaphore(_REPORT_CONCURRENCY)
+
+
+async def _report_slot():
+    async with _report_semaphore:
+        yield
+
+
 def _default_dates() -> tuple[str, str]:
     end = date.today()
     start = end - timedelta(days=30)
@@ -230,8 +249,13 @@ async def health():
     return {"status": "ok", "db": _db()}
 
 
+# NOTE: the report/data endpoints below are declared as sync `def` (not `async
+# def`) on purpose. Their bodies are entirely blocking SQLite + CPU work, so
+# FastAPI runs them in its threadpool, keeping the event loop free for other
+# requests. Combined with the thread-local cached DB connections in
+# attributionops.db, each threadpool worker reuses its own tuned connection.
 @app.get("/api/report")
-async def get_report(
+def get_report(
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
     model: str = Query(default="last_click"),
@@ -239,6 +263,7 @@ async def get_report(
     active_tab: str = Query(default="traffic_source"),
     conversion_type: str = Query(default="Purchase"),
     use_click_date: bool = Query(default=False),
+    _slot: None = Depends(_report_slot),
 ):
     s, e = _default_dates()
     if not start_date:
@@ -299,7 +324,7 @@ async def get_report(
 
 
 @app.get("/api/report/children")
-async def get_report_children(
+def get_report_children(
     parent_tab: str = Query(...),
     parent_id: str = Query(...),
     start_date: str = Query(default=""),
@@ -308,6 +333,7 @@ async def get_report_children(
     lookback_days: int = Query(default=30),
     conversion_type: str = Query(default="Purchase"),
     use_click_date: bool = Query(default=False),
+    _slot: None = Depends(_report_slot),
 ):
     """Drill-down: return child rows for a given parent.
     parent_tab=campaign  → returns ad_sets under that campaign
@@ -643,7 +669,7 @@ async def get_report_children(
 
 
 @app.get("/api/spend")
-async def get_spend(
+def get_spend(
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
     platform: str = Query(default="all"),
@@ -660,7 +686,7 @@ async def get_spend(
 
 
 @app.get("/api/attribution")
-async def get_attribution(
+def get_attribution(
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
     model: str = Query(default="last_click"),
@@ -681,22 +707,22 @@ async def get_attribution(
 
 
 @app.get("/api/platforms")
-async def get_platforms():
+def get_platforms():
     return ads_list_platforms(_db())
 
 
 @app.get("/api/integrations")
-async def get_integrations():
+def get_integrations():
     return integrations_status(_db())
 
 
 @app.get("/api/tracking")
-async def get_tracking():
+def get_tracking():
     return tracking_health_check(_db())
 
 
 @app.get("/api/forecasting")
-async def get_forecasting(
+def get_forecasting(
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
     cohort_window: int = Query(default=30),
@@ -713,7 +739,7 @@ async def get_forecasting(
 
 
 @app.get("/api/reported")
-async def get_reported(
+def get_reported(
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
     platform: str = Query(default="all"),

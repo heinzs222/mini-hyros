@@ -18,6 +18,55 @@ from typing import Any, Iterable
 UTC = timezone.utc
 
 
+# Indexes for the warehouse access patterns used by the report/attribution
+# engine, as (index_name, columns). Keep in sync with scripts/init_empty_db.py
+# (production schema). The dummy schema is a subset of production (e.g. sessions
+# has no visitor_id), so indexes are only created when all their columns exist.
+WAREHOUSE_INDEXES: dict[str, list[tuple[str, tuple[str, ...]]]] = {
+    "spend": [
+        ("idx_spend_date", ("date",)),
+        ("idx_spend_platform_date", ("platform", "date")),
+    ],
+    "sessions": [
+        ("idx_sessions_ts", ("ts",)),
+        ("idx_sessions_session_id", ("session_id",)),
+        ("idx_sessions_visitor_id", ("visitor_id",)),
+        ("idx_sessions_customer_key", ("customer_key",)),
+    ],
+    "touchpoints": [
+        # Composite covers the attribution customer+window scan and the tracking
+        # EXISTS check (customer_key equality + ts range).
+        ("idx_touchpoints_customer_key_ts", ("customer_key", "ts")),
+        ("idx_touchpoints_ts", ("ts",)),
+        ("idx_touchpoints_session_id", ("session_id",)),
+        ("idx_touchpoints_campaign_id", ("campaign_id",)),
+    ],
+    "orders": [
+        ("idx_orders_ts", ("ts",)),
+        ("idx_orders_customer_key", ("customer_key",)),
+        ("idx_orders_order_id", ("order_id",)),
+    ],
+    "conversions": [
+        ("idx_conversions_ts", ("ts",)),
+        ("idx_conversions_customer_key", ("customer_key",)),
+        ("idx_conversions_order_id", ("order_id",)),
+    ],
+    "reported_value": [
+        ("idx_reported_value_date", ("date",)),
+        ("idx_reported_value_platform_date", ("platform", "date")),
+    ],
+}
+
+
+def _create_warehouse_indexes(conn: "sqlite3.Connection", table: str, cols: list[str]) -> None:
+    col_set = set(cols)
+    for index_name, index_cols in WAREHOUSE_INDEXES.get(table, []):
+        if set(index_cols).issubset(col_set):
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} ON {table}({', '.join(index_cols)});"
+            )
+
+
 def _sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -167,6 +216,11 @@ def _seed_sqlite(db_path: Path, tables: dict[str, list[dict[str, Any]]]) -> None
             placeholders = ", ".join(["?"] * len(cols))
             insert_sql = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders});"
             conn.executemany(insert_sql, ([str(row[c]) for c in cols] for row in rows))
+
+            # Indexes for the access patterns the report/attribution engine uses.
+            # The seeded demo DB previously had NO indexes, so every date-range
+            # filter, GROUP BY, and customer_key join was a full table scan.
+            _create_warehouse_indexes(conn, table_name, cols)
 
         conn.commit()
 
