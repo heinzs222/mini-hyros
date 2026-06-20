@@ -3,7 +3,25 @@
 import React from "react";
 import { formatMoney, formatNumber, formatPercentValue, formatRatio, profitColor } from "@/lib/utils";
 import { fetchChildren, apiFetch } from "@/lib/api";
-import { ArrowUpDown, ChevronDown, ChevronRight, Loader2, Play, Image as ImageIcon, X, ExternalLink } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  Loader2,
+  Play,
+  Image as ImageIcon,
+  X,
+  ExternalLink,
+  Search,
+  SlidersHorizontal,
+  Columns3,
+  Filter as FilterIcon,
+  Globe,
+  Building2,
+  Megaphone,
+  Layers3,
+  Check,
+} from "lucide-react";
 import { useState, useCallback, useEffect, useRef } from "react";
 
 type MetricValues = {
@@ -154,11 +172,11 @@ function recalcTotals(rows: TableRow[]): MetricValues {
 }
 
 const TABS = [
-  { key: "traffic_source", label: "Traffic Source" },
-  { key: "ad_account", label: "Ad Account" },
-  { key: "campaign", label: "Campaign" },
-  { key: "ad_set", label: "Ad Set" },
-  { key: "ad", label: "Ad" },
+  { key: "traffic_source", label: "Traffic source", icon: <Globe size={14} /> },
+  { key: "ad_account", label: "Ad Account", icon: <Building2 size={14} /> },
+  { key: "campaign", label: "Campaign", icon: <Megaphone size={14} /> },
+  { key: "ad_set", label: "Ad Set", icon: <Layers3 size={14} /> },
+  { key: "ad", label: "Ad", icon: <ImageIcon size={14} /> },
 ];
 
 const LEVEL_COLORS: Record<string, string> = {
@@ -201,7 +219,7 @@ function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; curr
 
   const delta = Number(current) - Number(previous);
   const sign = delta > 0 ? "+" : delta < 0 ? "-" : "";
-  const color = delta > 0 ? "text-emerald-400" : delta < 0 ? "text-red-400" : "text-gray-500";
+  const color = delta > 0 ? "text-emerald-400" : delta < 0 ? "text-rose-400" : "text-ink-faint";
 
   if (col.type === "money") {
     return <div className={`text-[10px] ${color}`}>{`${sign}${formatMoney(Math.abs(delta))}`}</div>;
@@ -218,6 +236,8 @@ function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; curr
   return null;
 }
 
+type FilterOp = ">=" | "<=";
+
 export default function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "", platformFilter = "all", onPlatformFilterChange }: Props) {
   const [sortKey, setSortKey] = useState("profit");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -230,10 +250,24 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
   const [videoLoading, setVideoLoading] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
+  // Hyros-style table controls
+  const [density, setDensity] = useState<"compact" | "comfortable">("compact");
+  const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set());
+  const [showColsMenu, setShowColsMenu] = useState(false);
+  const [showFilterMenu, setShowFilterMenu] = useState(false);
+  const [filterKey, setFilterKey] = useState("");
+  const [filterOp, setFilterOp] = useState<FilterOp>(">=");
+  const [filterVal, setFilterVal] = useState("");
+  const colsMenuRef = useRef<HTMLDivElement>(null);
+  const filterMenuRef = useRef<HTMLDivElement>(null);
+
   const metricCols = columns.filter((c) => c.type !== "dimension");
+  const shownCols = metricCols.filter((c) => !hiddenCols.has(c.key));
   const dimensionCol = columns.find((c) => c.type === "dimension");
   const compareById = new Map(compareRows.map((r) => [r.id, r]));
   const querySignature = `${activeTab}|${startDate || ""}|${endDate || ""}|${model || ""}|${lookbackDays || ""}|${useClickDate ? "click" : "conversion"}`;
+  const cellPad = density === "compact" ? "py-1.5" : "py-3";
+  const filterActive = Boolean(filterKey && filterVal !== "");
 
   const filtered = rows.filter((r) => {
     const needle = search.toLowerCase().trim();
@@ -242,13 +276,19 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
       || r.id.toLowerCase().includes(needle)
       || (r.raw_id || "").toLowerCase().includes(needle);
     const matchPlatform = platformFilter === "all" || platformFromRow(r) === platformFilter;
-    return matchSearch && matchPlatform;
+    let matchMetric = true;
+    if (filterActive) {
+      const v = Number((r.metrics as any)[filterKey] ?? 0);
+      const threshold = Number(filterVal);
+      matchMetric = filterOp === ">=" ? v >= threshold : v <= threshold;
+    }
+    return matchSearch && matchPlatform && matchMetric;
   });
 
   const platformsInData = Array.from(new Set(rows.map((r) => platformFromRow(r)).filter(Boolean)));
   const platformsKey = platformsInData.join("|");
-  const visibleTotals = search.trim() || platformFilter !== "all" ? recalcTotals(filtered) : (totals as MetricValues);
-  const totalsLabel = search.trim() || platformFilter !== "all" ? "TOTAL (VISIBLE)" : "TOTAL";
+  const visibleTotals = search.trim() || platformFilter !== "all" || filterActive ? recalcTotals(filtered) : (totals as MetricValues);
+  const totalsLabel = search.trim() || platformFilter !== "all" || filterActive ? "Total (visible)" : "Total";
 
   useEffect(() => {
     setExpanded({});
@@ -261,6 +301,16 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
       onPlatformFilterChange?.("all");
     }
   }, [platformFilter, platformsKey, onPlatformFilterChange]);
+
+  useEffect(() => {
+    if (!showColsMenu && !showFilterMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (colsMenuRef.current && !colsMenuRef.current.contains(e.target as Node)) setShowColsMenu(false);
+      if (filterMenuRef.current && !filterMenuRef.current.contains(e.target as Node)) setShowFilterMenu(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [showColsMenu, showFilterMenu]);
 
   const sorted = [...filtered].sort((a, b) => {
     const av = (a.metrics as any)[sortKey] ?? 0;
@@ -286,13 +336,11 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
       return;
     }
 
-    // Already loaded
     if (childRows[key]) {
       setExpanded((prev) => ({ ...prev, [key]: true }));
       return;
     }
 
-    // Fetch children
     setLoadingChildren((prev) => ({ ...prev, [key]: true }));
     try {
       const data = await fetchChildren({
@@ -385,23 +433,23 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
     return (
       <React.Fragment key={rowKey}>
         <tr
-          className={`border-b border-[var(--card-border)] hover:bg-white/[0.02] transition-colors ${
+          className={`border-b border-[var(--card-border)]/70 hover:bg-white/[0.025] transition-colors ${
             row.children_available ? "cursor-pointer" : ""
-          } ${depth > 0 ? "bg-white/[0.01]" : ""}`}
+          } ${depth > 0 ? "bg-white/[0.015]" : ""}`}
           onClick={() => {
             if (depth === 0) toggleExpand(row);
             else if (parentKey) toggleExpandChild(parentKey, row);
           }}
         >
-          <td className={`px-4 py-2.5 sticky left-0 bg-[var(--card)] z-10 ${depth > 0 ? `border-l-2 ${levelColor}` : ""}`}>
+          <td className={`px-4 ${cellPad} sticky left-0 bg-[var(--surface)] z-10 ${depth > 0 ? `border-l-2 ${levelColor}` : ""}`}>
             <div className="flex items-center gap-1.5" style={{ paddingLeft: depth * 20 }}>
               {row.children_available ? (
                 isLoading ? (
-                  <Loader2 size={12} className="text-brand-500 animate-spin flex-shrink-0" />
+                  <Loader2 size={13} className="text-brand-500 animate-spin flex-shrink-0" />
                 ) : isExpanded ? (
-                  <ChevronDown size={12} className="text-brand-400 flex-shrink-0" />
+                  <ChevronDown size={13} className="text-brand-400 flex-shrink-0" />
                 ) : (
-                  <ChevronRight size={12} className="text-gray-500 flex-shrink-0" />
+                  <ChevronRight size={13} className="text-ink-faint flex-shrink-0" />
                 )
               ) : (
                 <span className="w-3" />
@@ -439,7 +487,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
               )}
               {row.level === "ad" && !row.thumbnail_url && (
                 <span className="flex-shrink-0 w-8 h-8 rounded border border-dashed border-[var(--card-border)] flex items-center justify-center">
-                  <ImageIcon size={10} className="text-gray-700" />
+                  <ImageIcon size={10} className="text-ink-faint" />
                 </span>
               )}
               {depth === 0 && (() => {
@@ -447,22 +495,22 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
                 const pm = plat ? PLATFORM_META[plat] : null;
                 return pm ? <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${pm.dot}`} title={pm.label} /> : null;
               })()}
-              <span className="text-gray-200 truncate max-w-[200px]" title={row.raw_id ? `${row.name} (ID: ${row.raw_id})` : row.name}>
+              <span className="text-ink truncate max-w-[220px]" title={row.raw_id ? `${row.name} (ID: ${row.raw_id})` : row.name}>
                 {row.name}
               </span>
               {row.raw_id && row.raw_id !== row.name && (
-                <span className="text-[9px] text-gray-600 ml-1 px-1 py-0.5 rounded bg-white/5 font-mono" title={row.raw_id}>ID</span>
+                <span className="text-[9px] text-ink-faint ml-1 px-1 py-0.5 rounded bg-white/5 font-mono" title={row.raw_id}>ID</span>
               )}
               {depth > 0 && levelLabel && (
-                <span className="text-[9px] text-gray-600 ml-1 px-1 py-0.5 rounded bg-white/5">{levelLabel}</span>
+                <span className="text-[9px] text-ink-faint ml-1 px-1 py-0.5 rounded bg-white/5">{levelLabel}</span>
               )}
               {row.children_count != null && row.children_count > 0 && (
-                <span className="text-[10px] text-gray-600 ml-1">({row.children_count})</span>
+                <span className="text-[10px] text-ink-faint ml-1">({row.children_count})</span>
               )}
             </div>
           </td>
-          {metricCols.map((col) => (
-            <td key={col.key} className="text-right px-3 py-2.5 text-gray-300 whitespace-nowrap">
+          {shownCols.map((col) => (
+            <td key={col.key} className={`text-right px-3 ${cellPad} text-ink whitespace-nowrap tabular`}>
               <CellValue col={col} metrics={row.metrics} />
               {compareRow && (
                 <DeltaValue col={col} currentMetrics={row.metrics} compareMetrics={compareRow.metrics} />
@@ -474,7 +522,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
         {isExpanded && children.length > 0 && children.map((child) => renderRow(child, depth + 1, row.id))}
         {isExpanded && children.length === 0 && !isLoading && (
           <tr key={`${rowKey}-empty`} className="border-b border-[var(--card-border)]">
-            <td colSpan={metricCols.length + 1} className="px-4 py-2 text-gray-600 text-[11px]" style={{ paddingLeft: (depth + 1) * 20 + 16 }}>
+            <td colSpan={shownCols.length + 1} className="px-4 py-2 text-ink-faint text-[11px]" style={{ paddingLeft: (depth + 1) * 20 + 16 }}>
               No child items found
             </td>
           </tr>
@@ -482,6 +530,17 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
       </React.Fragment>
     );
   };
+
+  const TotalsRow = () => (
+    <tr className="border-b border-[var(--card-border)] bg-white/[0.03] font-semibold">
+      <td className={`px-4 ${cellPad} text-ink-bright sticky left-0 bg-[var(--surface)] z-10`}>{totalsLabel}</td>
+      {shownCols.map((col) => (
+        <td key={col.key} className={`text-right px-3 ${cellPad} whitespace-nowrap tabular text-ink-bright`}>
+          <CellValue col={col} metrics={visibleTotals} />
+        </td>
+      ))}
+    </tr>
+  );
 
   return (
     <>
@@ -493,12 +552,11 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
       >
         <div className="relative max-w-2xl max-h-[90vh] flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center justify-between px-1">
-            <span className="text-sm text-gray-300 truncate max-w-[500px]">{lightbox.name}</span>
-            <button onClick={() => setLightbox(null)} className="text-gray-400 hover:text-white ml-4">
+            <span className="text-sm text-ink truncate max-w-[500px]">{lightbox.name}</span>
+            <button onClick={() => setLightbox(null)} className="text-ink-dim hover:text-white ml-4">
               <X size={18} />
             </button>
           </div>
-          {/* Video player for video ads, image for static */}
           {lightbox.type === "video" && videoUrl ? (
             <video
               ref={videoRef}
@@ -516,7 +574,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
             <div className="flex flex-col items-center gap-3 rounded-lg border border-[var(--card-border)] bg-black/50 p-6" style={{ minWidth: 480 }}>
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={lightbox.url} alt={lightbox.name} className="rounded max-h-48 object-contain" />
-              <span className="text-xs text-gray-500">Video preview unavailable — open in Ads Manager to watch</span>
+              <span className="text-xs text-ink-dim">Video preview unavailable — open in Ads Manager to watch</span>
             </div>
           ) : (
             /* eslint-disable-next-line @next/next/no-img-element */
@@ -529,7 +587,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
           )}
           <div className="flex items-center justify-between px-1">
             {lightbox.type && (
-              <span className="text-xs text-gray-500 capitalize">{lightbox.type} creative</span>
+              <span className="text-xs text-ink-dim capitalize">{lightbox.type} creative</span>
             )}
             {lightbox.ad_id && (
               <a
@@ -547,44 +605,49 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
         </div>
       </div>
     )}
-    <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] overflow-hidden">
+    <div className="hpanel overflow-hidden">
       {compareRows.length > 0 && (
         <div className="px-4 py-2 border-b border-[var(--card-border)] text-[11px] text-blue-300 bg-blue-500/5">
           Row deltas shown vs {compareLabel || "comparison"}
         </div>
       )}
 
-      {/* Tab bar */}
-      <div className="flex items-center gap-1 px-4 pt-3 pb-2 border-b border-[var(--card-border)] overflow-x-auto">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => {
-              onTabChange(t.key);
-              onPlatformFilterChange?.("all");
-              setExpanded({});
-              setChildRows({});
-            }}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-              activeTab === t.key
-                ? "bg-brand-600 text-white"
-                : "text-gray-400 hover:text-white hover:bg-white/5"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
+      {/* Grouping tabs (segmented control) */}
+      <div className="flex items-center gap-2 px-4 pt-4 pb-3 overflow-x-auto">
+        <div className="flex items-center gap-1 rounded-xl border border-[var(--card-border)] bg-[var(--surface-2)] p-1">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => {
+                onTabChange(t.key);
+                onPlatformFilterChange?.("all");
+                setExpanded({});
+                setChildRows({});
+              }}
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[13px] font-medium transition-colors whitespace-nowrap ${
+                activeTab === t.key
+                  ? "bg-white/[0.07] text-ink-bright"
+                  : "text-ink-dim hover:text-ink"
+              }`}
+            >
+              <span className={activeTab === t.key ? "text-brand-400" : "text-ink-faint"}>{t.icon}</span>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
-        {/* Platform filter pills — only shown when data has multiple platforms */}
+      {/* Toolbar: platform pills + search + density + filter + columns */}
+      <div className="flex flex-wrap items-center gap-2 px-4 pb-3 border-b border-[var(--card-border)]">
         {onPlatformFilterChange && platformsInData.length > 0 && (
-          <div className="flex items-center gap-1 ml-3 pl-3 border-l border-[var(--card-border)]">
+          <div className="flex items-center gap-1">
             <button
               onClick={() => onPlatformFilterChange("all")}
               className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors whitespace-nowrap ${
-                platformFilter === "all" ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"
+                platformFilter === "all" ? "bg-white/10 text-ink-bright" : "text-ink-dim hover:text-ink"
               }`}
             >
-              All
+              All sources
             </button>
             {platformsInData.map((p) => {
               const meta = PLATFORM_META[p] || { label: p, dot: "bg-gray-400" };
@@ -593,7 +656,7 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
                   key={p}
                   onClick={() => onPlatformFilterChange(platformFilter === p ? "all" : p)}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors whitespace-nowrap ${
-                    platformFilter === p ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"
+                    platformFilter === p ? "bg-white/10 text-ink-bright" : "text-ink-dim hover:text-ink"
                   }`}
                 >
                   <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${meta.dot}`} />
@@ -604,54 +667,172 @@ export default function AttributionTable({ columns, rows, totals, activeTab, onT
           </div>
         )}
 
-        <div className="ml-auto">
-          <input
-            type="text"
-            placeholder="Search by name or ID..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="bg-transparent border border-[var(--card-border)] rounded-lg px-3 py-1 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-brand-500 w-44"
-          />
+        <div className="ml-auto flex items-center gap-2">
+          {/* Search */}
+          <div className="flex items-center gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 h-8">
+            <Search size={13} className="text-ink-faint" />
+            <input
+              type="text"
+              placeholder="Search name or ID…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="bg-transparent text-[12px] text-ink placeholder:text-ink-faint focus:outline-none w-40"
+            />
+          </div>
+
+          {/* Density */}
+          <button
+            onClick={() => setDensity((d) => (d === "compact" ? "comfortable" : "compact"))}
+            className="flex items-center gap-1.5 h-8 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim hover:text-ink"
+            title="Toggle row density"
+          >
+            <SlidersHorizontal size={13} />
+            <span className="capitalize">{density}</span>
+          </button>
+
+          {/* Metric filter */}
+          <div className="relative" ref={filterMenuRef}>
+            <button
+              title="Filter rows by a metric threshold"
+              onClick={() => { setShowFilterMenu((s) => !s); setShowColsMenu(false); }}
+              className={`flex items-center gap-1.5 h-8 rounded-lg border px-2.5 text-[12px] transition-colors ${
+                filterActive
+                  ? "border-brand-500/50 bg-brand-500/10 text-brand-300"
+                  : "border-[var(--card-border)] bg-[var(--surface-2)] text-ink-dim hover:text-ink"
+              }`}
+            >
+              <FilterIcon size={13} /> Filter{filterActive ? " (1)" : ""}
+            </button>
+            {showFilterMenu && (
+              <div className="animate-hpop absolute right-0 z-30 mt-2 w-[280px] rounded-xl border border-[var(--card-border)] bg-[#0c0c11] p-3 shadow-2xl">
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-ink-dim">Filter by metric</div>
+                <div className="space-y-2">
+                  <select
+                    value={filterKey}
+                    onChange={(e) => setFilterKey(e.target.value)}
+                    className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-[12px] text-ink focus:outline-none"
+                  >
+                    <option value="">Select a metric…</option>
+                    {metricCols.map((c) => (
+                      <option key={c.key} value={c.key}>{c.label}</option>
+                    ))}
+                  </select>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={filterOp}
+                      onChange={(e) => setFilterOp(e.target.value as FilterOp)}
+                      className="rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-[12px] text-ink focus:outline-none"
+                    >
+                      <option value=">=">≥ at least</option>
+                      <option value="<=">≤ at most</option>
+                    </select>
+                    <input
+                      type="number"
+                      value={filterVal}
+                      onChange={(e) => setFilterVal(e.target.value)}
+                      placeholder="Value"
+                      className="flex-1 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-[12px] text-ink focus:outline-none"
+                    />
+                  </div>
+                </div>
+                <div className="mt-3 flex items-center justify-between">
+                  <button
+                    onClick={() => { setFilterKey(""); setFilterVal(""); }}
+                    className="text-[12px] text-ink-dim hover:text-ink"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    onClick={() => setShowFilterMenu(false)}
+                    className="rounded-lg bg-brand-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-brand-700"
+                  >
+                    Apply
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Columns chooser */}
+          <div className="relative" ref={colsMenuRef}>
+            <button
+              title="Show or hide metric columns"
+              onClick={() => { setShowColsMenu((s) => !s); setShowFilterMenu(false); }}
+              className="flex items-center gap-1.5 h-8 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim transition-colors hover:text-ink hover:border-white/20"
+            >
+              <Columns3 size={13} /> Columns
+            </button>
+            {showColsMenu && (
+              <div className="animate-hpop absolute right-0 z-30 mt-2 max-h-[320px] w-[220px] overflow-auto rounded-xl border border-[var(--card-border)] bg-[#0c0c11] p-2 shadow-2xl">
+                <div className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-ink-dim">Visible metrics</div>
+                {metricCols.map((c) => {
+                  const visible = !hiddenCols.has(c.key);
+                  return (
+                    <button
+                      key={c.key}
+                      onClick={() =>
+                        setHiddenCols((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(c.key)) next.delete(c.key);
+                          else if (shownCols.length > 1) next.add(c.key);
+                          return next;
+                        })
+                      }
+                      className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[12px] text-ink hover:bg-white/5"
+                    >
+                      {c.label}
+                      <span className={`flex h-4 w-4 items-center justify-center rounded border ${visible ? "border-brand-500 bg-brand-500" : "border-[var(--card-border)]"}`}>
+                        {visible && <Check size={11} className="text-white" />}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
       {/* Table */}
       <div className="overflow-x-auto">
-        <table className="w-full text-xs">
+        <table className="w-full text-[13px]">
           <thead>
             <tr className="border-b border-[var(--card-border)]">
-              <th className="text-left px-4 py-2 text-gray-500 font-medium sticky left-0 bg-[var(--card)] z-10 min-w-[200px]">
+              <th className="text-left px-4 py-2.5 text-ink-dim font-medium sticky left-0 bg-[var(--surface)] z-10 min-w-[220px]">
                 {dimensionCol?.label || "Name"}
               </th>
-              {metricCols.map((col) => (
-                <th
-                  key={col.key}
-                  className="text-right px-3 py-2 text-gray-500 font-medium cursor-pointer hover:text-gray-300 whitespace-nowrap"
-                  onClick={() => handleSort(col.key)}
-                >
-                  <div className="flex items-center justify-end gap-1">
-                    {col.label}
-                    {sortKey === col.key && (
-                      <ArrowUpDown size={10} className="text-brand-500" />
-                    )}
-                  </div>
-                </th>
-              ))}
+              {shownCols.map((col) => {
+                const active = sortKey === col.key;
+                return (
+                  <th
+                    key={col.key}
+                    className={`text-right px-3 py-2.5 font-medium cursor-pointer whitespace-nowrap select-none ${active ? "text-ink-bright" : "text-ink-dim hover:text-ink"}`}
+                    onClick={() => handleSort(col.key)}
+                  >
+                    <div className="flex items-center justify-end gap-1">
+                      {col.label}
+                      {active ? (
+                        sortDir === "desc" ? <ChevronDown size={12} className="text-brand-400" /> : <ChevronUp size={12} className="text-brand-400" />
+                      ) : (
+                        <ChevronDown size={12} className="text-ink-faint/40" />
+                      )}
+                    </div>
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
+            {/* Total row on top (Hyros-style) */}
+            <TotalsRow />
             {sorted.map((row) => renderRow(row, 0))}
-            {/* Totals row */}
-            <tr className="border-t-2 border-brand-600/30 bg-white/[0.02] font-semibold">
-              <td className="px-4 py-2.5 text-gray-300 sticky left-0 bg-[var(--card)] z-10">
-                {totalsLabel}
-              </td>
-              {metricCols.map((col) => (
-                <td key={col.key} className="text-right px-3 py-2.5 whitespace-nowrap">
-                  <CellValue col={col} metrics={visibleTotals} />
+            {sorted.length === 0 && (
+              <tr>
+                <td colSpan={shownCols.length + 1} className="px-4 py-10 text-center text-ink-dim text-[13px]">
+                  No rows match the current filters.
                 </td>
-              ))}
-            </tr>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

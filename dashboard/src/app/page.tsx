@@ -4,6 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncAdNames, syncStripe } from "@/lib/api";
 import { daysAgo } from "@/lib/utils";
+import Sidebar, { Section } from "@/components/Sidebar";
+import DateRangePicker from "@/components/DateRangePicker";
+import DashboardView from "@/components/DashboardView";
+import LeadsView from "@/components/LeadsView";
+import ConnectionsView from "@/components/ConnectionsView";
 import SummaryCards from "@/components/SummaryCards";
 import PerformanceChart from "@/components/PerformanceChart";
 import TrafficValueChart from "../components/TrafficValueChart";
@@ -21,19 +26,19 @@ import CohortPanel from "@/components/CohortPanel";
 import CapiPanel from "@/components/CapiPanel";
 import AdNamesPanel from "@/components/AdNamesPanel";
 import SpendImportPanel from "@/components/SpendImportPanel";
+import ModelSelect from "@/components/ModelSelect";
+import { useToast } from "@/components/Toast";
 import {
   BarChart3,
   DollarSign,
   RefreshCw,
   Settings,
-  Zap,
   TrendingUp,
   Filter,
   Route,
   Grid3x3,
   Send,
   Tag,
-  LogOut,
 } from "lucide-react";
 
 interface LiveEvent {
@@ -79,6 +84,18 @@ function normalizeDateRange(startIso: string, endIso: string): [string, string] 
   return startIso <= endIso ? [startIso, endIso] : [endIso, startIso];
 }
 
+function previousPeriod(startIso: string, endIso: string): { start: string; end: string } {
+  const spanDays = inclusiveSpanDays(startIso, endIso);
+  const previousEnd = shiftIsoDate(startIso, -1);
+  const previousStart = shiftIsoDate(previousEnd, -(spanDays - 1));
+  return { start: previousStart, end: previousEnd };
+}
+
+function monthDayLabel(iso: string): string {
+  if (!iso) return "";
+  return new Date(`${iso}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 function modelLabel(value: string): string {
   return MODELS.find((m) => m.value === value)?.label || value;
 }
@@ -93,8 +110,29 @@ function compactSyncError(message: string): string {
 
 const REPORT_CACHE_KEY = "hyros_report_cache";
 
+const REPORT_TABS = [
+  { key: "attribution", label: "Attribution", icon: <BarChart3 size={14} /> },
+  { key: "funnel", label: "Funnel", icon: <Filter size={14} /> },
+  { key: "ltv", label: "LTV", icon: <TrendingUp size={14} /> },
+  { key: "journey", label: "Journey", icon: <Route size={14} /> },
+  { key: "cohort", label: "Cohorts", icon: <Grid3x3 size={14} /> },
+  { key: "capi", label: "CAPI Sync", icon: <Send size={14} /> },
+  { key: "spend", label: "Spend", icon: <DollarSign size={14} /> },
+  { key: "names", label: "Ad Names", icon: <Tag size={14} /> },
+];
+
+const SECTION_TITLES: Record<Section, string> = {
+  dashboard: "Dashboard",
+  reports: "Performance Report",
+  leads: "",
+  settings: "Settings",
+};
+
 export default function DashboardPage() {
   const router = useRouter();
+  const toast = useToast();
+  const toastRef = useRef(toast);
+  useEffect(() => { toastRef.current = toast; });
   const [report, setReport] = useState<any>(null);
   const [compareReport, setCompareReport] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -102,15 +140,21 @@ export default function DashboardPage() {
   const [authChecked, setAuthChecked] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(false);
   const [authUser, setAuthUser] = useState("");
+
+  const [section, setSection] = useState<Section>("dashboard");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
   const [activeTab, setActiveTab] = useState("campaign");
   const [model, setModel] = useState("last_click");
+  const [compareEnabled, setCompareEnabled] = useState(true);
+  const [autoCompare, setAutoCompare] = useState(true);
   const [compareMode, setCompareMode] = useState<CompareMode>("previous_period");
   const [compareModel, setCompareModel] = useState("first_click");
   const [compareLabel, setCompareLabel] = useState("");
-  const [primaryStartDate, setPrimaryStartDate] = useState(daysAgo(30));
+  const [primaryStartDate, setPrimaryStartDate] = useState(daysAgo(6));
   const [primaryEndDate, setPrimaryEndDate] = useState(daysAgo(0));
-  const [compareStartDate, setCompareStartDate] = useState(daysAgo(60));
-  const [compareEndDate, setCompareEndDate] = useState(daysAgo(31));
+  const [compareStartDate, setCompareStartDate] = useState(daysAgo(13));
+  const [compareEndDate, setCompareEndDate] = useState(daysAgo(7));
   const [useClickDate, setUseClickDate] = useState(false);
   const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
@@ -126,6 +170,14 @@ export default function DashboardPage() {
   const syncingSpendRef = useRef(false);
   const loadReportRef = useRef<() => Promise<void>>(async () => {});
   const reportRequestSeqRef = useRef(0);
+
+  const effectiveCompareMode: CompareMode = !compareEnabled
+    ? "none"
+    : autoCompare
+    ? "previous_period"
+    : compareMode === "none"
+    ? "previous_period"
+    : compareMode;
 
   const loadReport = useCallback(async () => {
     const requestSeq = reportRequestSeqRef.current + 1;
@@ -144,7 +196,6 @@ export default function DashboardPage() {
       const cacheKey = JSON.stringify(primaryParams);
       let cacheHit = false;
 
-      // Show cached data only when it exactly matches the current report query.
       const cached = typeof window !== "undefined" ? window.localStorage.getItem(REPORT_CACHE_KEY) : null;
       if (cached) {
         try {
@@ -164,10 +215,8 @@ export default function DashboardPage() {
       let comparePromise: Promise<any> | null = null;
       let nextCompareLabel = "";
 
-      if (compareMode === "previous_period") {
-        const spanDays = inclusiveSpanDays(startDate, endDate);
-        const previousEnd = shiftIsoDate(startDate, -1);
-        const previousStart = shiftIsoDate(previousEnd, -(spanDays - 1));
+      if (effectiveCompareMode === "previous_period") {
+        const { start: previousStart, end: previousEnd } = previousPeriod(startDate, endDate);
         comparePromise = fetchReport({
           start_date: previousStart,
           end_date: previousEnd,
@@ -176,7 +225,7 @@ export default function DashboardPage() {
           use_click_date: useClickDate,
         });
         nextCompareLabel = `${previousStart} to ${previousEnd}`;
-      } else if (compareMode === "custom_range") {
+      } else if (effectiveCompareMode === "custom_range") {
         const [customStart, customEnd] = normalizeDateRange(compareStartDate, compareEndDate);
         if (customStart && customEnd) {
           comparePromise = fetchReport({
@@ -188,7 +237,7 @@ export default function DashboardPage() {
           });
           nextCompareLabel = `${customStart} to ${customEnd}`;
         }
-      } else if (compareMode === "model" && compareModel !== model) {
+      } else if (effectiveCompareMode === "model" && compareModel !== model) {
         comparePromise = fetchReport({
           start_date: startDate,
           end_date: endDate,
@@ -208,7 +257,6 @@ export default function DashboardPage() {
       setReport(data);
       setCompareReport(compareData);
       setCompareLabel(compareData ? nextCompareLabel : "");
-      // Cache for instant display on next login
       if (data && typeof window !== "undefined") {
         try { window.localStorage.setItem(REPORT_CACHE_KEY, JSON.stringify({ key: cacheKey, data, ts: Date.now() })); } catch {}
       }
@@ -230,21 +278,27 @@ export default function DashboardPage() {
     primaryStartDate,
     primaryEndDate,
     useClickDate,
-    compareMode,
+    effectiveCompareMode,
     compareModel,
     compareStartDate,
     compareEndDate,
     router,
   ]);
 
-  const syncSpendData = useCallback(async (range?: { start_date?: string; end_date?: string }) => {
+  const syncSpendData = useCallback(async (
+    range?: { start_date?: string; end_date?: string },
+    opts?: { notify?: boolean },
+  ) => {
     if (syncingSpendRef.current) return null;
 
-    // Background auto-sync stays short. Manual sync uses the selected report window.
+    const notify = Boolean(opts?.notify);
     const syncEnd = range?.end_date || daysAgo(0);
     const syncStart = range?.start_date || daysAgo(7);
     syncingSpendRef.current = true;
     setSyncingSpend(true);
+    const toastId = notify
+      ? toastRef.current.loading("Syncing all platforms…", { description: "Pulling ad spend, ad names and Stripe orders." })
+      : 0;
 
     try {
       const [spendResult, namesResult, stripeResult] = await Promise.allSettled([
@@ -267,9 +321,38 @@ export default function DashboardPage() {
       addSyncErrors("Stripe", stripeResult);
       setSyncErrors(errors);
       setLastAutoSyncAt(new Date().toISOString());
+
+      if (notify) {
+        if (errors.length === 0) {
+          toastRef.current.update(toastId, {
+            type: "success",
+            title: "Sync complete",
+            description: "Ad spend, ad names and Stripe orders are up to date.",
+            duration: 4500,
+          });
+        } else {
+          const detail =
+            errors.slice(0, 4).map(compactSyncError).join("\n") +
+            (errors.length > 4 ? `\n+${errors.length - 4} more issue${errors.length - 4 === 1 ? "" : "s"}…` : "");
+          toastRef.current.update(toastId, {
+            type: "error",
+            title: `Sync finished with ${errors.length} issue${errors.length === 1 ? "" : "s"}`,
+            description: detail,
+            duration: 13000,
+          });
+        }
+      }
       return spendResult.status === "fulfilled" ? spendResult.value : null;
-    } catch (err) {
+    } catch (err: any) {
       console.warn("Auto sync failed:", err);
+      if (notify) {
+        toastRef.current.update(toastId, {
+          type: "error",
+          title: "Sync failed",
+          description: compactSyncError(err?.message || String(err) || "Could not reach the sync service."),
+          duration: 12000,
+        });
+      }
       return null;
     } finally {
       syncingSpendRef.current = false;
@@ -309,11 +392,9 @@ export default function DashboardPage() {
 
     const runBackgroundSync = async () => {
       await syncSpendData();
-      // Silently refresh report after sync completes
       await loadReportRef.current();
     };
 
-    // Sync in the background, then refresh the current report after sync completes.
     void runBackgroundSync();
 
     spendSyncTimerRef.current = setInterval(() => {
@@ -333,7 +414,6 @@ export default function DashboardPage() {
     loadReport();
   }, [loadReport, authChecked]);
 
-  // Auto-refresh every 30s
   useEffect(() => {
     if (autoRefresh && authChecked) {
       refreshTimerRef.current = setInterval(loadReport, 30_000);
@@ -343,12 +423,10 @@ export default function DashboardPage() {
     };
   }, [autoRefresh, loadReport, authChecked]);
 
-  // WebSocket for real-time events
   useEffect(() => {
     if (!authChecked) return;
     const ws = createWebSocket((data: LiveEvent) => {
       setLiveEvents((prev) => [...prev.slice(-49), data]);
-      // Auto-refresh report on new orders
       if (data.type === "new_order") {
         setTimeout(() => {
           void loadReportRef.current();
@@ -381,414 +459,407 @@ export default function DashboardPage() {
   const [windowStart, windowEnd] = normalizeDateRange(primaryStartDate, primaryEndDate);
   const activeWindowLabel = `${windowStart} to ${windowEnd}`;
 
+  const compareRange =
+    effectiveCompareMode === "previous_period"
+      ? previousPeriod(windowStart, windowEnd)
+      : effectiveCompareMode === "custom_range"
+      ? { start: compareStartDate, end: compareEndDate }
+      : null;
+  const compareCaption = compareRange ? monthDayLabel(compareRange.start) : undefined;
+
+  const setRange = (range: { start: string; end: string }) => {
+    setPrimaryStartDate(range.start);
+    setPrimaryEndDate(range.end);
+  };
+
   if (!authChecked) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="flex min-h-screen items-center justify-center">
         <RefreshCw size={24} className="animate-spin text-brand-500" />
       </div>
     );
   }
 
+  const showReportControls = section === "reports";
+  const showDateControls = section === "dashboard" || section === "reports" || section === "leads";
+
   return (
-    <div className="min-h-screen">
-      {/* Header */}
-      <header className="sticky top-0 z-50 border-b border-[var(--card-border)] bg-[var(--background)]/80 backdrop-blur-xl">
-        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-purple-600 flex items-center justify-center">
-              <Zap size={16} className="text-white" />
-            </div>
-            <div>
-              <h1 className="text-sm font-bold text-white tracking-tight">Mini Hyros</h1>
-              <p className="text-[10px] text-gray-500">Attribution Dashboard</p>
-            </div>
-          </div>
+    <div className="flex h-screen overflow-hidden bg-[var(--background)]">
+      <Sidebar
+        section={section}
+        onSectionChange={setSection}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+        userName={authUser || "Account"}
+        authEnabled={authEnabled}
+        onLogout={handleLogout}
+      />
 
-          {/* Controls */}
-          <div className="ml-auto flex flex-wrap items-end gap-2">
-            {/* Date range */}
-            <div className="flex items-end gap-1.5">
-              <div>
-                <div className="text-[10px] text-gray-500 mb-1">From</div>
-                <input type="date" value={primaryStartDate} onChange={(e) => setPrimaryStartDate(e.target.value)}
-                  className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500 w-[130px]"
+      <main className="flex-1 overflow-y-auto">
+        {/* Top controls strip */}
+        <div className="sticky top-0 z-40 border-b border-[var(--card-border)] bg-[var(--background)]/85 backdrop-blur-xl">
+          <div className="flex flex-wrap items-center gap-3 px-6 py-3">
+            <h1 className="h-title text-[26px]">
+              {SECTION_TITLES[section]}
+            </h1>
+
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              {showDateControls && (
+                <DateRangePicker
+                  value={{ start: primaryStartDate, end: primaryEndDate }}
+                  onChange={setRange}
+                  compareRange={compareRange}
+                  compareEnabled={compareEnabled}
+                  onCompareEnabledChange={setCompareEnabled}
+                  autoCompare={autoCompare}
+                  onAutoCompareChange={setAutoCompare}
+                  showCompareControls={section !== "leads"}
                 />
-              </div>
-              <div>
-                <div className="text-[10px] text-gray-500 mb-1">To</div>
-                <input type="date" value={primaryEndDate} onChange={(e) => setPrimaryEndDate(e.target.value)}
-                  className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500 w-[130px]"
-                />
-              </div>
-            </div>
-
-            {/* Attribution model */}
-            <div>
-              <div className="text-[10px] text-gray-500 mb-1">Model</div>
-              <select value={model} onChange={(e) => setModel(e.target.value)}
-                className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500 w-[130px]"
-              >
-                {MODELS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-              </select>
-            </div>
-
-            <div>
-              <div className="text-[10px] text-gray-500 mb-1">Basis</div>
-              <select
-                value={useClickDate ? "click" : "conversion"}
-                onChange={(e) => setUseClickDate(e.target.value === "click")}
-                className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500 w-[145px]"
-                aria-label="Attribution date basis"
-              >
-                <option value="conversion">Conversion Date</option>
-                <option value="click">Click Date</option>
-              </select>
-            </div>
-
-            {/* Sync + Refresh */}
-            <button
-              onClick={() => setAutoRefresh((enabled) => !enabled)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors h-[34px] ${
-                autoRefresh
-                  ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/20"
-                  : "bg-white/5 text-gray-400 hover:bg-white/10"
-              }`}
-              title={autoRefresh ? "Disable live refresh" : "Enable live refresh"}
-              aria-pressed={autoRefresh}
-            >
-              <RefreshCw size={12} />
-              {autoRefresh ? "Live On" : "Live Off"}
-            </button>
-
-            <button
-              onClick={async () => { await syncSpendData({ start_date: windowStart, end_date: windowEnd }); await loadReport(); }}
-              disabled={syncingSpend}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold transition-colors disabled:opacity-50 h-[34px]"
-            >
-              <RefreshCw size={12} className={syncingSpend ? "animate-spin" : ""} />
-              {syncingSpend ? "Syncing..." : "Sync"}
-            </button>
-
-            {authEnabled && (
-              <button onClick={handleLogout}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-400 text-xs font-medium transition-colors h-[34px]"
-                title={authUser ? `Logout ${authUser}` : "Logout"}
-              >
-                <LogOut size={12} />
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
-
-      {/* Tab Navigation */}
-      <nav className="border-b border-[var(--card-border)] bg-[var(--background)]">
-        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 flex gap-1 overflow-x-auto">
-          {[
-            { key: "attribution", label: "Attribution", icon: <BarChart3 size={13} /> },
-            { key: "funnel", label: "Funnel", icon: <Filter size={13} /> },
-            { key: "ltv", label: "LTV", icon: <TrendingUp size={13} /> },
-            { key: "journey", label: "Journey", icon: <Route size={13} /> },
-            { key: "cohort", label: "Cohorts", icon: <Grid3x3 size={13} /> },
-            { key: "capi", label: "CAPI Sync", icon: <Send size={13} /> },
-            { key: "spend", label: "Spend", icon: <DollarSign size={13} /> },
-            { key: "names", label: "Ad Names", icon: <Tag size={13} /> },
-          ].map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setMainTab(tab.key)}
-              className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
-                mainTab === tab.key
-                  ? "border-brand-500 text-brand-400"
-                  : "border-transparent text-gray-500 hover:text-gray-300"
-              }`}
-            >
-              {tab.icon} {tab.label}
-            </button>
-          ))}
-        </div>
-      </nav>
-
-      {/* Main content */}
-      <main className="max-w-[1600px] mx-auto px-4 sm:px-6 py-6 space-y-6">
-        {error && (
-          <div className="rounded-xl border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-400">
-            {error} — Check API URL, CORS, and backend logs.
-          </div>
-        )}
-
-        {/* Feature Tabs */}
-        {mainTab === "funnel" && <FunnelPanel />}
-        {mainTab === "ltv" && <LtvPanel />}
-        {mainTab === "journey" && <JourneyPanel startDate={windowStart} endDate={windowEnd} />}
-        {mainTab === "cohort" && <CohortPanel />}
-        {mainTab === "capi" && <CapiPanel />}
-        {mainTab === "spend" && (
-          <SpendImportPanel startDate={windowStart} endDate={windowEnd} onImported={loadReport} />
-        )}
-        {mainTab === "names" && <AdNamesPanel />}
-
-        {/* Sync status bar */}
-        {mainTab === "attribution" && (
-          <div className="flex items-center gap-3 text-[11px]">
-            <span className="text-gray-600">
-              {syncingSpend ? (
-                <span className="text-brand-400 flex items-center gap-1"><RefreshCw size={10} className="animate-spin" /> Syncing all platforms...</span>
-              ) : lastAutoSyncAt ? (
-                <span className="text-gray-500">Last sync: {new Date(lastAutoSyncAt).toLocaleTimeString()} · Auto every 10m</span>
-              ) : (
-                <span className="text-gray-600">Syncing on load...</span>
               )}
-            </span>
-            {syncErrors.length > 0 && (
-              <div className="min-w-0 flex-1 max-h-24 overflow-auto rounded-lg border border-yellow-500/25 bg-yellow-500/10 px-2.5 py-2 text-[10px] text-yellow-300">
-                <div className="font-semibold uppercase tracking-wide">Sync needs attention</div>
-                <div className="mt-1 space-y-1">
-                  {syncErrors.map((syncError, index) => (
-                    <div key={`${syncError}-${index}`} className="break-words">
-                      {compactSyncError(syncError)}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
 
-        {mainTab === "attribution" && report && (
-          <>
-            <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)]/70 p-3">
-              <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Model: {modelLabel(model)}</span>
-                <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Window: {activeWindowLabel}</span>
-                <span className="px-2 py-1 rounded bg-white/5 text-gray-300">Basis: {useClickDate ? "Click Date" : "Conversion Date"}</span>
-              </div>
-            </div>
-
-            {/* Summary KPI Cards */}
-            <SummaryCards
-              totals={report.summary_totals}
-              compareTotals={compareReport?.summary_totals}
-              compareLabel={compareLabel}
-              showCompareBanner={false}
-            />
-
-            {/* Main attribution grid */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-              <div className="lg:col-span-2 space-y-6">
-                <PlatformComparisonTable
-                  rows={report.platform_comparison?.rows || []}
-                  compareRows={compareReport?.platform_comparison?.rows || []}
-                  compareLabel={compareLabel}
-                />
-
-                <PerformanceChart
-                  data={report.charts?.time_series || []}
-                  compareData={compareReport?.charts?.time_series || []}
-                  compareLabel={compareLabel}
-                />
-                <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                  <TrafficValueChart
-                    data={report.charts?.time_series || []}
-                    compareData={compareReport?.charts?.time_series || []}
-                    compareLabel={compareLabel}
-                  />
-                  <CumulativePerformanceChart
-                    data={report.charts?.time_series || []}
-                    compareData={compareReport?.charts?.time_series || []}
-                    compareLabel={compareLabel}
-                  />
-                </div>
-                <PlatformMixChart
-                  rows={report.platform_comparison?.rows || []}
-                  compareRows={compareReport?.platform_comparison?.rows || []}
-                  compareLabel={compareLabel}
-                />
-              </div>
-              <div className="space-y-4">
-                <FunnelSnapshotTable
-                  rows={report.funnels?.rows || []}
-                  compareRows={compareReport?.funnels?.rows || []}
-                  compareLabel={compareLabel}
-                />
-                <TrackingHealth
-                  tracking={report.tracking}
-                  freshness={report.diagnostics?.data_freshness}
-                  wsConnected={wsConnected}
-                />
-                <LiveFeed events={liveEvents} connected={wsConnected} />
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)]/70 p-3">
-              <div className="flex flex-wrap items-end gap-2">
-                <div className="min-w-[170px]">
-                  <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Compare</div>
+              {showReportControls && (
+                <>
+                  <ModelSelect value={model} onChange={setModel} />
                   <select
-                    value={compareMode}
-                    onChange={(e) => setCompareMode(e.target.value as CompareMode)}
-                    className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
+                    value={useClickDate ? "click" : "conversion"}
+                    onChange={(e) => setUseClickDate(e.target.value === "click")}
+                    className="h-[34px] rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[13px] text-ink focus:border-brand-500 focus:outline-none"
+                    aria-label="Attribution date basis"
                   >
-                    <option value="none">No Comparison</option>
-                    <option value="previous_period">Previous Period</option>
-                    <option value="custom_range">Custom Range</option>
-                    <option value="model">Another Model</option>
+                    <option value="conversion">Conversion Date</option>
+                    <option value="click">Click Date</option>
                   </select>
-                </div>
+                </>
+              )}
 
-                {compareMode === "custom_range" && (
-                  <div className="min-w-[290px]">
-                    <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Comparison Range</div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <input
-                        type="date"
-                        value={compareStartDate}
-                        onChange={(e) => setCompareStartDate(e.target.value)}
-                        className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-                        aria-label="Comparison start date"
-                      />
-                      <input
-                        type="date"
-                        value={compareEndDate}
-                        onChange={(e) => setCompareEndDate(e.target.value)}
-                        className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-                        aria-label="Comparison end date"
-                      />
-                    </div>
-                  </div>
-                )}
+              {section !== "leads" && section !== "settings" && (
+                <button
+                  onClick={() => setAutoRefresh((v) => !v)}
+                  className={`flex h-[34px] items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium transition-colors ${
+                    autoRefresh
+                      ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/20"
+                      : "bg-white/5 text-ink-dim hover:bg-white/10"
+                  }`}
+                  title={autoRefresh ? "Disable live refresh" : "Enable live refresh"}
+                >
+                  <RefreshCw size={13} /> {autoRefresh ? "Live On" : "Live Off"}
+                </button>
+              )}
 
-                {compareMode === "model" && (
-                  <div className="min-w-[170px]">
-                    <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Comparison Model</div>
-                    <select
-                      value={compareModel}
-                      onChange={(e) => setCompareModel(e.target.value)}
-                      className="w-full bg-[var(--card)] border border-[var(--card-border)] rounded-lg px-2.5 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-brand-500"
-                    >
-                      {MODELS.map((m) => (
-                        <option key={m.value} value={m.value}>{m.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                )}
+              {section !== "leads" && section !== "settings" && (
+                <button
+                  onClick={async () => { await syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true }); await loadReport(); }}
+                  disabled={syncingSpend}
+                  className="flex h-[34px] items-center gap-1.5 rounded-lg bg-brand-600 px-3 text-[13px] font-semibold text-white transition-colors hover:bg-brand-700 disabled:opacity-50"
+                >
+                  <RefreshCw size={13} className={syncingSpend ? "animate-spin" : ""} />
+                  {syncingSpend ? "Syncing..." : "Sync"}
+                </button>
+              )}
 
-                <div className="ml-auto text-[11px]">
-                  <span className={`px-2 py-1 rounded ${compareReport ? "bg-blue-500/15 text-blue-300" : "bg-white/5 text-gray-500"}`}>
-                    {compareReport ? `Comparing vs ${compareLabel}` : "Comparison Off"}
-                  </span>
-                </div>
-              </div>
             </div>
-
-            {/* Attribution Table */}
-            <AttributionTable
-              columns={report.table.columns}
-              rows={report.table.rows}
-              totals={report.table.totals_row}
-              compareRows={compareReport?.table?.rows || []}
-              compareLabel={compareLabel}
-              activeTab={activeTab}
-              onTabChange={handleTabChange}
-              startDate={windowStart}
-              endDate={windowEnd}
-              model={model}
-              lookbackDays={30}
-              useClickDate={useClickDate}
-              platformFilter={platformFilter}
-              onPlatformFilterChange={setPlatformFilter}
-            />
-
-            {/* Top Winners & Losers */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-4">
-                <h3 className="text-sm font-semibold text-emerald-400 mb-3 flex items-center gap-2">
-                  <BarChart3 size={14} /> Top Winners
-                </h3>
-                <div className="space-y-2">
-                  {(report.charts?.top_winners || []).map((w: any, i: number) => (
-                    <div key={i} className="flex items-center justify-between text-xs">
-                      <span className="text-gray-300 truncate max-w-[200px]">{w.name}</span>
-                      <span className="text-emerald-400 font-medium">
-                        ${Number(w.profit).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-4">
-                <h3 className="text-sm font-semibold text-red-400 mb-3 flex items-center gap-2">
-                  <BarChart3 size={14} /> Top Losers
-                </h3>
-                <div className="space-y-2">
-                  {(report.charts?.top_losers || []).map((w: any, i: number) => (
-                    <div key={i} className="flex items-center justify-between text-xs">
-                      <span className="text-gray-300 truncate max-w-[200px]">{w.name}</span>
-                      <span className="text-red-400 font-medium">
-                        ${Number(w.profit).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* Action Plan */}
-            {report.action_plan && report.action_plan.length > 0 && (
-              <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-4">
-                <h3 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
-                  <Settings size={14} /> Recommended Actions
-                </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {report.action_plan.map((a: any, i: number) => (
-                    <div
-                      key={i}
-                      className="rounded-lg border border-[var(--card-border)] p-3 bg-white/[0.01]"
-                    >
-                      <div className="text-xs font-semibold text-gray-200 mb-1">{a.title}</div>
-                      <div className="text-[11px] text-gray-500 mb-2">{a.why}</div>
-                      <div className="flex gap-2 text-[10px]">
-                        <span className={`px-1.5 py-0.5 rounded ${a.expected_impact === "high" ? "bg-emerald-500/10 text-emerald-400" : "bg-yellow-500/10 text-yellow-400"}`}>
-                          Impact: {a.expected_impact}
-                        </span>
-                        <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
-                          Effort: {a.effort}
-                        </span>
-                      </div>
-                      <ul className="mt-2 space-y-0.5">
-                        {a.steps.map((s: string, j: number) => (
-                          <li key={j} className="text-[11px] text-gray-500 flex gap-1">
-                            <span className="text-gray-600">•</span> {s}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Diagnostics */}
-            {report.diagnostics && (
-              <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-4 text-xs text-gray-500">
-                <h3 className="text-sm font-semibold text-gray-400 mb-2">Diagnostics</h3>
-                <div className="space-y-1">
-                  <p>Model: {report.report_meta?.attribution_model} | Lookback: {report.report_meta?.filters_applied?.lookback_days}d | Date basis: {report.report_meta?.use_date_of_click_attribution ? "Click" : "Conversion"}</p>
-                  <p>Last event: {report.diagnostics.data_freshness?.last_event_ts || "—"} | Last spend: {report.diagnostics.data_freshness?.last_spend_ts || "—"}</p>
-                  {report.diagnostics.anomalies?.map((a: any, i: number) => (
-                    <p key={i} className="text-yellow-500">⚠ {a.what} — {a.likely_cause}</p>
-                  ))}
-                </div>
-              </div>
-            )}
-          </>
-        )}
-
-        {mainTab === "attribution" && loading && !report && (
-          <div className="flex items-center justify-center py-24">
-            <RefreshCw size={24} className="animate-spin text-brand-500" />
           </div>
-        )}
+        </div>
+
+        <div className="px-6 py-6">
+          {error && (
+            <div className="mb-5 rounded-xl border border-rose-500/30 bg-rose-500/5 p-4 text-sm text-rose-400">
+              {error} — Check API URL, CORS, and backend logs.
+            </div>
+          )}
+
+          {/* ───────── Dashboard ───────── */}
+          {section === "dashboard" && (
+            report ? (
+              <DashboardView report={report} compareReport={compareReport} compareCaption={compareCaption} />
+            ) : (
+              <div className="flex items-center justify-center py-24">
+                <RefreshCw size={24} className="animate-spin text-brand-500" />
+              </div>
+            )
+          )}
+
+          {/* ───────── Leads ───────── */}
+          {section === "leads" && <LeadsView startDate={windowStart} endDate={windowEnd} />}
+
+          {/* ───────── Settings ───────── */}
+          {section === "settings" && <ConnectionsView />}
+
+          {/* ───────── Reports ───────── */}
+          {section === "reports" && (
+            <div className="space-y-5">
+              {/* Report sub-tabs */}
+              <div className="flex items-center gap-1 overflow-x-auto border-b border-[var(--card-border)]">
+                {REPORT_TABS.map((tab) => (
+                  <button
+                    key={tab.key}
+                    onClick={() => setMainTab(tab.key)}
+                    className={`-mb-px flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-[13px] transition-colors ${
+                      mainTab === tab.key
+                        ? "border-brand-500 font-medium text-ink-bright"
+                        : "border-transparent text-ink-dim hover:text-ink"
+                    }`}
+                  >
+                    {tab.icon} {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              {mainTab === "funnel" && <FunnelPanel />}
+              {mainTab === "ltv" && <LtvPanel />}
+              {mainTab === "journey" && <JourneyPanel startDate={windowStart} endDate={windowEnd} />}
+              {mainTab === "cohort" && <CohortPanel />}
+              {mainTab === "capi" && <CapiPanel />}
+              {mainTab === "spend" && (
+                <SpendImportPanel startDate={windowStart} endDate={windowEnd} onImported={loadReport} />
+              )}
+              {mainTab === "names" && <AdNamesPanel />}
+
+              {mainTab === "attribution" && (
+                <>
+                  {/* Sync status */}
+                  <div className="flex items-center gap-3 text-[11px]">
+                    <span className="text-ink-faint">
+                      {syncingSpend ? (
+                        <span className="flex items-center gap-1 text-brand-400"><RefreshCw size={10} className="animate-spin" /> Syncing all platforms...</span>
+                      ) : lastAutoSyncAt ? (
+                        <span className="text-ink-dim">Last sync: {new Date(lastAutoSyncAt).toLocaleTimeString()} · Auto every 10m</span>
+                      ) : (
+                        <span className="text-ink-faint">Syncing on load...</span>
+                      )}
+                    </span>
+                    {syncErrors.length > 0 && (
+                      <div className="max-h-24 min-w-0 flex-1 overflow-auto rounded-lg border border-yellow-500/25 bg-yellow-500/10 px-2.5 py-2 text-[10px] text-yellow-300">
+                        <div className="font-semibold uppercase tracking-wide">Sync needs attention</div>
+                        <div className="mt-1 space-y-1">
+                          {syncErrors.map((syncError, index) => (
+                            <div key={`${syncError}-${index}`} className="break-words">{compactSyncError(syncError)}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {report && (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                        <span className="rounded-md bg-white/5 px-2 py-1 text-ink-dim">Model: {modelLabel(model)}</span>
+                        <span className="rounded-md bg-white/5 px-2 py-1 text-ink-dim">Window: {activeWindowLabel}</span>
+                        <span className="rounded-md bg-white/5 px-2 py-1 text-ink-dim">Basis: {useClickDate ? "Click Date" : "Conversion Date"}</span>
+                      </div>
+
+                      <SummaryCards
+                        totals={report.summary_totals}
+                        compareTotals={compareReport?.summary_totals}
+                        compareLabel={compareLabel}
+                        showCompareBanner={false}
+                      />
+
+                      <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-3">
+                        <div className="space-y-6 lg:col-span-2">
+                          <PlatformComparisonTable
+                            rows={report.platform_comparison?.rows || []}
+                            compareRows={compareReport?.platform_comparison?.rows || []}
+                            compareLabel={compareLabel}
+                          />
+                          <PerformanceChart
+                            data={report.charts?.time_series || []}
+                            compareData={compareReport?.charts?.time_series || []}
+                            compareLabel={compareLabel}
+                          />
+                          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+                            <TrafficValueChart
+                              data={report.charts?.time_series || []}
+                              compareData={compareReport?.charts?.time_series || []}
+                              compareLabel={compareLabel}
+                            />
+                            <CumulativePerformanceChart
+                              data={report.charts?.time_series || []}
+                              compareData={compareReport?.charts?.time_series || []}
+                              compareLabel={compareLabel}
+                            />
+                          </div>
+                          <PlatformMixChart
+                            rows={report.platform_comparison?.rows || []}
+                            compareRows={compareReport?.platform_comparison?.rows || []}
+                            compareLabel={compareLabel}
+                          />
+                        </div>
+                        <div className="space-y-4">
+                          <FunnelSnapshotTable
+                            rows={report.funnels?.rows || []}
+                            compareRows={compareReport?.funnels?.rows || []}
+                            compareLabel={compareLabel}
+                          />
+                          <TrackingHealth
+                            tracking={report.tracking}
+                            freshness={report.diagnostics?.data_freshness}
+                            wsConnected={wsConnected}
+                          />
+                          <LiveFeed events={liveEvents} connected={wsConnected} />
+                        </div>
+                      </div>
+
+                      {/* Advanced comparison controls */}
+                      <div className="rounded-xl border border-[var(--card-border)] bg-[var(--surface)] p-3">
+                        <div className="flex flex-wrap items-end gap-2">
+                          <div className="min-w-[170px]">
+                            <div className="mb-1 text-[10px] uppercase tracking-wide text-ink-dim">Compare</div>
+                            <select
+                              value={effectiveCompareMode}
+                              onChange={(e) => {
+                                const v = e.target.value as CompareMode;
+                                if (v === "none") {
+                                  setCompareEnabled(false);
+                                } else {
+                                  setCompareEnabled(true);
+                                  setAutoCompare(v === "previous_period");
+                                  setCompareMode(v);
+                                }
+                              }}
+                              className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-xs text-ink focus:border-brand-500 focus:outline-none"
+                            >
+                              <option value="none">No Comparison</option>
+                              <option value="previous_period">Previous Period</option>
+                              <option value="custom_range">Custom Range</option>
+                              <option value="model">Another Model</option>
+                            </select>
+                          </div>
+
+                          {effectiveCompareMode === "custom_range" && (
+                            <div className="min-w-[290px]">
+                              <div className="mb-1 text-[10px] uppercase tracking-wide text-ink-dim">Comparison Range</div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <input type="date" value={compareStartDate} onChange={(e) => setCompareStartDate(e.target.value)}
+                                  className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-xs text-ink focus:border-brand-500 focus:outline-none" />
+                                <input type="date" value={compareEndDate} onChange={(e) => setCompareEndDate(e.target.value)}
+                                  className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-xs text-ink focus:border-brand-500 focus:outline-none" />
+                              </div>
+                            </div>
+                          )}
+
+                          {effectiveCompareMode === "model" && (
+                            <div className="min-w-[170px]">
+                              <div className="mb-1 text-[10px] uppercase tracking-wide text-ink-dim">Comparison Model</div>
+                              <select value={compareModel} onChange={(e) => setCompareModel(e.target.value)}
+                                className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-xs text-ink focus:border-brand-500 focus:outline-none">
+                                {MODELS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                              </select>
+                            </div>
+                          )}
+
+                          <div className="ml-auto text-[11px]">
+                            <span className={`rounded px-2 py-1 ${compareReport ? "bg-blue-500/15 text-blue-300" : "bg-white/5 text-ink-faint"}`}>
+                              {compareReport ? `Comparing vs ${compareLabel}` : "Comparison Off"}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <AttributionTable
+                        columns={report.table.columns}
+                        rows={report.table.rows}
+                        totals={report.table.totals_row}
+                        compareRows={compareReport?.table?.rows || []}
+                        compareLabel={compareLabel}
+                        activeTab={activeTab}
+                        onTabChange={handleTabChange}
+                        startDate={windowStart}
+                        endDate={windowEnd}
+                        model={model}
+                        lookbackDays={30}
+                        useClickDate={useClickDate}
+                        platformFilter={platformFilter}
+                        onPlatformFilterChange={setPlatformFilter}
+                      />
+
+                      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                        <div className="hpanel p-4">
+                          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-emerald-400">
+                            <BarChart3 size={14} /> Top Winners
+                          </h3>
+                          <div className="space-y-2">
+                            {(report.charts?.top_winners || []).map((w: any, i: number) => (
+                              <div key={i} className="flex items-center justify-between text-xs">
+                                <span className="max-w-[200px] truncate text-ink">{w.name}</span>
+                                <span className="font-medium text-emerald-400">
+                                  ${Number(w.profit).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="hpanel p-4">
+                          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-rose-400">
+                            <BarChart3 size={14} /> Top Losers
+                          </h3>
+                          <div className="space-y-2">
+                            {(report.charts?.top_losers || []).map((w: any, i: number) => (
+                              <div key={i} className="flex items-center justify-between text-xs">
+                                <span className="max-w-[200px] truncate text-ink">{w.name}</span>
+                                <span className="font-medium text-rose-400">
+                                  ${Number(w.profit).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      {report.action_plan && report.action_plan.length > 0 && (
+                        <div className="hpanel p-4">
+                          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-ink">
+                            <Settings size={14} /> Recommended Actions
+                          </h3>
+                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+                            {report.action_plan.map((a: any, i: number) => (
+                              <div key={i} className="rounded-lg border border-[var(--card-border)] bg-white/[0.01] p-3">
+                                <div className="mb-1 text-xs font-semibold text-ink-bright">{a.title}</div>
+                                <div className="mb-2 text-[11px] text-ink-dim">{a.why}</div>
+                                <div className="flex gap-2 text-[10px]">
+                                  <span className={`rounded px-1.5 py-0.5 ${a.expected_impact === "high" ? "bg-emerald-500/10 text-emerald-400" : "bg-yellow-500/10 text-yellow-400"}`}>
+                                    Impact: {a.expected_impact}
+                                  </span>
+                                  <span className="rounded bg-blue-500/10 px-1.5 py-0.5 text-blue-400">Effort: {a.effort}</span>
+                                </div>
+                                <ul className="mt-2 space-y-0.5">
+                                  {a.steps.map((s: string, j: number) => (
+                                    <li key={j} className="flex gap-1 text-[11px] text-ink-dim">
+                                      <span className="text-ink-faint">•</span> {s}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {report.diagnostics && (
+                        <div className="hpanel p-4 text-xs text-ink-dim">
+                          <h3 className="mb-2 text-sm font-semibold text-ink">Diagnostics</h3>
+                          <div className="space-y-1">
+                            <p>Model: {report.report_meta?.attribution_model} | Lookback: {report.report_meta?.filters_applied?.lookback_days}d | Date basis: {report.report_meta?.use_date_of_click_attribution ? "Click" : "Conversion"}</p>
+                            <p>Last event: {report.diagnostics.data_freshness?.last_event_ts || "—"} | Last spend: {report.diagnostics.data_freshness?.last_spend_ts || "—"}</p>
+                            {report.diagnostics.anomalies?.map((a: any, i: number) => (
+                              <p key={i} className="text-yellow-500">⚠ {a.what} — {a.likely_cause}</p>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {loading && !report && (
+                    <div className="flex items-center justify-center py-24">
+                      <RefreshCw size={24} className="animate-spin text-brand-500" />
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </main>
     </div>
   );

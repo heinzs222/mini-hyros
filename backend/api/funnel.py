@@ -59,7 +59,13 @@ def _build_funnel(db_path: str, where_clause: str = "", params: list = None) -> 
     top_count = stages[0]["count"] if stages else 0
     for i, stage in enumerate(stages):
         prev_count = stages[i - 1]["count"] if i > 0 else stage["count"]
-        stage["step_rate"] = round(stage["count"] / max(prev_count, 1) * 100, 1) if i > 0 else 100.0
+        if i == 0:
+            stage["step_rate"] = 100.0
+        elif prev_count > 0:
+            stage["step_rate"] = round(stage["count"] / prev_count * 100, 1)
+        else:
+            # No base population at the previous stage → a step rate is undefined.
+            stage["step_rate"] = None
         stage["overall_rate"] = round(stage["count"] / max(top_count, 1) * 100, 1)
         stage["drop_off"] = (prev_count - stage["count"]) if i > 0 else 0
 

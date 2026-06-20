@@ -54,8 +54,8 @@ export default function FunnelPanel() {
                   <div className="w-20 text-right flex-shrink-0">
                     {i > 0 && (
                       <div className="text-xs">
-                        <span className={stage.step_rate >= 50 ? "text-emerald-400" : stage.step_rate >= 20 ? "text-yellow-400" : "text-red-400"}>
-                          {stage.step_rate}%
+                        <span className={stage.step_rate == null ? "text-gray-500" : stage.step_rate >= 50 ? "text-emerald-400" : stage.step_rate >= 20 ? "text-yellow-400" : "text-red-400"}>
+                          {stage.step_rate == null ? "—" : `${stage.step_rate}%`}
                         </span>
                         <span className="text-gray-600 ml-1">step</span>
                       </div>
