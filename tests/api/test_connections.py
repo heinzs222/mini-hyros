@@ -4,10 +4,11 @@
   GET /api/connections/setup-guide  — static setup instructions
 
 Without ``?validate=true`` the status endpoint derives everything from
-environment variables (no DB access, no outbound HTTP), so tests toggle the
-relevant vars with monkeypatch. Each platform reports ``configured`` (its
-required env vars are present) and a ``state`` that is ``not_configured`` until
-configured and ``unknown`` until a live validation is run.
+credential presence (env vars, plus stored credentials for GHL) with no
+outbound HTTP, so tests toggle the relevant vars with monkeypatch. Each
+platform reports ``configured`` (its required credentials are present) and a
+``state`` that is ``not_configured`` until configured and ``unknown`` until a
+live validation is run.
 """
 
 from __future__ import annotations
@@ -16,12 +17,15 @@ import asyncio
 
 import api.connections as connections
 
-# Every env var the module reads (platform creds + Stripe key + webhook secrets).
+# Every credential the module reads (ad platforms + Stripe + GHL + webhook secrets).
 ALL_ENV_VARS = (
     [env_var for keys in connections.PLATFORM_ENV_KEYS.values() for env_var in keys.values()]
     + ["STRIPE_API_SECRET_KEY", "STRIPE_SECRET_KEY"]
     + ["SHOPIFY_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET"]
+    + ["GHL_API_TOKEN", "GHL_ACCESS_TOKEN", "GHL_LOCATION_ID"]
 )
+
+EXPECTED_PLATFORMS = ["meta", "google", "tiktok", "stripe", "ghl"]
 
 
 def _clear_all(monkeypatch):
@@ -39,14 +43,14 @@ def test_status_all_disconnected_by_default(client, monkeypatch):
     body = r.json()
 
     names = [p["platform"] for p in body["platforms"]]
-    assert names == ["meta", "google", "tiktok", "stripe"]
+    assert names == EXPECTED_PLATFORMS
     for p in body["platforms"]:
-        # Without any env vars set, nothing is configured and the env-only path
-        # never reaches a live check, so state is "not_configured".
+        # Without any credentials set, nothing is configured and the env-only
+        # path never reaches a live check, so state is "not_configured".
         assert p["configured"] is False
         assert p["state"] == "not_configured"
         assert p["checked_at"] is None
-        # Each field reflects whether its env var is set (all False here).
+        # Each field reflects whether its credential is set (all False here).
         assert all(v is False for v in p["fields"].values())
         assert isinstance(p["required_env"], list)
         assert p["detail"] == "Required credentials are not set."
@@ -60,7 +64,7 @@ def test_status_all_disconnected_by_default(client, monkeypatch):
     assert body["validated"] is False
     assert body["summary"]["connected"] == 0
     assert body["summary"]["configured"] == 0
-    assert body["summary"]["total"] == 4
+    assert body["summary"]["total"] == len(EXPECTED_PLATFORMS)
 
 
 def test_status_meta_configured(client, monkeypatch):
@@ -86,6 +90,7 @@ def test_status_meta_configured(client, monkeypatch):
     assert by_platform["google"]["configured"] is False
     assert by_platform["tiktok"]["configured"] is False
     assert by_platform["stripe"]["configured"] is False
+    assert by_platform["ghl"]["configured"] is False
 
 
 def test_status_partial_creds_not_configured(client, monkeypatch):
@@ -122,6 +127,17 @@ def test_status_stripe_configured(client, monkeypatch):
     assert stripe["fields"] == {"secret_key": True}
 
 
+def test_status_ghl_configured_via_env(client, monkeypatch):
+    _clear_all(monkeypatch)
+    monkeypatch.setenv("GHL_API_TOKEN", "pit-token")
+    monkeypatch.setenv("GHL_LOCATION_ID", "loc_123")
+
+    ghl = next(p for p in client.get("/api/connections/status").json()["platforms"] if p["platform"] == "ghl")
+    assert ghl["label"] == "GoHighLevel"
+    assert ghl["configured"] is True
+    assert ghl["fields"] == {"api_token": True, "location_id": True}
+
+
 def test_status_webhooks_configured(client, monkeypatch):
     _clear_all(monkeypatch)
     monkeypatch.setenv("SHOPIFY_WEBHOOK_SECRET", "shh")
@@ -132,19 +148,24 @@ def test_status_webhooks_configured(client, monkeypatch):
     assert webhooks["stripe"]["configured"] is True
 
 
-# ── unit: _platform_status edge cases ───────────────────────────────────────────
+# ── unit: status/field-helper edge cases ────────────────────────────────────────
 
 
 def test_platform_status_unknown_platform(monkeypatch):
     _clear_all(monkeypatch)
-    # An unknown platform has no required env and no field map; with validation
-    # off it returns its base record without touching the network, so it is
-    # never "connected".
+    # An unknown platform has no field map; with validation off it returns its
+    # base record without touching the network, so it is never "connected".
     status = asyncio.run(connections._platform_status("snapchat", validate=False, client=None))
     assert status["platform"] == "snapchat"
     assert status["state"] != "connected"
     assert status["fields"] == {}
     assert status["checked_at"] is None
+
+
+def test_env_fields_unknown_platform_is_empty():
+    # No env keys for an unknown platform -> empty field map and no missing vars.
+    assert connections._env_fields("snapchat") == {}
+    assert connections._missing_env("snapchat") == []
 
 
 # ── GET /setup-guide ─────────────────────────────────────────────────────────────
@@ -154,14 +175,14 @@ def test_setup_guide_returns_all_platforms(client):
     r = client.get("/api/connections/setup-guide")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"meta", "google", "tiktok", "shopify", "stripe"}
+    assert set(body) == {"meta", "google", "tiktok", "shopify", "stripe", "ghl"}
 
-    # Ad platforms carry steps + api_docs.
-    for plat in ("meta", "google", "tiktok"):
+    # Platforms that carry steps + api_docs.
+    for plat in ("meta", "google", "tiktok", "ghl"):
         assert isinstance(body[plat]["steps"], list) and body[plat]["steps"]
         assert body[plat]["api_docs"].startswith("https://")
 
-    # Webhook platforms carry steps only.
+    # Webhook / key platforms carry steps only.
     for plat in ("shopify", "stripe"):
         assert isinstance(body[plat]["steps"], list) and body[plat]["steps"]
         assert "api_docs" not in body[plat]

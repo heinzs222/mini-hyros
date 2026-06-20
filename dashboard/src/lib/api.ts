@@ -369,6 +369,36 @@ export async function fetchStripeStatus() {
   return res.json();
 }
 
+// ── GoHighLevel ───────────────────────────────────────────────────────────────
+export async function syncGhl(params: {
+  start_date?: string;
+  end_date?: string;
+} = {}) {
+  const sp = new URLSearchParams();
+  if (params.start_date) sp.set("start_date", params.start_date);
+  if (params.end_date) sp.set("end_date", params.end_date);
+  const url = `${API_BASE}/api/ghl/sync${sp.toString() ? `?${sp.toString()}` : ""}`;
+  const res = await apiFetch(url, { method: "POST" });
+  if (!res.ok) throw new Error(`GHL sync failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchGhlStatus() {
+  const res = await apiFetch(`${API_BASE}/api/ghl/status`);
+  if (!res.ok) throw new Error(`GHL status failed: ${res.status}`);
+  return res.json();
+}
+
+export async function connectGhl(payload: { api_token: string; location_id: string }) {
+  const res = await apiFetch(`${API_BASE}/api/ghl/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok && res.status !== 400) throw new Error(`GHL connect failed: ${res.status}`);
+  return res.json();
+}
+
 // ── Platform Auth ─────────────────────────────────────────────────────────────
 export async function fetchTikTokStatus(signal?: AbortSignal) {
   const res = await apiFetch(`${API_BASE}/api/platform-auth/tiktok/status`, {}, signal);
