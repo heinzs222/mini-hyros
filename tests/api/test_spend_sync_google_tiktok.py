@@ -20,7 +20,7 @@ from httpx import Response
 
 import api.spend_sync as ss
 from attributionops.tools.ads import ads_list_platforms
-from tests.helpers import ad_name, insert_rows
+from tests.helpers import ad_name, insert_rows, spend
 
 
 # ── pure helpers ───────────────────────────────────────────────────────────────
@@ -521,3 +521,42 @@ def test_google_ads_script_push_no_usable_rows(client, api_db, monkeypatch):
     assert body["inserted"] == 0
     assert body["skipped"] >= 1
     assert body["warnings"]
+
+
+def test_google_ads_script_empty_replace_preserves_existing_google_spend(client, api_db, monkeypatch):
+    monkeypatch.setenv("GOOGLE_ADS_SCRIPT_TOKEN", "tok")
+    insert_rows(
+        api_db,
+        "spend",
+        [
+            spend(
+                platform="google",
+                date="2026-01-10",
+                account_id="1234567890",
+                campaign_id="existing-campaign",
+                adset_id="existing-group",
+                ad_id="existing-ad",
+                clicks=7,
+                cost=12.34,
+                impressions=99,
+            )
+        ],
+    )
+
+    r = client.post(
+        "/api/spend/google-ads-script",
+        json=_script_payload(rows=[]),
+        headers={"x-mini-hyros-token": "tok"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["inserted"] == 0
+    assert body["deleted"] == 0
+    assert "preserved" in " ".join(body["warnings"])
+
+    with sqlite3.connect(api_db) as conn:
+        row = conn.execute(
+            "SELECT clicks, cost, impressions FROM spend "
+            "WHERE platform='google' AND account_id='1234567890'"
+        ).fetchone()
+    assert row == ("7", "12.34", "99")

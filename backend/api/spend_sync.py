@@ -615,43 +615,21 @@ def _import_google_ads_script_rows(payload: GoogleAdsScriptSpendPayload) -> dict
     if not parsed_rows:
         start_date = _parse_import_date(payload.start_date)
         end_date = _parse_import_date(payload.end_date)
-        deleted = 0
-        if payload.replace and start_date and end_date:
-            if start_date > end_date:
-                start_date, end_date = end_date, start_date
-            db_path = _db()
-            _ensure_spend_table(db_path)
-            with connect(db_path) as conn:
-                if account_id_default:
-                    deleted = conn.execute(
-                        """
-                        DELETE FROM spend
-                        WHERE platform = 'google'
-                          AND date BETWEEN ? AND ?
-                          AND account_id = ?
-                        """,
-                        (start_date, end_date, account_id_default),
-                    ).rowcount
-                else:
-                    deleted = conn.execute(
-                        """
-                        DELETE FROM spend
-                        WHERE platform = 'google'
-                          AND date BETWEEN ? AND ?
-                        """,
-                        (start_date, end_date),
-                    ).rowcount
-                conn.commit()
+        if start_date and end_date and start_date > end_date:
+            start_date, end_date = end_date, start_date
+        warnings.append(
+            "No usable spend rows were received from Google Ads Script; existing Google spend rows were preserved."
+        )
 
         return {
             "ok": True,
             "platform": "google",
             "inserted": 0,
-            "deleted": int(deleted or 0),
+            "deleted": 0,
             "skipped": skipped,
             "date_range": {"start": start_date, "end": end_date} if start_date and end_date else {},
             "replace": bool(payload.replace),
-            "warnings": warnings or ["No usable spend rows were received from Google Ads Script."],
+            "warnings": warnings,
         }
 
     dates = [r["date"] for r in parsed_rows]

@@ -189,6 +189,8 @@ export default function DashboardPage() {
   const liveEventSeqRef = useRef(0);
   // Current main tab, mirrored into a ref so timers/WS handlers can gate on it.
   const mainTabRef = useRef("attribution");
+  // Current app section, mirrored for timers/WS handlers.
+  const sectionRef = useRef<Section>("dashboard");
 
   const effectiveCompareMode: CompareMode = !compareEnabled
     ? "none"
@@ -199,8 +201,10 @@ export default function DashboardPage() {
     : compareMode;
 
   const loadReport = useCallback(async () => {
-    // Only the attribution tab consumes the full report; skip elsewhere.
-    if (mainTab !== "attribution") return;
+    // Dashboard and the attribution report consume the full report; feature
+    // panels such as Journey/Spend/Ad Names load their own data.
+    const needsFullReport = section === "dashboard" || (section === "reports" && mainTab === "attribution");
+    if (!needsFullReport) return;
     // In-flight guard: do not stack report requests.
     if (reportInFlightRef.current) return;
 
@@ -310,6 +314,7 @@ export default function DashboardPage() {
     compareStartDate,
     compareEndDate,
     router,
+    section,
   ]);
 
   const syncSpendData = useCallback(async (
@@ -421,6 +426,10 @@ export default function DashboardPage() {
   }, [mainTab]);
 
   useEffect(() => {
+    sectionRef.current = section;
+  }, [section]);
+
+  useEffect(() => {
     if (!authChecked) return;
 
     const runBackgroundSync = async () => {
@@ -450,7 +459,8 @@ export default function DashboardPage() {
   // Auto-refresh every 30s — only on the attribution tab, paused while the tab is
   // hidden, and never while a report request is already in flight.
   useEffect(() => {
-    if (!autoRefresh || !authChecked || mainTab !== "attribution") return;
+    if (!autoRefresh || !authChecked) return;
+    if (section === "reports" && mainTab !== "attribution") return;
 
     const tick = () => {
       if (typeof document !== "undefined" && document.hidden) return;
@@ -479,7 +489,7 @@ export default function DashboardPage() {
         document.removeEventListener("visibilitychange", onVisibilityChange);
       }
     };
-  }, [autoRefresh, loadReport, authChecked, mainTab]);
+  }, [autoRefresh, loadReport, authChecked, mainTab, section]);
 
   useEffect(() => {
     if (!authChecked) return;
@@ -492,7 +502,7 @@ export default function DashboardPage() {
         if (wsRefetchTimerRef.current) clearTimeout(wsRefetchTimerRef.current);
         wsRefetchTimerRef.current = setTimeout(() => {
           wsRefetchTimerRef.current = null;
-          if (mainTabRef.current !== "attribution") return;
+          if (sectionRef.current === "reports" && mainTabRef.current !== "attribution") return;
           void loadReportRef.current();
         }, 1000);
       }
