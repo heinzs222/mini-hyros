@@ -1,5 +1,17 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+function defaultApiBase(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host !== "localhost" && host !== "127.0.0.1") {
+      return "https://mini-hyros.onrender.com";
+    }
+  }
+  return "http://localhost:8000";
+}
+
+const API_BASE = defaultApiBase();
 const AUTH_TOKEN_KEY = "hyros_auth_token";
+const API_TIMEOUT_MS = 20000;
 
 function readAuthToken(): string {
   if (typeof window === "undefined") return "";
@@ -27,7 +39,28 @@ export async function apiFetch(input: string, init: RequestInit = {}, signal?: A
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  return fetch(input, { ...init, headers, signal: signal ?? init.signal });
+
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), API_TIMEOUT_MS);
+  const providedSignal = signal ?? init.signal;
+  const controller = new AbortController();
+
+  const abort = () => controller.abort();
+  timeoutController.signal.addEventListener("abort", abort, { once: true });
+  providedSignal?.addEventListener("abort", abort, { once: true });
+
+  try {
+    return await fetch(input, { ...init, headers, signal: controller.signal });
+  } catch (err: any) {
+    if (controller.signal.aborted && !providedSignal?.aborted) {
+      throw new Error(`Request timed out: ${input}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+    timeoutController.signal.removeEventListener("abort", abort);
+    providedSignal?.removeEventListener("abort", abort);
+  }
 }
 
 export async function loginWithPassword(username: string, password: string) {
