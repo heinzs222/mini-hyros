@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import RedirectResponse, HTMLResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -37,6 +37,25 @@ TIKTOK_SCOPES = "advertiser.read,campaign.read,adgroup.read,ad.read,report.read"
 
 def _db() -> str:
     return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+
+
+def _request_origin(request: Request) -> str:
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _tiktok_redirect_uri(request: Request) -> str:
+    explicit = os.environ.get("TIKTOK_REDIRECT_URI", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+
+    backend_url = os.environ.get("BACKEND_URL", "").strip().rstrip("/")
+    frontend_url = os.environ.get("FRONTEND_URL", "").strip().rstrip("/")
+    if backend_url and backend_url != frontend_url and "vercel.app" not in backend_url:
+        return backend_url
+
+    return _request_origin(request) or "https://mini-hyros.onrender.com"
 
 
 def _now() -> str:
@@ -142,16 +161,15 @@ def _save_tiktok_token(db_path: str, access_token: str, refresh_token: str,
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/tiktok/connect")
-async def tiktok_connect():
+async def tiktok_connect(request: Request):
     """Return the TikTok authorization URL for the user to visit."""
     app_id = os.environ.get("TIKTOK_APP_ID", "").strip()
     if not app_id:
         return {"error": "TIKTOK_APP_ID not set in environment"}
 
-    backend_url = os.environ.get("BACKEND_URL", "https://mini-hyros.onrender.com").rstrip("/")
     # Use base URL as redirect_uri — matches TikTok's registered URL.
     # The root GET / handler forwards auth_code to /api/platform-auth/tiktok/callback.
-    redirect_uri = backend_url
+    redirect_uri = _tiktok_redirect_uri(request)
 
     from urllib.parse import quote
     auth_url = (
@@ -260,7 +278,7 @@ async def tiktok_refresh():
 
 
 @router.get("/tiktok/status")
-async def tiktok_status():
+async def tiktok_status(request: Request):
     """Return current TikTok token status."""
     db_path = _db()
     _ensure_tokens_table(db_path)
@@ -268,14 +286,13 @@ async def tiktok_status():
 
     app_id = os.environ.get("TIKTOK_APP_ID", "")
     env_token = os.environ.get("TIKTOK_ACCESS_TOKEN", "")
-    backend_url = os.environ.get("BACKEND_URL", "https://mini-hyros.onrender.com").rstrip("/")
-    redirect_uri = f"{backend_url}/api/platform-auth/tiktok/callback"
+    redirect_uri = _tiktok_redirect_uri(request)
     from urllib.parse import quote
     auth_url = (
         f"{TIKTOK_AUTH_BASE}"
         f"?app_id={app_id}"
         f"&state=tiktok_oauth"
-        f"&redirect_uri={quote(backend_url, safe='')}"
+        f"&redirect_uri={quote(redirect_uri, safe='')}"
         f"&scope={quote(TIKTOK_SCOPES, safe='')}"
     ) if app_id else ""
 

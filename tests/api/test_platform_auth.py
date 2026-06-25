@@ -92,6 +92,21 @@ def test_connect_without_app_id_returns_error(client, api_db, monkeypatch):
     assert resp.json() == {"error": "TIKTOK_APP_ID not set in environment"}
 
 
+def test_connect_uses_request_host_when_backend_url_is_frontend(client, api_db, monkeypatch):
+    monkeypatch.setenv("TIKTOK_APP_ID", "app-12345")
+    monkeypatch.setenv("BACKEND_URL", "https://mini-hyros.vercel.app")
+    monkeypatch.setenv("FRONTEND_URL", "https://mini-hyros.vercel.app")
+
+    resp = client.get(
+        "/api/platform-auth/tiktok/connect",
+        headers={"x-forwarded-proto": "https", "x-forwarded-host": "mini-hyros.onrender.com"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["redirect_uri"] == "https://mini-hyros.onrender.com"
+    assert f"redirect_uri={quote('https://mini-hyros.onrender.com', safe='')}" in body["auth_url"]
+
+
 # ── callback ────────────────────────────────────────────────────────────────────
 
 def test_callback_missing_auth_code_returns_400(client, api_db, monkeypatch):
