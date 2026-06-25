@@ -138,6 +138,25 @@ async def _validate_google(client: httpx.AsyncClient) -> tuple[str, str]:
 async def _validate_tiktok(client: httpx.AsyncClient) -> tuple[str, str]:
     token = os.environ.get("TIKTOK_ACCESS_TOKEN", "").strip()
     advertiser_id = os.environ.get("TIKTOK_ADVERTISER_ID", "").strip()
+    token_source = "env"
+    try:
+        from api.platform_auth import get_or_refresh_tiktok_token, get_tiktok_advertiser_id
+        from attributionops.config import default_db_path
+
+        db_path = os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+        db_token = (await get_or_refresh_tiktok_token(db_path)).strip()
+        db_advertiser_id = get_tiktok_advertiser_id(db_path).strip()
+        if db_token:
+            token = db_token
+            token_source = "oauth"
+        if db_advertiser_id:
+            advertiser_id = db_advertiser_id
+    except Exception:
+        pass
+
+    if not token or not advertiser_id:
+        return "not_configured", "TikTok access token or advertiser ID is missing."
+
     try:
         resp = await client.get(
             "https://business-api.tiktok.com/open_api/v1.3/advertiser/info/",
@@ -148,7 +167,7 @@ async def _validate_tiktok(client: httpx.AsyncClient) -> tuple[str, str]:
         code = body.get("code")
         msg = body.get("message") or "Unknown TikTok API error."
         if code == 0:
-            return "connected", "Access token valid with advertiser scope."
+            return "connected", f"Access token valid with advertiser scope ({token_source})."
         if code in (40001, 40002, 40100, 40105):
             return "invalid", f"Token missing required scope — {msg}"
         if code in (40010, 40104):
@@ -225,6 +244,16 @@ async def _platform_status(platform: str, validate: bool, client: httpx.AsyncCli
         configured = not missing
         required = REQUIRED_ENV.get(platform, [])
         fields = _env_fields(platform)
+        if platform == "tiktok" and not configured:
+            try:
+                from api.platform_auth import get_tiktok_advertiser_id, get_tiktok_token
+                from attributionops.config import default_db_path
+
+                db_path = os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+                if get_tiktok_token(db_path).strip() and get_tiktok_advertiser_id(db_path).strip():
+                    configured = True
+            except Exception:
+                pass
 
     base = {
         "platform": platform,

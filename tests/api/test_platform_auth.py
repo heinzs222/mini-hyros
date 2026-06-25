@@ -80,7 +80,7 @@ def test_connect_returns_auth_url_with_params(client, api_db, monkeypatch):
     # redirect_uri and scope are URL-encoded.
     assert f"redirect_uri={quote('https://my-backend.example.com', safe='')}" in url
     assert "scope=" in url
-    assert quote("campaign.read,adgroup.read,ad.read,report.read", safe="") in url
+    assert quote("advertiser.read,campaign.read,adgroup.read,ad.read,report.read", safe="") in url
 
 
 def test_connect_without_app_id_returns_error(client, api_db, monkeypatch):

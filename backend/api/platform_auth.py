@@ -32,6 +32,7 @@ UTC = timezone.utc
 TIKTOK_TOKEN_URL = "https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/"
 TIKTOK_REFRESH_URL = "https://business-api.tiktok.com/open_api/v1.3/oauth2/refresh_token/"
 TIKTOK_AUTH_BASE = "https://business-api.tiktok.com/portal/auth"
+TIKTOK_SCOPES = "advertiser.read,campaign.read,adgroup.read,ad.read,report.read"
 
 
 def _db() -> str:
@@ -153,13 +154,12 @@ async def tiktok_connect():
     redirect_uri = backend_url
 
     from urllib.parse import quote
-    scopes = "campaign.read,adgroup.read,ad.read,report.read"
     auth_url = (
         f"{TIKTOK_AUTH_BASE}"
         f"?app_id={app_id}"
         f"&state=tiktok_oauth"
         f"&redirect_uri={quote(redirect_uri, safe='')}"
-        f"&scope={quote(scopes, safe='')}"
+        f"&scope={quote(TIKTOK_SCOPES, safe='')}"
     )
     return {"auth_url": auth_url, "app_id": app_id, "redirect_uri": redirect_uri}
 
@@ -264,7 +264,14 @@ async def tiktok_status():
     env_token = os.environ.get("TIKTOK_ACCESS_TOKEN", "")
     backend_url = os.environ.get("BACKEND_URL", "https://mini-hyros.onrender.com").rstrip("/")
     redirect_uri = f"{backend_url}/api/platform-auth/tiktok/callback"
-    auth_url = f"{TIKTOK_AUTH_BASE}?app_id={app_id}&state=tiktok_oauth&redirect_uri={redirect_uri}" if app_id else ""
+    from urllib.parse import quote
+    auth_url = (
+        f"{TIKTOK_AUTH_BASE}"
+        f"?app_id={app_id}"
+        f"&state=tiktok_oauth"
+        f"&redirect_uri={quote(backend_url, safe='')}"
+        f"&scope={quote(TIKTOK_SCOPES, safe='')}"
+    ) if app_id else ""
 
     if rows and rows[0].get("access_token"):
         r = rows[0]
