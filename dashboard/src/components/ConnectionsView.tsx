@@ -88,8 +88,9 @@ export default function ConnectionsView() {
     setTiktokBusy(true);
     try {
       const res = await fetchTikTokConnectUrl();
-      if (res?.url) {
-        window.open(res.url, "_blank", "noopener");
+      const authUrl = res?.url || res?.auth_url;
+      if (authUrl) {
+        window.open(authUrl, "_blank", "noopener");
         toast.info("Opening TikTok authorization", { description: "Approve the requested scopes, then re-check." });
       } else {
         toast.error("TikTok connect unavailable", { description: res?.error || "No authorization URL returned." });

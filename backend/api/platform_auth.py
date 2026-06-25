@@ -161,7 +161,13 @@ async def tiktok_connect():
         f"&redirect_uri={quote(redirect_uri, safe='')}"
         f"&scope={quote(TIKTOK_SCOPES, safe='')}"
     )
-    return {"auth_url": auth_url, "app_id": app_id, "redirect_uri": redirect_uri}
+    return {
+        "auth_url": auth_url,
+        "url": auth_url,
+        "app_id": app_id,
+        "redirect_uri": redirect_uri,
+        "scopes": TIKTOK_SCOPES,
+    }
 
 
 @router.get("/tiktok/callback")
@@ -282,6 +288,7 @@ async def tiktok_status():
             "has_refresh_token": bool(r.get("refresh_token")),
             "updated_at": r.get("updated_at"),
             "auth_url": auth_url,
+            "url": auth_url,
         }
     if env_token:
         return {
@@ -290,5 +297,6 @@ async def tiktok_status():
             "advertiser_id": os.environ.get("TIKTOK_ADVERTISER_ID"),
             "has_refresh_token": False,
             "auth_url": auth_url,
+            "url": auth_url,
         }
-    return {"connected": False, "auth_url": auth_url}
+    return {"connected": False, "auth_url": auth_url, "url": auth_url}

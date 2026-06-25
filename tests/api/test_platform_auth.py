@@ -74,6 +74,8 @@ def test_connect_returns_auth_url_with_params(client, api_db, monkeypatch):
     assert body["redirect_uri"] == "https://my-backend.example.com"
 
     url = body["auth_url"]
+    assert body["url"] == url
+    assert body["scopes"] == "advertiser.read,campaign.read,adgroup.read,ad.read,report.read"
     assert url.startswith("https://business-api.tiktok.com/portal/auth")
     assert "app_id=app-12345" in url
     assert "state=tiktok_oauth" in url
@@ -283,6 +285,7 @@ def test_status_disconnected_on_fresh_db(client, api_db, monkeypatch):
     assert body["connected"] is False
     # auth_url is still provided so the UI can offer a connect link.
     assert body["auth_url"].startswith("https://business-api.tiktok.com/portal/auth")
+    assert body["url"] == body["auth_url"]
     assert "app_id=app-1" in body["auth_url"]
 
 
