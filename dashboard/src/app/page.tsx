@@ -162,10 +162,10 @@ export default function DashboardPage() {
   const [compareMode, setCompareMode] = useState<CompareMode>("previous_period");
   const [compareModel, setCompareModel] = useState("first_click");
   const [compareLabel, setCompareLabel] = useState("");
-  const [primaryStartDate, setPrimaryStartDate] = useState(daysAgo(6));
-  const [primaryEndDate, setPrimaryEndDate] = useState(daysAgo(0));
-  const [compareStartDate, setCompareStartDate] = useState(daysAgo(13));
-  const [compareEndDate, setCompareEndDate] = useState(daysAgo(7));
+  const [primaryStartDate, setPrimaryStartDate] = useState(daysAgo(7));
+  const [primaryEndDate, setPrimaryEndDate] = useState(daysAgo(1));
+  const [compareStartDate, setCompareStartDate] = useState(daysAgo(14));
+  const [compareEndDate, setCompareEndDate] = useState(daysAgo(8));
   const [useClickDate, setUseClickDate] = useState(false);
   const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
@@ -319,7 +319,7 @@ export default function DashboardPage() {
     if (syncingSpendRef.current) return null;
 
     const notify = Boolean(opts?.notify);
-    const syncEnd = range?.end_date || daysAgo(0);
+    const syncEnd = range?.end_date || daysAgo(1);
     const syncStart = range?.start_date || daysAgo(7);
     syncingSpendRef.current = true;
     setSyncingSpend(true);
