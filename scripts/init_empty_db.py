@@ -41,12 +41,18 @@ def init_db(db_path: str) -> None:
         conn.execute("""CREATE TABLE orders (
             order_id TEXT, ts TEXT, gross TEXT, net TEXT,
             refunds TEXT, chargebacks TEXT, cogs TEXT, fees TEXT,
-            customer_key TEXT, subscription_id TEXT
+            customer_key TEXT, subscription_id TEXT,
+            session_id TEXT DEFAULT '', visitor_id TEXT DEFAULT '',
+            channel TEXT DEFAULT '', platform TEXT DEFAULT '',
+            campaign_id TEXT DEFAULT '', adset_id TEXT DEFAULT '',
+            ad_id TEXT DEFAULT '', creative_id TEXT DEFAULT '',
+            gclid TEXT DEFAULT '', fbclid TEXT DEFAULT '', ttclid TEXT DEFAULT ''
         );""")
 
         conn.execute("""CREATE TABLE conversions (
             conversion_id TEXT, ts TEXT, type TEXT, value TEXT,
-            order_id TEXT, customer_key TEXT
+            order_id TEXT, customer_key TEXT,
+            session_id TEXT DEFAULT '', visitor_id TEXT DEFAULT ''
         );""")
 
         # Indexes for the warehouse access patterns used by the report/
@@ -65,6 +71,8 @@ def init_db(db_path: str) -> None:
         conn.execute("CREATE INDEX idx_touchpoints_ts ON touchpoints(ts);")
         conn.execute("CREATE INDEX idx_touchpoints_campaign_id ON touchpoints(campaign_id);")
         conn.execute("CREATE INDEX idx_orders_customer_key ON orders(customer_key);")
+        conn.execute("CREATE INDEX idx_orders_session_id ON orders(session_id);")
+        conn.execute("CREATE INDEX idx_orders_visitor_id ON orders(visitor_id);")
         conn.execute("CREATE INDEX idx_orders_ts ON orders(ts);")
         conn.execute("CREATE INDEX idx_orders_order_id ON orders(order_id);")
         conn.execute("CREATE INDEX idx_conversions_customer_key ON conversions(customer_key);")

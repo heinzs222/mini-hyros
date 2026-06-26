@@ -253,6 +253,121 @@ def test_touchpoint_one_second_before_window_is_excluded(empty_db):
 
 
 # ── date-of-click attribution ─────────────────────────────────────────────────
+def test_anonymous_order_can_attribute_by_session_id(empty_db):
+    insert_rows(
+        empty_db,
+        "touchpoints",
+        [
+            touchpoint(
+                "2026-01-14T09:00:00Z",
+                "",
+                platform="google",
+                campaign_id="g_campaign",
+                ad_id="g_ad",
+                session_id="sess_paid",
+            )
+        ],
+    )
+    insert_rows(
+        empty_db,
+        "orders",
+        [order("o1", "2026-01-15T12:00:00Z", "", net=100, session_id="sess_paid")],
+    )
+
+    result = attribution_run(
+        empty_db,
+        model="last_click",
+        start_date=JAN,
+        end_date=JAN_END,
+        lookback_days=30,
+        conversion_type="Purchase",
+        value_type="revenue",
+    )
+
+    assert result["unattributed_orders"] == 0
+    assert result["rows"][0]["platform"] == "google"
+    assert result["rows"][0]["campaign_id"] == "g_campaign"
+    assert result["rows"][0]["revenue"] == 100.00
+
+
+def test_legacy_pixel_order_recovers_session_from_same_timestamp_touchpoint(empty_db):
+    insert_rows(
+        empty_db,
+        "touchpoints",
+        [
+            touchpoint(
+                "2026-01-14T09:00:00Z",
+                "",
+                platform="tiktok",
+                campaign_id="tt_campaign",
+                ad_id="tt_ad",
+                session_id="sess_legacy",
+            ),
+            touchpoint(
+                "2026-01-15T12:00:00Z",
+                "",
+                channel="organic",
+                platform="",
+                campaign_id="",
+                adset_id="",
+                ad_id="",
+                creative_id="",
+                session_id="sess_legacy",
+            ),
+        ],
+    )
+    insert_rows(empty_db, "orders", [order("o1", "2026-01-15T12:00:00Z", "", net=100)])
+
+    result = attribution_run(
+        empty_db,
+        model="last_click",
+        start_date=JAN,
+        end_date=JAN_END,
+        lookback_days=30,
+        conversion_type="Purchase",
+        value_type="revenue",
+    )
+
+    assert result["unattributed_orders"] == 0
+    assert result["rows"][0]["platform"] == "tiktok"
+    assert result["rows"][0]["campaign_id"] == "tt_campaign"
+    assert result["rows"][0]["revenue"] == 100.00
+
+
+def test_order_direct_source_is_attributed_without_touchpoint(empty_db):
+    insert_rows(
+        empty_db,
+        "orders",
+        [
+            order(
+                "o1",
+                "2026-01-15T12:00:00Z",
+                "",
+                net=100,
+                channel="paid_social",
+                platform="meta",
+                campaign_id="m_campaign",
+                ad_id="m_ad",
+            )
+        ],
+    )
+
+    result = attribution_run(
+        empty_db,
+        model="last_click",
+        start_date=JAN,
+        end_date=JAN_END,
+        lookback_days=30,
+        conversion_type="Purchase",
+        value_type="revenue",
+    )
+
+    assert result["unattributed_orders"] == 0
+    assert result["rows"][0]["platform"] == "meta"
+    assert result["rows"][0]["campaign_id"] == "m_campaign"
+    assert result["rows"][0]["revenue"] == 100.00
+
+
 def test_click_date_basis_excludes_clicks_outside_report_window(empty_db):
     insert_rows(empty_db, "touchpoints", [touchpoint("2026-01-08T09:00:00Z", "c1", ad_id="ad_meta_2")])
     insert_rows(empty_db, "orders", [order("o1", "2026-01-12T12:00:00Z", "c1", net=100)])

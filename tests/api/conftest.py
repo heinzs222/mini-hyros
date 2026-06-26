@@ -34,7 +34,7 @@ def api_db(tmp_path, monkeypatch) -> str:
     db_path = tmp_path / "api.sqlite"
     _init_schema(str(db_path))
     monkeypatch.setenv("ATTRIBUTIONOPS_DB_PATH", str(db_path))
-    monkeypatch.delenv("AUTH_ENABLED", raising=False)  # default: auth off
+    monkeypatch.setenv("AUTH_ENABLED", "false")  # default: auth off, even if .env enables it
     return str(db_path)
 
 

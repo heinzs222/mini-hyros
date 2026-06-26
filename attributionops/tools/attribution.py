@@ -91,63 +91,163 @@ def _normalize_basis(date_basis: str) -> str:
     return date_basis
 
 
+def _table_columns(db_path: str, table: str) -> set[str]:
+    try:
+        return {str(r.get("name") or "") for r in query(db_path, f"PRAGMA table_info({table})").rows}
+    except Exception:
+        return set()
+
+
+def _identity_keys(row: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    customer_key = str(row.get("customer_key") or "").strip()
+    session_id = str(row.get("session_id") or "").strip()
+    visitor_id = str(row.get("visitor_id") or "").strip()
+    if customer_key:
+        keys.append(f"customer:{customer_key}")
+    if session_id:
+        keys.append(f"session:{session_id}")
+    if visitor_id:
+        keys.append(f"visitor:{visitor_id}")
+    return keys
+
+
+def _has_attribution_signal(row: dict[str, Any]) -> bool:
+    channel = str(row.get("channel") or "").strip().lower()
+    if channel and channel not in {"organic", "direct"}:
+        return True
+    return any(
+        str(row.get(k) or "").strip()
+        for k in (
+            "platform",
+            "campaign_id",
+            "adset_id",
+            "ad_id",
+            "creative_id",
+            "gclid",
+            "fbclid",
+            "ttclid",
+        )
+    )
+
+
+def _touch_from_order(o: dict[str, Any], order_ts: datetime) -> dict[str, Any] | None:
+    if not _has_attribution_signal(o):
+        return None
+    return {
+        "ts": str(o.get("ts") or ""),
+        "_ts": order_ts,
+        "_rowid": f"order:{o.get('order_id') or ''}",
+        "channel": str(o.get("channel") or ""),
+        "platform": str(o.get("platform") or ""),
+        "campaign_id": str(o.get("campaign_id") or ""),
+        "adset_id": str(o.get("adset_id") or ""),
+        "ad_id": str(o.get("ad_id") or ""),
+        "creative_id": str(o.get("creative_id") or ""),
+        "gclid": str(o.get("gclid") or ""),
+        "fbclid": str(o.get("fbclid") or ""),
+        "ttclid": str(o.get("ttclid") or ""),
+        "customer_key": str(o.get("customer_key") or ""),
+        "session_id": str(o.get("session_id") or ""),
+        "visitor_id": str(o.get("visitor_id") or ""),
+    }
+
+
 def _load_orders_and_touchpoints(
     db_path: str,
     *,
     start_d: date,
     lookback_days: int,
     orders_end_d: date,
-) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, list[datetime]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[datetime]],
+    dict[str, list[dict[str, Any]]],
+]:
     # Orders within [start_d, orders_end_d] (inclusive). Sargable range on ts:
     # ts is ISO-8601, so lexical comparison against date strings is correct and
     # index-usable (`ts >= 'YYYY-MM-DD'`, `ts < next-day`).
     orders_end_excl = (orders_end_d + timedelta(days=1)).isoformat()
+    order_cols = _table_columns(db_path, "orders")
+    optional_order_cols = [
+        "session_id",
+        "visitor_id",
+        "channel",
+        "platform",
+        "campaign_id",
+        "adset_id",
+        "ad_id",
+        "creative_id",
+        "gclid",
+        "fbclid",
+        "ttclid",
+    ]
+    select_cols = [
+        "order_id",
+        "ts",
+        "gross",
+        "net",
+        "refunds",
+        "chargebacks",
+        "cogs",
+        "fees",
+        "customer_key",
+    ]
+    for col in optional_order_cols:
+        if col in order_cols:
+            select_cols.append(col)
+        else:
+            select_cols.append(f"'' AS {col}")
+
     orders = query(
         db_path,
-        """
-        SELECT order_id, ts, gross, net, refunds, chargebacks, cogs, fees, customer_key
+        f"""
+        SELECT {", ".join(select_cols)}
         FROM orders
         WHERE ts >= :start AND ts < :end_excl
-          AND COALESCE(customer_key,'') <> '';
         """,
         {"start": start_d.isoformat(), "end_excl": orders_end_excl},
     ).rows
 
-    # Touchpoints only need to span [start_d - lookback, orders_end_d] and only
-    # for customers that have an in-range order (others are never inspected).
+    # Touchpoints only need to span [start_d - lookback, orders_end_d]. They are
+    # grouped by multiple identities because browser-side purchases can be
+    # anonymous at checkout time but still carry the same session/visitor id as
+    # prior ad clicks. This mirrors HYROS-style stitching more closely than
+    # requiring customer_key on every order.
     win_start = (start_d - timedelta(days=lookback_days)).isoformat()
     touchpoints = query(
         db_path,
         """
-        SELECT ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, customer_key
+        SELECT rowid AS _rowid, ts, channel, platform, campaign_id, adset_id,
+               ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id
         FROM touchpoints
-        WHERE COALESCE(customer_key,'') <> ''
-          AND ts >= :win_start AND ts < :end_excl
-          AND customer_key IN (
-            SELECT customer_key FROM orders
-            WHERE ts >= :start AND ts < :end_excl AND COALESCE(customer_key,'') <> ''
-          );
+        WHERE ts >= :win_start AND ts < :end_excl;
         """,
-        {"win_start": win_start, "start": start_d.isoformat(), "end_excl": orders_end_excl},
+        {"win_start": win_start, "end_excl": orders_end_excl},
     ).rows
 
-    tps_by_customer: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    tps_by_identity: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    tps_by_exact_ts: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for tp in touchpoints:
         tp["_ts"] = parse_iso_ts(str(tp["ts"]))  # parse exactly once
-        tps_by_customer[str(tp["customer_key"])].append(tp)
+        tps_by_exact_ts[str(tp.get("ts") or "")].append(tp)
+        for key in _identity_keys(tp):
+            tps_by_identity[key].append(tp)
 
-    dts_by_customer: dict[str, list[datetime]] = {}
-    for ck, tps in tps_by_customer.items():
-        tps.sort(key=lambda r: r["_ts"])
-        dts_by_customer[ck] = [t["_ts"] for t in tps]
+    dts_by_identity: dict[str, list[datetime]] = {}
+    for key, tps in tps_by_identity.items():
+        tps.sort(key=lambda r: (r["_ts"], str(r.get("_rowid") or "")))
+        dts_by_identity[key] = [t["_ts"] for t in tps]
 
-    return orders, tps_by_customer, dts_by_customer
+    return orders, tps_by_identity, dts_by_identity, tps_by_exact_ts
 
 
 def _attributed(
     orders: list[dict[str, Any]],
-    tps_by_customer: dict[str, list[dict[str, Any]]],
-    dts_by_customer: dict[str, list[datetime]],
+    tps_by_identity: dict[str, list[dict[str, Any]]],
+    dts_by_identity: dict[str, list[datetime]],
+    tps_by_exact_ts: dict[str, list[dict[str, Any]]],
     *,
     model: str,
     lookback: timedelta,
@@ -156,19 +256,53 @@ def _attributed(
     contributions: list[tuple[dict[str, Any], datetime, list[dict[str, Any]], list[float]]] = []
     unattributed = 0
     for o in orders:
-        ck = str(o["customer_key"])
-        dts = dts_by_customer.get(ck)
-        if not dts:
-            unattributed += 1
-            continue
         order_ts = parse_iso_ts(str(o["ts"]))
         window_start = order_ts - lookback
-        lo = bisect_left(dts, window_start)
-        hi = bisect_right(dts, order_ts)
-        if lo >= hi:
+        window_tps: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add_touch(tp: dict[str, Any]) -> None:
+            marker = str(tp.get("_rowid") or f"{tp.get('ts')}|{tp.get('session_id')}|{tp.get('platform')}")
+            if marker in seen:
+                return
+            if not _has_attribution_signal(tp):
+                return
+            seen.add(marker)
+            window_tps.append(tp)
+
+        for key in _identity_keys(o):
+            dts = dts_by_identity.get(key)
+            if not dts:
+                continue
+            lo = bisect_left(dts, window_start)
+            hi = bisect_right(dts, order_ts)
+            for tp in tps_by_identity[key][lo:hi]:
+                add_touch(tp)
+
+        # Legacy rows did not store session_id on orders. Pixel purchases write
+        # a touchpoint with the exact same timestamp; use that to recover the
+        # browser session, then include earlier source touches from that session.
+        if not window_tps:
+            for exact_tp in tps_by_exact_ts.get(str(o.get("ts") or ""), []):
+                add_touch(exact_tp)
+                for key in _identity_keys(exact_tp):
+                    dts = dts_by_identity.get(key)
+                    if not dts:
+                        continue
+                    lo = bisect_left(dts, window_start)
+                    hi = bisect_right(dts, order_ts)
+                    for tp in tps_by_identity[key][lo:hi]:
+                        add_touch(tp)
+
+        if not window_tps:
+            pseudo = _touch_from_order(o, order_ts)
+            if pseudo is not None:
+                add_touch(pseudo)
+
+        if not window_tps:
             unattributed += 1
             continue
-        window_tps = tps_by_customer[ck][lo:hi]
+        window_tps.sort(key=lambda r: (r["_ts"], str(r.get("_rowid") or "")))
         weights = _weights_for_model(model, window_tps, order_ts)
         contributions.append((o, order_ts, window_tps, weights))
     return contributions, unattributed
@@ -330,11 +464,11 @@ def attribution_run(
     ).rows
     account_map = _build_account_map(spend_rows)
 
-    orders, tps_by_customer, dts_by_customer = _load_orders_and_touchpoints(
+    orders, tps_by_identity, dts_by_identity, tps_by_exact_ts = _load_orders_and_touchpoints(
         db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d
     )
     contributions, unattributed_orders = _attributed(
-        orders, tps_by_customer, dts_by_customer, model=model, lookback=timedelta(days=lookback_days)
+        orders, tps_by_identity, dts_by_identity, tps_by_exact_ts, model=model, lookback=timedelta(days=lookback_days)
     )
     out_rows = _aggregate_dim_rows(
         contributions, account_map=account_map, value_type=value_type,
@@ -352,8 +486,8 @@ def attribution_run(
         "rows": out_rows,
         "unattributed_orders": int(unattributed_orders),
         "notes": [
-            "Local dummy attribution computed from touchpoints+orders by customer_key.",
-            "Orders without any touchpoint in lookback window are excluded from attributed rows.",
+            "Local attribution computed from touchpoints+orders by customer_key, session_id, visitor_id, then direct order source.",
+            "Orders without any source touchpoint in lookback window are excluded from attributed rows.",
         ],
     }
 
@@ -374,11 +508,11 @@ def attribution_day_totals(
     end_d = date.fromisoformat(end_date)
     orders_end_d = end_d if date_basis == "conversion" else (end_d + timedelta(days=lookback_days))
 
-    orders, tps_by_customer, dts_by_customer = _load_orders_and_touchpoints(
+    orders, tps_by_identity, dts_by_identity, tps_by_exact_ts = _load_orders_and_touchpoints(
         db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d
     )
     contributions, unattributed_orders = _attributed(
-        orders, tps_by_customer, dts_by_customer, model=model, lookback=timedelta(days=lookback_days)
+        orders, tps_by_identity, dts_by_identity, tps_by_exact_ts, model=model, lookback=timedelta(days=lookback_days)
     )
     rows_out = _aggregate_day_rows(contributions, date_basis=date_basis, start_d=start_d, end_d=end_d)
 
@@ -426,11 +560,11 @@ def attribution_run_and_day_totals(
     ).rows
     account_map = _build_account_map(spend_rows)
 
-    orders, tps_by_customer, dts_by_customer = _load_orders_and_touchpoints(
+    orders, tps_by_identity, dts_by_identity, tps_by_exact_ts = _load_orders_and_touchpoints(
         db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d
     )
     contributions, unattributed_orders = _attributed(
-        orders, tps_by_customer, dts_by_customer, model=model, lookback=timedelta(days=lookback_days)
+        orders, tps_by_identity, dts_by_identity, tps_by_exact_ts, model=model, lookback=timedelta(days=lookback_days)
     )
 
     run_rows = _aggregate_dim_rows(

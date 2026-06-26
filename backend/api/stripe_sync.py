@@ -70,6 +70,26 @@ def _ensure_orders_table(db_path: str) -> None:
             order_id TEXT DEFAULT '',
             customer_key TEXT DEFAULT ''
         )""")
+        order_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(orders)").fetchall()}
+        for col in (
+            "session_id",
+            "visitor_id",
+            "channel",
+            "platform",
+            "campaign_id",
+            "adset_id",
+            "ad_id",
+            "creative_id",
+            "gclid",
+            "fbclid",
+            "ttclid",
+        ):
+            if col not in order_cols:
+                conn.execute(f"ALTER TABLE orders ADD COLUMN {col} TEXT DEFAULT ''")
+        conversion_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(conversions)").fetchall()}
+        for col in ("session_id", "visitor_id"):
+            if col not in conversion_cols:
+                conn.execute(f"ALTER TABLE conversions ADD COLUMN {col} TEXT DEFAULT ''")
         conn.commit()
 
 

@@ -37,6 +37,9 @@ def touchpoint(
     adset_id: str = "set1",
     ad_id: str = "ad1",
     creative_id: str = "cr1",
+    gclid: str = "",
+    fbclid: str = "",
+    ttclid: str = "",
     session_id: str = "sess1",
 ) -> dict[str, Any]:
     return {
@@ -47,6 +50,9 @@ def touchpoint(
         "adset_id": adset_id,
         "ad_id": ad_id,
         "creative_id": creative_id,
+        "gclid": gclid,
+        "fbclid": fbclid,
+        "ttclid": ttclid,
         "customer_key": customer_key,
         "session_id": session_id,
     }
@@ -64,6 +70,17 @@ def order(
     cogs: Any = "0",
     fees: Any = "0",
     subscription_id: str = "",
+    session_id: str = "",
+    visitor_id: str = "",
+    channel: str = "",
+    platform: str = "",
+    campaign_id: str = "",
+    adset_id: str = "",
+    ad_id: str = "",
+    creative_id: str = "",
+    gclid: str = "",
+    fbclid: str = "",
+    ttclid: str = "",
 ) -> dict[str, Any]:
     return {
         "order_id": order_id,
@@ -76,6 +93,17 @@ def order(
         "fees": str(fees),
         "customer_key": customer_key,
         "subscription_id": subscription_id,
+        "session_id": session_id,
+        "visitor_id": visitor_id,
+        "channel": channel,
+        "platform": platform,
+        "campaign_id": campaign_id,
+        "adset_id": adset_id,
+        "ad_id": ad_id,
+        "creative_id": creative_id,
+        "gclid": gclid,
+        "fbclid": fbclid,
+        "ttclid": ttclid,
     }
 
 

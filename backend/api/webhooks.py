@@ -72,12 +72,37 @@ def _ensure_tracking_schema(db_path: str) -> None:
             conn.execute("ALTER TABLE sessions ADD COLUMN page_title TEXT")
         if "custom_data_json" not in session_cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN custom_data_json TEXT")
+
+        order_cols = _table_columns(conn, "orders")
+        for col in (
+            "session_id",
+            "visitor_id",
+            "channel",
+            "platform",
+            "campaign_id",
+            "adset_id",
+            "ad_id",
+            "creative_id",
+            "gclid",
+            "fbclid",
+            "ttclid",
+        ):
+            if col not in order_cols:
+                conn.execute(f"ALTER TABLE orders ADD COLUMN {col} TEXT DEFAULT ''")
+
+        conversion_cols = _table_columns(conn, "conversions")
+        for col in ("session_id", "visitor_id"):
+            if col not in conversion_cols:
+                conn.execute(f"ALTER TABLE conversions ADD COLUMN {col} TEXT DEFAULT ''")
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_visitor_id ON sessions(visitor_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_customer_key ON sessions(customer_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_touchpoints_session_id ON touchpoints(session_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_touchpoints_customer_key ON touchpoints(customer_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_customer_key ON orders(customer_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_session_id ON orders(session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_visitor_id ON orders(visitor_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_conversions_customer_key ON conversions(customer_key)")
         conn.commit()
 
@@ -586,8 +611,12 @@ async def track_conversion(request: Request):
         _backfill_customer_key(conn, customer_key, visitor_id=visitor_id, session_id=session_id)
         if is_purchase:
             conn.execute(
-                """INSERT OR IGNORE INTO orders (order_id, ts, gross, net, refunds, chargebacks, cogs, fees, customer_key, subscription_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT OR IGNORE INTO orders (
+                       order_id, ts, gross, net, refunds, chargebacks, cogs, fees,
+                       customer_key, subscription_id, session_id, visitor_id, channel,
+                       platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid
+                   )
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     order_id,
                     now,
@@ -599,13 +628,26 @@ async def track_conversion(request: Request):
                     str(round(gross * 0.029 + 0.30, 2)),
                     customer_key,
                     "",
+                    session_id,
+                    visitor_id,
+                    channel,
+                    platform,
+                    campaign_id,
+                    adset_id,
+                    ad_id,
+                    str(payload.get("creative_id", "")),
+                    str(payload.get("gclid", "")),
+                    str(payload.get("fbclid", "")),
+                    str(payload.get("ttclid", "")),
                 ),
             )
 
         conn.execute(
-            """INSERT OR IGNORE INTO conversions (conversion_id, ts, type, value, order_id, customer_key)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (_sha256(f"pxconv|{order_id}"), now, conv_type, str(gross), order_id, customer_key),
+            """INSERT OR IGNORE INTO conversions (
+                   conversion_id, ts, type, value, order_id, customer_key, session_id, visitor_id
+               )
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (_sha256(f"pxconv|{order_id}"), now, conv_type, str(gross), order_id, customer_key, session_id, visitor_id),
         )
         conn.execute(
             """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id)
