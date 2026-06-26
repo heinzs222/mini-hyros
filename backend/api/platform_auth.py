@@ -32,7 +32,14 @@ UTC = timezone.utc
 TIKTOK_TOKEN_URL = "https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/"
 TIKTOK_REFRESH_URL = "https://business-api.tiktok.com/open_api/v1.3/oauth2/refresh_token/"
 TIKTOK_AUTH_BASE = "https://business-api.tiktok.com/portal/auth"
-TIKTOK_SCOPES = "advertiser.read,campaign.read,adgroup.read,ad.read,report.read"
+DEFAULT_TIKTOK_SCOPES = "advertiser.read,campaign.read,adgroup.read,ad.read,report.read"
+TIKTOK_REQUIRED_ENDPOINT_PERMISSIONS = [
+    "/advertiser/info/:GET",
+    "/campaign/get/:GET",
+    "/adgroup/get/:GET",
+    "/ad/get/:GET",
+    "/report/integrated/get/:GET",
+]
 
 
 def _db() -> str:
@@ -72,6 +79,16 @@ def _dashboard_url() -> str:
             value = f"{scheme}://{value}"
         return value
     return "https://mini-hyros.vercel.app"
+
+
+def _tiktok_scopes() -> str:
+    """Return OAuth scopes requested from TikTok.
+
+    TikTok apps must also have endpoint permissions enabled in the TikTok
+    developer portal. Keeping this configurable avoids code changes if TikTok
+    changes the public scope names again.
+    """
+    return os.environ.get("TIKTOK_SCOPES", DEFAULT_TIKTOK_SCOPES).strip() or DEFAULT_TIKTOK_SCOPES
 
 
 def _now() -> str:
@@ -188,19 +205,21 @@ async def tiktok_connect(request: Request):
     redirect_uri = _tiktok_redirect_uri(request)
 
     from urllib.parse import quote
+    scopes = _tiktok_scopes()
     auth_url = (
         f"{TIKTOK_AUTH_BASE}"
         f"?app_id={app_id}"
         f"&state=tiktok_oauth"
         f"&redirect_uri={quote(redirect_uri, safe='')}"
-        f"&scope={quote(TIKTOK_SCOPES, safe='')}"
+        f"&scope={quote(scopes, safe='')}"
     )
     return {
         "auth_url": auth_url,
         "url": auth_url,
         "app_id": app_id,
         "redirect_uri": redirect_uri,
-        "scopes": TIKTOK_SCOPES,
+        "scopes": scopes,
+        "required_endpoint_permissions": TIKTOK_REQUIRED_ENDPOINT_PERMISSIONS,
     }
 
 
@@ -302,12 +321,13 @@ async def tiktok_status(request: Request):
     env_token = os.environ.get("TIKTOK_ACCESS_TOKEN", "")
     redirect_uri = _tiktok_redirect_uri(request)
     from urllib.parse import quote
+    scopes = _tiktok_scopes()
     auth_url = (
         f"{TIKTOK_AUTH_BASE}"
         f"?app_id={app_id}"
         f"&state=tiktok_oauth"
         f"&redirect_uri={quote(redirect_uri, safe='')}"
-        f"&scope={quote(TIKTOK_SCOPES, safe='')}"
+        f"&scope={quote(scopes, safe='')}"
     ) if app_id else ""
 
     if rows and rows[0].get("access_token"):
@@ -320,6 +340,8 @@ async def tiktok_status(request: Request):
             "updated_at": r.get("updated_at"),
             "auth_url": auth_url,
             "url": auth_url,
+            "scopes": scopes,
+            "required_endpoint_permissions": TIKTOK_REQUIRED_ENDPOINT_PERMISSIONS,
         }
     if env_token:
         return {
@@ -329,5 +351,13 @@ async def tiktok_status(request: Request):
             "has_refresh_token": False,
             "auth_url": auth_url,
             "url": auth_url,
+            "scopes": scopes,
+            "required_endpoint_permissions": TIKTOK_REQUIRED_ENDPOINT_PERMISSIONS,
         }
-    return {"connected": False, "auth_url": auth_url, "url": auth_url}
+    return {
+        "connected": False,
+        "auth_url": auth_url,
+        "url": auth_url,
+        "scopes": scopes,
+        "required_endpoint_permissions": TIKTOK_REQUIRED_ENDPOINT_PERMISSIONS,
+    }

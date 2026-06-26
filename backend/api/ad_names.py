@@ -10,6 +10,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -27,6 +28,7 @@ from attributionops.db import connect, sql_rows
 
 router = APIRouter()
 UTC = timezone.utc
+AD_NAMES_PLATFORM_TIMEOUT_SECONDS = int(os.environ.get("AD_NAMES_PLATFORM_TIMEOUT_SECONDS", "75") or "75")
 
 
 def _db() -> str:
@@ -338,33 +340,36 @@ async def sync_names(platform: str = Query(default="all")):
 
     async def run_platform(label: str, coro: Any) -> dict[str, Any]:
         try:
-            result = await coro
+            result = await asyncio.wait_for(coro, timeout=AD_NAMES_PLATFORM_TIMEOUT_SECONDS)
             if isinstance(result, dict):
                 return result
             return {"synced": 0, "error": f"{label} sync returned an invalid response"}
+        except asyncio.TimeoutError:
+            return {
+                "synced": 0,
+                "error": f"{label} sync timed out after {AD_NAMES_PLATFORM_TIMEOUT_SECONDS}s",
+            }
         except Exception as exc:
             return {"synced": 0, "error": f"{label} sync failed: {exc}"}
 
+    selected: list[tuple[str, str, Any]] = []
     if p in {"all", "meta"}:
-        r = await run_platform("Meta", _sync_meta())
-        results["platforms"]["meta"] = r
-        results["synced"] += int(r.get("synced", 0) or 0)
-        if r.get("error"):
-            results["errors"].append(f"meta: {r['error']}")
+        selected.append(("meta", "Meta", _sync_meta()))
 
     if p in {"all", "google"}:
-        r = await run_platform("Google", _sync_google())
-        results["platforms"]["google"] = r
-        results["synced"] += int(r.get("synced", 0) or 0)
-        if r.get("error"):
-            results["errors"].append(f"google: {r['error']}")
+        selected.append(("google", "Google", _sync_google()))
 
     if p in {"all", "tiktok"}:
-        r = await run_platform("TikTok", _sync_tiktok())
-        results["platforms"]["tiktok"] = r
+        selected.append(("tiktok", "TikTok", _sync_tiktok()))
+
+    platform_results = await asyncio.gather(
+        *(run_platform(label, coro) for _, label, coro in selected)
+    )
+    for (key, _, _), r in zip(selected, platform_results):
+        results["platforms"][key] = r
         results["synced"] += int(r.get("synced", 0) or 0)
         if r.get("error"):
-            results["errors"].append(f"tiktok: {r['error']}")
+            results["errors"].append(f"{key}: {r['error']}")
 
     return results
 

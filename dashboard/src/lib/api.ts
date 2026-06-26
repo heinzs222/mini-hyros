@@ -11,7 +11,10 @@ function defaultApiBase(): string {
 
 const API_BASE = defaultApiBase();
 const AUTH_TOKEN_KEY = "hyros_auth_token";
-const API_TIMEOUT_MS = 20000;
+const configuredTimeoutMs = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS || 90000);
+const API_TIMEOUT_MS = Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
+  ? configuredTimeoutMs
+  : 90000;
 
 function readAuthToken(): string {
   if (typeof window === "undefined") return "";

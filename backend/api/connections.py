@@ -60,6 +60,14 @@ GHL_API_VERSION = "2021-07-28"
 
 HTTP_TIMEOUT = 8.0
 
+TIKTOK_REQUIRED_ENDPOINT_PERMISSIONS = [
+    "/advertiser/info/:GET",
+    "/campaign/get/:GET",
+    "/adgroup/get/:GET",
+    "/ad/get/:GET",
+    "/report/integrated/get/:GET",
+]
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -169,7 +177,12 @@ async def _validate_tiktok(client: httpx.AsyncClient) -> tuple[str, str]:
         if code == 0:
             return "connected", f"Access token valid with advertiser scope ({token_source})."
         if code in (40001, 40002, 40100, 40105):
-            return "invalid", f"Token missing required scope — {msg}"
+            required = ", ".join(TIKTOK_REQUIRED_ENDPOINT_PERMISSIONS)
+            return "invalid", (
+                "Token missing TikTok Marketing API endpoint permission. "
+                f"TikTok said: {msg}. Required for Mini Hyros: {required}. "
+                "Enable these permissions for the TikTok app, then reconnect TikTok."
+            )
         if code in (40010, 40104):
             return "expired", f"Access token expired — {msg}"
         return "invalid", msg
@@ -342,9 +355,10 @@ async def setup_guide():
         "tiktok": {
             "steps": [
                 "1. Apply for TikTok Marketing API access at https://ads.tiktok.com/marketing_api/",
-                "2. Create an app and get your access token",
-                "3. Find your Advertiser ID in TikTok Ads Manager",
-                "4. Set TIKTOK_ACCESS_TOKEN, TIKTOK_APP_ID, TIKTOK_SECRET, TIKTOK_ADVERTISER_ID in .env",
+                "2. Give the app endpoint permissions for advertiser/info, campaign/get, adgroup/get, ad/get, and report/integrated/get",
+                "3. Generate/reconnect OAuth with advertiser.read, campaign.read, adgroup.read, ad.read, and report.read scopes",
+                "4. Find your Advertiser ID in TikTok Ads Manager",
+                "5. Set TIKTOK_ACCESS_TOKEN, TIKTOK_APP_ID, TIKTOK_SECRET, TIKTOK_ADVERTISER_ID in .env",
             ],
             "api_docs": "https://business-api.tiktok.com/marketing_api/docs",
         },
