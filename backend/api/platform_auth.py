@@ -58,6 +58,22 @@ def _tiktok_redirect_uri(request: Request) -> str:
     return _request_origin(request) or "https://mini-hyros.onrender.com"
 
 
+def _dashboard_url() -> str:
+    """Return a usable dashboard URL for OAuth success redirects."""
+    for key in ("DASHBOARD_URL", "FRONTEND_URL"):
+        value = os.environ.get(key, "").strip().rstrip("/")
+        if not value:
+            continue
+        lowered = value.lower()
+        if "your-actual-dashboard" in lowered or "placeholder" in lowered:
+            continue
+        if "://" not in value:
+            scheme = "http" if value.startswith(("localhost", "127.0.0.1")) else "https"
+            value = f"{scheme}://{value}"
+        return value
+    return "https://mini-hyros.vercel.app"
+
+
 def _now() -> str:
     return datetime.now(UTC).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -227,9 +243,7 @@ async def tiktok_callback(auth_code: str = Query(default=""), state: str = Query
 
         _save_tiktok_token(_db(), access_token, refresh_token, advertiser_id)
 
-        # Redirect back to dashboard with success
-        dashboard_url = os.environ.get("DASHBOARD_URL", "http://localhost:3000")
-        return RedirectResponse(url=f"{dashboard_url}?tiktok_connected=1")
+        return RedirectResponse(url=f"{_dashboard_url()}?tiktok_connected=1")
 
     except Exception as e:
         return HTMLResponse(f"<h3>Error: {e}</h3>", status_code=500)

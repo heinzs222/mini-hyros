@@ -642,6 +642,78 @@
     return true;
   }
 
+  function ensureHiddenInput(root, name, value) {
+    if (!root || !name || !root.appendChild) return;
+    value = value === undefined || value === null ? "" : String(value);
+    var target = root;
+    if (target.tagName && target.tagName.toLowerCase() !== "form" && target.querySelector) {
+      target = target.querySelector("form") || target;
+    }
+
+    var fields = target.querySelectorAll ? target.querySelectorAll("input[name]") : [];
+    var input = null;
+    for (var i = 0; i < fields.length; i++) {
+      if (fields[i].getAttribute("name") === name) {
+        input = fields[i];
+        break;
+      }
+    }
+    if (!input) {
+      input = document.createElement("input");
+      input.type = "hidden";
+      input.name = name;
+      target.appendChild(input);
+    }
+    input.value = value;
+  }
+
+  function injectAttributionFields(root, email) {
+    if (!root) return;
+    var params = mergedParams();
+    var firstP = getStoredParams("first");
+    var customerKey = getCookie("_hyros_ck") || normalizeEmail(email || getCookie("_hyros_email") || "");
+    var fields = {
+      hyros_visitor_id: visitorId,
+      hyros_session_id: sessionId,
+      hyros_customer_key: customerKey,
+      hyros_email: normalizeEmail(email || getCookie("_hyros_email") || ""),
+      visitor_id: visitorId,
+      session_id: sessionId,
+      utm_source: params.utm_source,
+      utm_medium: params.utm_medium,
+      utm_campaign: params.utm_campaign,
+      utm_content: params.utm_content,
+      utm_term: params.utm_term,
+      gclid: params.gclid,
+      wbraid: params.wbraid,
+      gbraid: params.gbraid,
+      fbclid: params.fbclid,
+      ttclid: params.ttclid,
+      ad_id: params.ad_id,
+      adset_id: params.adset_id,
+      campaign_id: params.campaign_id,
+      creative_id: params.creative_id,
+      fbc_id: params.fbc_id,
+      ttc_id: params.ttc_id,
+      gc_id: params.gc_id,
+      h_ad_id: params.h_ad_id,
+      g_special_campaign: params.g_special_campaign,
+      detected_platform: params.detected_platform,
+      first_utm_source: firstP.utm_source || "",
+      first_utm_campaign: firstP.utm_campaign || "",
+      first_gclid: firstP.gclid || "",
+      first_fbclid: firstP.fbclid || "",
+      first_ttclid: firstP.ttclid || "",
+      landing_page: window.location.pathname + window.location.search,
+      referrer: document.referrer || "",
+      device: getDevice(),
+    };
+
+    Object.keys(fields).forEach(function (name) {
+      ensureHiddenInput(root, name, fields[name]);
+    });
+  }
+
   function hookIdentityInputs() {
     var inputs = document.querySelectorAll('input[type="email"], input[name*="email"], input[name*="Email"], input[id*="email"], input[id*="Email"], input[autocomplete="email"]');
     inputs.forEach(function (input) {
@@ -673,6 +745,7 @@
         if (email) {
           window.hyros.identify(email);
         }
+        injectAttributionFields(form, email);
         window.hyros.event("FormSubmit", {
           form_name: resolveElementName(form),
           email: email,
@@ -703,6 +776,7 @@
         if (email) {
           window.hyros.identify(email);
         }
+        injectAttributionFields(container, email);
         window.hyros.event("BookingConfirmed", {
           calendar: resolveElementName(container),
           email: email,
@@ -728,6 +802,7 @@
         if (email) {
           window.hyros.identify(email);
         }
+        injectAttributionFields(form, email);
         window.hyros.event("CheckoutSubmit", {
           order_id: resolveOrderId(form),
           value: resolveOrderValue(form),

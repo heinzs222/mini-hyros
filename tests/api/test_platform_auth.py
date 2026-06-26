@@ -162,6 +162,37 @@ def test_callback_success_stores_token_and_redirects(client, api_db, monkeypatch
     assert rows[0]["advertiser_id"] == "adv-999"
 
 
+def test_callback_ignores_placeholder_dashboard_url(client, api_db, monkeypatch):
+    monkeypatch.setenv("TIKTOK_APP_ID", "app-1")
+    monkeypatch.setenv("TIKTOK_SECRET", "sec-1")
+    monkeypatch.setenv("DASHBOARD_URL", "your-actual-dashboard.vercel.app")
+    monkeypatch.delenv("FRONTEND_URL", raising=False)
+
+    token_response = {
+        "code": 0,
+        "message": "OK",
+        "data": {
+            "access_token": "fresh_access_token",
+            "refresh_token": "fresh_refresh_token",
+            "advertiser_ids": ["adv-999"],
+        },
+    }
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.post(
+            url__startswith="https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token"
+        ).mock(return_value=httpx.Response(200, json=token_response))
+
+        resp = client.get(
+            "/api/platform-auth/tiktok/callback",
+            params={"auth_code": "the_code", "state": "tiktok_oauth"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code in (302, 307)
+    assert resp.headers["location"] == "https://mini-hyros.vercel.app?tiktok_connected=1"
+
+
 def test_callback_uses_env_advertiser_when_none_returned(client, api_db, monkeypatch):
     monkeypatch.setenv("TIKTOK_APP_ID", "app-1")
     monkeypatch.setenv("TIKTOK_SECRET", "sec-1")

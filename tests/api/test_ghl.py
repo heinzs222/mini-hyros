@@ -33,35 +33,58 @@ def _count(db_path: str, table: str, where: str = "", params=()) -> int:
 
 # ── Contact events ─────────────────────────────────────────────────────────────
 
-def test_contact_create_identifies_and_stitches_sessions(client, api_db):
-    # Seed an anonymous session + touchpoint (customer_key == "") that the
-    # contact event should stitch to the hashed email.
+def test_contact_create_only_stitches_matching_sessions(client, api_db):
+    # Seed two anonymous browser paths. A bare contact webhook should not claim
+    # either one, because that would attach unrelated visitors to the same lead.
     with sqlite3.connect(api_db) as conn:
         conn.execute(
-            "INSERT INTO sessions (session_id, ts, customer_key) VALUES (?,?,?)",
-            ("sessA", "2026-06-01T00:00:00Z", ""),
+            "INSERT INTO sessions (session_id, visitor_id, ts, customer_key) VALUES (?,?,?,?)",
+            ("sessA", "visA", "2026-06-01T00:00:00Z", ""),
         )
         conn.execute(
-            "INSERT INTO touchpoints (ts, channel, platform, customer_key, session_id) VALUES (?,?,?,?,?)",
-            ("2026-06-01T00:00:00Z", "paid", "meta", "", "sessA"),
+            "INSERT INTO sessions (session_id, visitor_id, ts, customer_key) VALUES (?,?,?,?)",
+            ("sessB", "visB", "2026-06-01T00:05:00Z", ""),
+        )
+        conn.execute(
+            "INSERT INTO touchpoints (ts, channel, platform, customer_key, session_id, visitor_id) VALUES (?,?,?,?,?,?)",
+            ("2026-06-01T00:00:00Z", "paid", "meta", "", "sessA", "visA"),
+        )
+        conn.execute(
+            "INSERT INTO touchpoints (ts, channel, platform, customer_key, session_id, visitor_id) VALUES (?,?,?,?,?,?)",
+            ("2026-06-01T00:05:00Z", "paid", "google", "", "sessB", "visB"),
         )
         conn.commit()
 
-    resp = client.post(
+    bare = client.post(
         "/api/webhooks/ghl",
         json={"type": "ContactCreate", "email": "Buyer@Example.com", "firstName": "Jane", "lastName": "Doe"},
+    )
+    assert bare.status_code == 200
+    customer_key = bare.json()["customer_key"]
+    assert customer_key
+    assert _count(api_db, "touchpoints", "customer_key = ?", (customer_key,)) == 0
+    assert _count(api_db, "sessions", "customer_key = ?", (customer_key,)) == 0
+
+    resp = client.post(
+        "/api/webhooks/ghl",
+        json={
+            "type": "ContactUpdate",
+            "email": "Buyer@Example.com",
+            "hyros_session_id": "sessA",
+            "hyros_visitor_id": "visA",
+        },
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
-    assert body["event_type"] == "ContactCreate"
+    assert body["event_type"] == "ContactUpdate"
     assert body["action"] == "contact_identified"
-    customer_key = body["customer_key"]
-    assert customer_key  # non-empty sha256-derived key
+    assert body["customer_key"] == customer_key
 
-    # Both anonymous rows should now carry the customer_key.
+    # Only the matching visitor/session path should now carry the customer_key.
     assert _count(api_db, "touchpoints", "customer_key = ?", (customer_key,)) == 1
     assert _count(api_db, "sessions", "customer_key = ?", (customer_key,)) == 1
+    assert _count(api_db, "sessions", "session_id = ? AND customer_key = ''", ("sessB",)) == 1
 
 
 def test_email_is_normalized_lowercase_in_customer_key(client, api_db):
@@ -309,6 +332,52 @@ def test_tiktok_click_id_resolves_to_tiktok_platform(client, api_db):
 
 
 # ── Debug endpoint ──────────────────────────────────────────────────────────────
+
+def test_payment_preserves_source_and_identity_fields(client, api_db):
+    resp = client.post(
+        "/api/webhooks/ghl",
+        json={
+            "type": "PaymentReceived",
+            "email": "source@example.com",
+            "amount": 120,
+            "payment_id": "pay-source-1",
+            "hyros_session_id": "sess-pay",
+            "hyros_visitor_id": "vis-pay",
+            "utm_source": "tiktok",
+            "ttclid": "tt-click-1",
+            "ttc_id": "tt-campaign-1",
+            "campaign_id": "camp-1",
+            "ad_id": "ad-1",
+            "creative_id": "creative-1",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    ck = body["customer_key"]
+
+    orders = _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", (body["order_id"],))
+    assert len(orders) == 1
+    assert orders[0]["customer_key"] == ck
+    assert orders[0]["session_id"] == "sess-pay"
+    assert orders[0]["visitor_id"] == "vis-pay"
+    assert orders[0]["platform"] == "tiktok"
+    assert orders[0]["channel"] == "paid_social"
+    assert orders[0]["campaign_id"] == "camp-1"
+    assert orders[0]["ad_id"] == "ad-1"
+    assert orders[0]["creative_id"] == "creative-1"
+    assert orders[0]["ttclid"] == "tt-click-1"
+
+    purchases = _rows(api_db, "SELECT * FROM conversions WHERE order_id = ?", (body["order_id"],))
+    assert len(purchases) == 1
+    assert purchases[0]["session_id"] == "sess-pay"
+    assert purchases[0]["visitor_id"] == "vis-pay"
+
+    tps = _rows(api_db, "SELECT * FROM touchpoints WHERE customer_key = ?", (ck,))
+    assert len(tps) == 1
+    assert tps[0]["session_id"] == "sess-pay"
+    assert tps[0]["visitor_id"] == "vis-pay"
+    assert tps[0]["platform"] == "tiktok"
+
 
 def test_ghl_debug_returns_logged_webhooks(client, api_db):
     # Trigger a path that logs (form submission).

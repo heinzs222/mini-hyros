@@ -167,6 +167,76 @@ def test_sync_extracts_email_from_receipt_and_metadata(client, api_db, monkeypat
 
 # ── sync: error paths ────────────────────────────────────────────────────────
 
+def test_sync_preserves_metadata_attribution_and_stitches_browser_path(client, api_db, monkeypatch):
+    monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
+
+    from tests.helpers import insert_rows, touchpoint
+
+    insert_rows(api_db, "sessions", [{
+        "session_id": "sess-stripe",
+        "visitor_id": "vis-stripe",
+        "ts": "2026-06-01T00:00:00Z",
+        "customer_key": "",
+    }])
+    insert_rows(api_db, "touchpoints", [
+        touchpoint(
+            "2026-06-01T00:00:00Z",
+            "",
+            platform="google",
+            channel="paid_search",
+            session_id="sess-stripe",
+            visitor_id="vis-stripe",
+            gclid="g-click",
+        )
+    ])
+
+    ch = _charge("ch_attr", amount=12345, email=None)
+    ch["metadata"] = {
+        "email": "META@Example.com",
+        "hyros_session_id": "sess-stripe",
+        "hyros_visitor_id": "vis-stripe",
+    }
+    ch["payment_intent"] = {
+        "metadata": {
+            "utm_source": "google",
+            "gclid": "g-click",
+            "campaign_id": "camp-123",
+            "ad_id": "ad-123",
+            "creative_id": "creative-123",
+        }
+    }
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith="https://api.stripe.com/v1/charges").mock(
+            return_value=Response(200, json=_charges_page([ch]))
+        )
+        body = client.post("/api/stripe/sync").json()
+
+    assert body["synced"] == 1
+
+    orders = sql_rows(api_db, "SELECT * FROM orders")
+    assert len(orders) == 1
+    assert orders[0]["session_id"] == "sess-stripe"
+    assert orders[0]["visitor_id"] == "vis-stripe"
+    assert orders[0]["platform"] == "google"
+    assert orders[0]["channel"] == "paid_search"
+    assert orders[0]["campaign_id"] == "camp-123"
+    assert orders[0]["ad_id"] == "ad-123"
+    assert orders[0]["creative_id"] == "creative-123"
+    assert orders[0]["gclid"] == "g-click"
+
+    convs = sql_rows(api_db, "SELECT * FROM conversions WHERE type = 'Purchase'")
+    assert len(convs) == 1
+    assert convs[0]["session_id"] == "sess-stripe"
+    assert convs[0]["visitor_id"] == "vis-stripe"
+    assert convs[0]["customer_key"] == orders[0]["customer_key"]
+
+    sessions = sql_rows(api_db, "SELECT * FROM sessions WHERE session_id = 'sess-stripe'")
+    touchpoints = sql_rows(api_db, "SELECT * FROM touchpoints WHERE session_id = 'sess-stripe'")
+    assert sessions[0]["customer_key"] == orders[0]["customer_key"]
+    assert touchpoints[0]["customer_key"] == orders[0]["customer_key"]
+
+
 def test_sync_missing_key(client, api_db, monkeypatch):
     monkeypatch.delenv("STRIPE_API_SECRET_KEY", raising=False)
     monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
