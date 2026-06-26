@@ -119,6 +119,26 @@ function compactSyncError(message: string): string {
     .slice(0, 500);
 }
 
+function isAbortError(err: any): boolean {
+  const message = String(err?.message || err || "");
+  return err?.name === "AbortError" || message.includes("aborted");
+}
+
+async function withSyncDeadline<T>(label: string, timeoutMs: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await run(controller.signal);
+  } catch (err: any) {
+    if (controller.signal.aborted || isAbortError(err)) {
+      throw new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 const REPORT_CACHE_KEY = "hyros_report_cache";
 
 const REPORT_TABS = [
@@ -181,8 +201,8 @@ export default function DashboardPage() {
   const syncingSpendRef = useRef(false);
   const loadReportRef = useRef<() => Promise<void>>(async () => {});
   const reportRequestSeqRef = useRef(0);
-  // Guard so the 30s interval / WS refetch never overlaps an in-flight report request.
   const reportInFlightRef = useRef(false);
+  const reportAbortRef = useRef<AbortController | null>(null);
   // Coalesces bursts of WS new_order events into a single trailing refetch.
   const wsRefetchTimerRef = useRef<NodeJS.Timeout | null>(null);
   // Monotonic id assigned to each live event on receipt (stable list key).
@@ -205,11 +225,12 @@ export default function DashboardPage() {
     // panels such as Journey/Spend/Ad Names load their own data.
     const needsFullReport = section === "dashboard" || (section === "reports" && mainTab === "attribution");
     if (!needsFullReport) return;
-    // In-flight guard: do not stack report requests.
-    if (reportInFlightRef.current) return;
 
     const requestSeq = reportRequestSeqRef.current + 1;
     reportRequestSeqRef.current = requestSeq;
+    reportAbortRef.current?.abort();
+    const abortController = new AbortController();
+    reportAbortRef.current = abortController;
     reportInFlightRef.current = true;
 
     try {
@@ -252,7 +273,7 @@ export default function DashboardPage() {
           model,
           active_tab: activeTab,
           use_click_date: useClickDate,
-        });
+        }, abortController.signal);
         nextCompareLabel = `${previousStart} to ${previousEnd}`;
       } else if (effectiveCompareMode === "custom_range") {
         const [customStart, customEnd] = normalizeDateRange(compareStartDate, compareEndDate);
@@ -263,7 +284,7 @@ export default function DashboardPage() {
             model,
             active_tab: activeTab,
             use_click_date: useClickDate,
-          });
+          }, abortController.signal);
           nextCompareLabel = `${customStart} to ${customEnd}`;
         }
       } else if (effectiveCompareMode === "model" && compareModel !== model) {
@@ -273,12 +294,12 @@ export default function DashboardPage() {
           model: compareModel,
           active_tab: activeTab,
           use_click_date: useClickDate,
-        });
+        }, abortController.signal);
         nextCompareLabel = `${modelLabel(compareModel)} model`;
       }
 
       const [data, compareData] = await Promise.all([
-        fetchReport(primaryParams),
+        fetchReport(primaryParams, abortController.signal),
         comparePromise ?? Promise.resolve(null),
       ]);
 
@@ -290,6 +311,7 @@ export default function DashboardPage() {
         try { window.localStorage.setItem(REPORT_CACHE_KEY, JSON.stringify({ key: cacheKey, data, ts: Date.now() })); } catch {}
       }
     } catch (err: any) {
+      if (isAbortError(err)) return;
       if (requestSeq !== reportRequestSeqRef.current) return;
       if (String(err?.message || "").includes("401")) {
         router.replace("/login");
@@ -297,7 +319,10 @@ export default function DashboardPage() {
       }
       setError(err.message || "Failed to load report");
     } finally {
-      reportInFlightRef.current = false;
+      if (reportAbortRef.current === abortController) {
+        reportAbortRef.current = null;
+        reportInFlightRef.current = false;
+      }
       if (requestSeq === reportRequestSeqRef.current) {
         setLoading(false);
       }
@@ -334,10 +359,10 @@ export default function DashboardPage() {
 
     try {
       const [spendResult, namesResult, stripeResult, ghlResult] = await Promise.allSettled([
-        syncSpend({ platform: "all", start_date: syncStart, end_date: syncEnd }),
-        syncAdNames("all"),
-        syncStripe({ start_date: syncStart, end_date: syncEnd }),
-        syncGhl({ start_date: syncStart, end_date: syncEnd }),
+        withSyncDeadline("Spend sync", 60_000, (signal) => syncSpend({ platform: "all", start_date: syncStart, end_date: syncEnd }, signal)),
+        withSyncDeadline("Ad name sync", 25_000, (signal) => syncAdNames("all", signal)),
+        withSyncDeadline("Stripe sync", 45_000, (signal) => syncStripe({ start_date: syncStart, end_date: syncEnd }, signal)),
+        withSyncDeadline("Lead sync", 45_000, (signal) => syncGhl({ start_date: syncStart, end_date: syncEnd }, signal)),
       ]);
       const errors: string[] = [];
       const addSyncErrors = (scope: string, result: PromiseSettledResult<any>) => {
@@ -432,9 +457,11 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!authChecked) return;
 
-    const runBackgroundSync = async () => {
-      await syncSpendData();
-      await loadReportRef.current();
+    const runBackgroundSync = () => {
+      void loadReportRef.current();
+      void syncSpendData().finally(() => {
+        void loadReportRef.current();
+      });
     };
 
     void runBackgroundSync();
@@ -548,10 +575,19 @@ export default function DashboardPage() {
       : null;
   const compareCaption = compareRange ? monthDayLabel(compareRange.start) : undefined;
 
-  const setRange = (range: { start: string; end: string }) => {
-    setPrimaryStartDate(range.start);
-    setPrimaryEndDate(range.end);
-  };
+  const setRange = useCallback((range: { start: string; end: string }) => {
+    const [start, end] = normalizeDateRange(range.start, range.end);
+    setError(null);
+    setPrimaryStartDate(start);
+    setPrimaryEndDate(end);
+  }, []);
+
+  const handleManualSync = useCallback(async () => {
+    const syncPromise = syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true });
+    await loadReport();
+    await syncPromise;
+    await loadReport();
+  }, [loadReport, syncSpendData, windowEnd, windowStart]);
 
   if (!authChecked) {
     return (
@@ -631,7 +667,7 @@ export default function DashboardPage() {
 
               {section !== "leads" && section !== "settings" && (
                 <button
-                  onClick={async () => { await syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true }); await loadReport(); }}
+                  onClick={handleManualSync}
                   disabled={syncingSpend}
                   className="flex h-[34px] items-center gap-1.5 rounded-lg bg-brand-600 px-3 text-[13px] font-semibold text-white transition-colors hover:bg-brand-700 disabled:opacity-50"
                 >
@@ -722,7 +758,7 @@ export default function DashboardPage() {
                 autoRefresh={autoRefresh}
                 onToggleAutoRefresh={() => setAutoRefresh((v) => !v)}
                 syncing={syncingSpend}
-                onSync={async () => { await syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true }); await loadReport(); }}
+                onSync={handleManualSync}
                 onReload={loadReport}
               />
             )}

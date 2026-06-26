@@ -99,7 +99,7 @@ export async function fetchReport(params: {
   active_tab?: string;
   conversion_type?: string;
   use_click_date?: boolean;
-}) {
+}, signal?: AbortSignal) {
   const sp = new URLSearchParams();
   if (params.start_date) sp.set("start_date", params.start_date);
   if (params.end_date) sp.set("end_date", params.end_date);
@@ -108,7 +108,7 @@ export async function fetchReport(params: {
   if (params.active_tab) sp.set("active_tab", params.active_tab);
   if (params.conversion_type) sp.set("conversion_type", params.conversion_type);
   if (params.use_click_date) sp.set("use_click_date", "true");
-  const res = await apiFetch(`${API_BASE}/api/report?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/report?${sp.toString()}`, {}, signal);
   if (!res.ok) throw new Error(`Report fetch failed: ${res.status}`);
   return res.json();
 }
@@ -141,7 +141,7 @@ export async function syncSpend(params: {
   platform?: string;
   start_date?: string;
   end_date?: string;
-} = {}) {
+} = {}, signal?: AbortSignal) {
   const sp = new URLSearchParams();
   sp.set("platform", params.platform || "all");
   if (params.start_date) sp.set("start_date", params.start_date);
@@ -149,7 +149,7 @@ export async function syncSpend(params: {
 
   const qs = sp.toString();
   const url = `${API_BASE}/api/spend/sync${qs ? `?${qs}` : ""}`;
-  const res = await apiFetch(url, { method: "POST" });
+  const res = await apiFetch(url, { method: "POST" }, signal);
   if (!res.ok) throw new Error(`Spend sync failed: ${res.status}`);
   return res.json();
 }
@@ -379,8 +379,8 @@ export async function deleteAdName(mapping: {
   return res.json();
 }
 
-export async function syncAdNames(platform = "all") {
-  const res = await apiFetch(`${API_BASE}/api/ad-names/sync?platform=${platform}`, { method: "POST" });
+export async function syncAdNames(platform = "all", signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/ad-names/sync?platform=${platform}`, { method: "POST" }, signal);
   if (!res.ok) throw new Error(`Ad names sync failed: ${res.status}`);
   return res.json();
 }
@@ -389,12 +389,12 @@ export async function syncAdNames(platform = "all") {
 export async function syncStripe(params: {
   start_date?: string;
   end_date?: string;
-} = {}) {
+} = {}, signal?: AbortSignal) {
   const sp = new URLSearchParams();
   if (params.start_date) sp.set("start_date", params.start_date);
   if (params.end_date) sp.set("end_date", params.end_date);
   const url = `${API_BASE}/api/stripe/sync${sp.toString() ? `?${sp.toString()}` : ""}`;
-  const res = await apiFetch(url, { method: "POST" });
+  const res = await apiFetch(url, { method: "POST" }, signal);
   if (!res.ok) throw new Error(`Stripe sync failed: ${res.status}`);
   return res.json();
 }
@@ -409,12 +409,12 @@ export async function fetchStripeStatus() {
 export async function syncGhl(params: {
   start_date?: string;
   end_date?: string;
-} = {}) {
+} = {}, signal?: AbortSignal) {
   const sp = new URLSearchParams();
   if (params.start_date) sp.set("start_date", params.start_date);
   if (params.end_date) sp.set("end_date", params.end_date);
   const url = `${API_BASE}/api/ghl/sync${sp.toString() ? `?${sp.toString()}` : ""}`;
-  const res = await apiFetch(url, { method: "POST" });
+  const res = await apiFetch(url, { method: "POST" }, signal);
   if (!res.ok) throw new Error(`GHL sync failed: ${res.status}`);
   return res.json();
 }
