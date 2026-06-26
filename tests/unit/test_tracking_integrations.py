@@ -41,6 +41,39 @@ def test_health_check_coverage_counts(empty_db):
     assert cov["orders_with_source"] == 1
 
 
+def test_health_check_counts_visitor_stitched_paid_source(empty_db):
+    insert_rows(
+        empty_db,
+        "sessions",
+        [
+            {
+                "session_id": "s-vis",
+                "visitor_id": "v-vis",
+                "ts": "2026-01-14T00:00:00Z",
+                "ttclid": "tt-1",
+            }
+        ],
+    )
+    insert_rows(
+        empty_db,
+        "touchpoints",
+        [
+            touchpoint(
+                "2026-01-14T09:00:00Z",
+                "",
+                platform="tiktok",
+                campaign_id="tt-campaign",
+                session_id="s-vis",
+            )
+        ],
+    )
+    insert_rows(empty_db, "orders", [order("o1", "2026-01-15T12:00:00Z", "", net=100, visitor_id="v-vis")])
+
+    cov = tracking_health_check(empty_db)["coverage"]
+    assert cov["orders_total"] == 1
+    assert cov["orders_with_source"] == 1
+
+
 def test_health_check_reports_gaps(empty_db):
     insert_rows(empty_db, "sessions", [{"session_id": "s1", "ts": "2026-01-14T00:00:00Z", "customer_key": "c1"}])
     insert_rows(empty_db, "orders", [order("o1", "2026-01-15T12:00:00Z", "c1", net=100)])

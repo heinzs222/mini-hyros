@@ -36,6 +36,39 @@ def _table_columns(db_path: str, table: str) -> set[str]:
         return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def _identity_predicate(
+    columns: set[str],
+    *,
+    customer_key: str = "",
+    session_id: str = "",
+    visitor_id: str = "",
+    alias: str = "",
+) -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    prefix = f"{alias}." if alias else ""
+    for col, value in (
+        ("customer_key", customer_key),
+        ("session_id", session_id),
+        ("visitor_id", visitor_id),
+    ):
+        value = str(value or "").strip()
+        if value and col in columns:
+            clauses.append(f"COALESCE({prefix}{col}, '') = ?")
+            params.append(value)
+    return " OR ".join(clauses), params
+
+
+def _identity_label(customer_key: str = "", session_id: str = "", visitor_id: str = "") -> str:
+    if customer_key:
+        return customer_key
+    if visitor_id:
+        return f"visitor:{visitor_id}"
+    if session_id:
+        return f"session:{session_id}"
+    return ""
+
+
 def _parse_ts(ts: str) -> datetime | None:
     if not ts:
         return None
@@ -118,6 +151,8 @@ def _compact_path(timeline: list[dict[str, Any]], max_steps: int = 8) -> list[st
 def _conversion_timeline(
     db_path: str,
     customer_key: str,
+    session_id: str,
+    visitor_id: str,
     conversion_ts: str,
     conversion: dict[str, Any],
     names: dict[tuple[str, str, str], str],
@@ -129,16 +164,24 @@ def _conversion_timeline(
         "session_id", "ts", "utm_source", "utm_medium", "utm_campaign", "utm_content",
         "landing_page", "device", "referrer", "gclid", "fbclid", "ttclid",
     ]
-    for optional_col in ("visitor_id", "event_name", "page_title", "custom_data_json"):
+    for optional_col in ("customer_key", "visitor_id", "event_name", "page_title", "custom_data_json"):
         if optional_col in session_cols:
             session_select.append(optional_col)
 
-    sessions = db_query(db_path, f"""
-        SELECT {", ".join(session_select)}
-        FROM sessions
-        WHERE customer_key = ? AND ts <= ?
-        ORDER BY ts
-    """, [customer_key, conversion_ts])
+    session_where, session_params = _identity_predicate(
+        session_cols,
+        customer_key=customer_key,
+        session_id=session_id,
+        visitor_id=visitor_id,
+    )
+    sessions = []
+    if session_where:
+        sessions = db_query(db_path, f"""
+            SELECT {", ".join(session_select)}
+            FROM sessions
+            WHERE ({session_where}) AND ts <= ?
+            ORDER BY ts
+        """, [*session_params, conversion_ts])
 
     for s in sessions:
         details = {
@@ -154,7 +197,7 @@ def _conversion_timeline(
             "has_fbclid": bool(s.get("fbclid")),
             "has_ttclid": bool(s.get("ttclid")),
         }
-        for optional_col in ("visitor_id", "event_name", "page_title"):
+        for optional_col in ("customer_key", "visitor_id", "event_name", "page_title"):
             if optional_col in s:
                 details[optional_col] = s.get(optional_col, "")
         if s.get("custom_data_json"):
@@ -164,13 +207,59 @@ def _conversion_timeline(
                 details["custom_data"] = {}
         timeline.append({"type": "session", "ts": s.get("ts", ""), "details": details})
 
-    touchpoints = db_query(db_path, """
-        SELECT ts, channel, platform, campaign_id, adset_id, ad_id,
-               creative_id, gclid, fbclid, ttclid, session_id
-        FROM touchpoints
-        WHERE customer_key = ? AND ts <= ?
-        ORDER BY ts
-    """, [customer_key, conversion_ts])
+    touchpoint_cols = _table_columns(db_path, "touchpoints")
+    touchpoint_customer_expr = (
+        "COALESCE(NULLIF(t.customer_key, ''), s.customer_key, '') AS customer_key"
+        if "customer_key" in touchpoint_cols
+        else "COALESCE(s.customer_key, '') AS customer_key"
+    )
+    touchpoint_session_expr = "t.session_id" if "session_id" in touchpoint_cols else "'' AS session_id"
+    touchpoint_visitor_expr = (
+        "COALESCE(NULLIF(t.visitor_id, ''), s.visitor_id, '') AS visitor_id"
+        if "visitor_id" in touchpoint_cols
+        else "COALESCE(s.visitor_id, '') AS visitor_id"
+    )
+    session_customer_agg = (
+        "MAX(NULLIF(customer_key, '')) AS customer_key"
+        if "customer_key" in session_cols
+        else "'' AS customer_key"
+    )
+    session_visitor_agg = (
+        "MAX(NULLIF(visitor_id, '')) AS visitor_id"
+        if "visitor_id" in session_cols
+        else "'' AS visitor_id"
+    )
+    touch_where, touch_params = _identity_predicate(
+        {"customer_key", "session_id", "visitor_id"},
+        customer_key=customer_key,
+        session_id=session_id,
+        visitor_id=visitor_id,
+    )
+    touchpoints = []
+    if touch_where:
+        touchpoints = db_query(db_path, f"""
+            WITH session_identity AS (
+                SELECT session_id,
+                       {session_visitor_agg},
+                       {session_customer_agg}
+                FROM sessions
+                WHERE COALESCE(session_id, '') != ''
+                GROUP BY session_id
+            ),
+            touch_identity AS (
+                SELECT t.ts, t.channel, t.platform, t.campaign_id, t.adset_id, t.ad_id,
+                       t.creative_id, t.gclid, t.fbclid, t.ttclid,
+                       {touchpoint_customer_expr},
+                       {touchpoint_session_expr},
+                       {touchpoint_visitor_expr}
+                FROM touchpoints t
+                LEFT JOIN session_identity s ON s.session_id = t.session_id
+            )
+            SELECT *
+            FROM touch_identity
+            WHERE ({touch_where}) AND ts <= ?
+            ORDER BY ts
+        """, [*touch_params, conversion_ts])
 
     for t in touchpoints:
         platform = str(t.get("platform") or "")
@@ -190,7 +279,9 @@ def _conversion_timeline(
                 "ad_id": ad_id,
                 "ad_name": _entity_name(names, platform, "ad", ad_id),
                 "creative_id": t.get("creative_id", ""),
+                "customer_key": t.get("customer_key", ""),
                 "session_id": t.get("session_id", ""),
+                "visitor_id": t.get("visitor_id", ""),
                 "has_gclid": bool(t.get("gclid")),
                 "has_fbclid": bool(t.get("fbclid")),
                 "has_ttclid": bool(t.get("ttclid")),
@@ -406,8 +497,16 @@ async def lead_paths(
     purchase_types = ["purchase", "payment"] if include_purchases else []
     wanted_types = lead_types + purchase_types
     placeholders = ", ".join("?" for _ in wanted_types)
+    conversion_cols = _table_columns(db_path, "conversions")
+    identity_terms = ["COALESCE(c.customer_key, '') != ''"]
+    if "session_id" in conversion_cols:
+        identity_terms.append("COALESCE(c.session_id, '') != ''")
+    if "visitor_id" in conversion_cols:
+        identity_terms.append("COALESCE(c.visitor_id, '') != ''")
+    session_select = "c.session_id" if "session_id" in conversion_cols else "'' AS session_id"
+    visitor_select = "c.visitor_id" if "visitor_id" in conversion_cols else "'' AS visitor_id"
     where = [
-        "COALESCE(c.customer_key, '') != ''",
+        f"({' OR '.join(identity_terms)})",
         f"LOWER(COALESCE(c.type, '')) IN ({placeholders})",
     ]
     params: list[Any] = list(wanted_types)
@@ -422,7 +521,7 @@ async def lead_paths(
     params.append(limit)
     conversions = db_query(db_path, f"""
         SELECT c.conversion_id, c.ts, c.type, c.value, c.order_id, c.customer_key,
-               o.gross, o.net
+               {session_select}, {visitor_select}, o.gross, o.net
         FROM conversions c
         LEFT JOIN orders o ON o.order_id = c.order_id
         WHERE {" AND ".join(where)}
@@ -434,15 +533,20 @@ async def lead_paths(
     rows: list[dict[str, Any]] = []
     for conv in conversions:
         customer_key = str(conv.get("customer_key") or "")
+        session_id = str(conv.get("session_id") or "")
+        visitor_id = str(conv.get("visitor_id") or "")
         conversion_ts = str(conv.get("ts") or "")
-        timeline = _conversion_timeline(db_path, customer_key, conversion_ts, conv, names)
+        timeline = _conversion_timeline(db_path, customer_key, session_id, visitor_id, conversion_ts, conv, names)
         pre_conversion = [event for event in timeline if event.get("type") not in ("conversion", "order")]
         first_touch = pre_conversion[0] if pre_conversion else None
         last_touch = pre_conversion[-1] if pre_conversion else None
+        label = _identity_label(customer_key, session_id, visitor_id)
 
         rows.append({
             "customer_key": customer_key,
-            "customer_key_short": f"{customer_key[:10]}..." if len(customer_key) > 13 else customer_key,
+            "session_id": session_id,
+            "visitor_id": visitor_id,
+            "customer_key_short": f"{label[:10]}..." if len(label) > 13 else label,
             "conversion_id": conv.get("conversion_id", ""),
             "conversion_type": conv.get("type", ""),
             "conversion_ts": conversion_ts,

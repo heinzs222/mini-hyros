@@ -210,19 +210,72 @@ def _load_orders_and_touchpoints(
         {"start": start_d.isoformat(), "end_excl": orders_end_excl},
     ).rows
 
+    conversion_cols = _table_columns(db_path, "conversions")
+    if orders and conversion_cols:
+        conversion_select = ["order_id", "ts", "customer_key"]
+        for col in ("session_id", "visitor_id"):
+            if col in conversion_cols:
+                conversion_select.append(col)
+            else:
+                conversion_select.append(f"'' AS {col}")
+
+        conversions = query(
+            db_path,
+            f"""
+            SELECT {", ".join(conversion_select)}
+            FROM conversions
+            WHERE COALESCE(order_id, '') != ''
+              AND ts >= :start
+              AND ts < :end_excl
+            ORDER BY ts DESC
+            """,
+            {"start": start_d.isoformat(), "end_excl": orders_end_excl},
+        ).rows
+        conversions_by_order: dict[str, dict[str, Any]] = {}
+        for conv in conversions:
+            order_id = str(conv.get("order_id") or "")
+            if order_id and order_id not in conversions_by_order:
+                conversions_by_order[order_id] = conv
+
+        for order in orders:
+            conv = conversions_by_order.get(str(order.get("order_id") or ""))
+            if not conv:
+                continue
+            order["_conversion_ts"] = str(conv.get("ts") or "")
+            for col in ("customer_key", "session_id", "visitor_id"):
+                if not str(order.get(col) or "").strip() and str(conv.get(col) or "").strip():
+                    order[col] = str(conv.get(col) or "").strip()
+
     # Touchpoints only need to span [start_d - lookback, orders_end_d]. They are
     # grouped by multiple identities because browser-side purchases can be
     # anonymous at checkout time but still carry the same session/visitor id as
     # prior ad clicks. This mirrors HYROS-style stitching more closely than
     # requiring customer_key on every order.
     win_start = (start_d - timedelta(days=lookback_days)).isoformat()
+    touchpoint_cols = _table_columns(db_path, "touchpoints")
+    touchpoint_visitor_expr = (
+        "COALESCE(NULLIF(t.visitor_id, ''), s.visitor_id, '') AS visitor_id"
+        if "visitor_id" in touchpoint_cols
+        else "COALESCE(s.visitor_id, '') AS visitor_id"
+    )
     touchpoints = query(
         db_path,
-        """
-        SELECT rowid AS _rowid, ts, channel, platform, campaign_id, adset_id,
-               ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id
-        FROM touchpoints
-        WHERE ts >= :win_start AND ts < :end_excl;
+        f"""
+        SELECT t.rowid AS _rowid, t.ts, t.channel, t.platform, t.campaign_id, t.adset_id,
+               t.ad_id, t.creative_id, t.gclid, t.fbclid, t.ttclid,
+               COALESCE(NULLIF(t.customer_key, ''), s.customer_key, '') AS customer_key,
+               t.session_id,
+               {touchpoint_visitor_expr}
+        FROM touchpoints t
+        LEFT JOIN (
+            SELECT session_id,
+                   MAX(NULLIF(visitor_id, '')) AS visitor_id,
+                   MAX(NULLIF(customer_key, '')) AS customer_key
+            FROM sessions
+            WHERE COALESCE(session_id, '') != ''
+            GROUP BY session_id
+        ) s ON s.session_id = t.session_id
+        WHERE t.ts >= :win_start AND t.ts < :end_excl;
         """,
         {"win_start": win_start, "end_excl": orders_end_excl},
     ).rows
@@ -283,16 +336,33 @@ def _attributed(
         # a touchpoint with the exact same timestamp; use that to recover the
         # browser session, then include earlier source touches from that session.
         if not window_tps:
-            for exact_tp in tps_by_exact_ts.get(str(o.get("ts") or ""), []):
-                add_touch(exact_tp)
-                for key in _identity_keys(exact_tp):
-                    dts = dts_by_identity.get(key)
-                    if not dts:
-                        continue
-                    lo = bisect_left(dts, window_start)
-                    hi = bisect_right(dts, order_ts)
-                    for tp in tps_by_identity[key][lo:hi]:
-                        add_touch(tp)
+            exact_timestamps = [str(o.get("ts") or "")]
+            conversion_ts = str(o.get("_conversion_ts") or "")
+            if conversion_ts and conversion_ts not in exact_timestamps:
+                exact_timestamps.append(conversion_ts)
+            for exact_ts in exact_timestamps:
+                for exact_tp in tps_by_exact_ts.get(exact_ts, []):
+                    add_touch(exact_tp)
+                    for key in _identity_keys(exact_tp):
+                        dts = dts_by_identity.get(key)
+                        if not dts:
+                            continue
+                        lo = bisect_left(dts, window_start)
+                        hi = bisect_right(dts, order_ts)
+                        for tp in tps_by_identity[key][lo:hi]:
+                            add_touch(tp)
+
+        if not window_tps and str(o.get("_conversion_ts") or ""):
+            conversion_ts = parse_iso_ts(str(o.get("_conversion_ts") or ""))
+            conversion_window_start = conversion_ts - lookback
+            for key in _identity_keys(o):
+                dts = dts_by_identity.get(key)
+                if not dts:
+                    continue
+                lo = bisect_left(dts, conversion_window_start)
+                hi = bisect_right(dts, conversion_ts)
+                for tp in tps_by_identity[key][lo:hi]:
+                    add_touch(tp)
 
         if not window_tps:
             pseudo = _touch_from_order(o, order_ts)

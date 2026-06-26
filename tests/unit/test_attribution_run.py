@@ -290,6 +290,103 @@ def test_anonymous_order_can_attribute_by_session_id(empty_db):
     assert result["rows"][0]["revenue"] == 100.00
 
 
+def test_anonymous_order_can_attribute_by_visitor_id_via_session(empty_db):
+    insert_rows(
+        empty_db,
+        "sessions",
+        [
+            {
+                "session_id": "sess_visitor",
+                "visitor_id": "vis_paid",
+                "ts": "2026-01-14T09:00:00Z",
+            }
+        ],
+    )
+    insert_rows(
+        empty_db,
+        "touchpoints",
+        [
+            touchpoint(
+                "2026-01-14T09:05:00Z",
+                "",
+                platform="google",
+                campaign_id="g_visitor_campaign",
+                ad_id="g_visitor_ad",
+                session_id="sess_visitor",
+            )
+        ],
+    )
+    insert_rows(
+        empty_db,
+        "orders",
+        [order("o1", "2026-01-15T12:00:00Z", "", net=100, visitor_id="vis_paid")],
+    )
+
+    result = attribution_run(
+        empty_db,
+        model="last_click",
+        start_date=JAN,
+        end_date=JAN_END,
+        lookback_days=30,
+        conversion_type="Purchase",
+        value_type="revenue",
+    )
+
+    assert result["unattributed_orders"] == 0
+    assert result["rows"][0]["platform"] == "google"
+    assert result["rows"][0]["campaign_id"] == "g_visitor_campaign"
+    assert result["rows"][0]["revenue"] == 100.00
+
+
+def test_order_identity_is_recovered_from_conversion_order_id(empty_db):
+    insert_rows(
+        empty_db,
+        "touchpoints",
+        [
+            touchpoint(
+                "2026-01-14T09:00:00Z",
+                "",
+                platform="tiktok",
+                campaign_id="tt_campaign",
+                ad_id="tt_ad",
+                session_id="sess_bridge",
+            )
+        ],
+    )
+    insert_rows(empty_db, "orders", [order("o1", "2026-01-15T12:00:00Z", "", net=100)])
+    insert_rows(
+        empty_db,
+        "conversions",
+        [
+            {
+                "conversion_id": "conv1",
+                "ts": "2026-01-15T12:00:00Z",
+                "type": "Purchase",
+                "value": "100",
+                "order_id": "o1",
+                "customer_key": "",
+                "session_id": "sess_bridge",
+                "visitor_id": "",
+            }
+        ],
+    )
+
+    result = attribution_run(
+        empty_db,
+        model="last_click",
+        start_date=JAN,
+        end_date=JAN_END,
+        lookback_days=30,
+        conversion_type="Purchase",
+        value_type="revenue",
+    )
+
+    assert result["unattributed_orders"] == 0
+    assert result["rows"][0]["platform"] == "tiktok"
+    assert result["rows"][0]["campaign_id"] == "tt_campaign"
+    assert result["rows"][0]["revenue"] == 100.00
+
+
 def test_legacy_pixel_order_recovers_session_from_same_timestamp_touchpoint(empty_db):
     insert_rows(
         empty_db,

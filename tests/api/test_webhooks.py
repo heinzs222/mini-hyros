@@ -248,6 +248,7 @@ def test_track_pageview_writes_session_and_touchpoint(client, api_db):
     # utm_source facebook -> meta / paid_social
     assert tp[0]["platform"] == "meta"
     assert tp[0]["channel"] == "paid_social"
+    assert tp[0]["visitor_id"] == "vis-1"
 
 
 def test_track_email_in_custom_data_becomes_hashed_customer_key(client, api_db):
@@ -418,6 +419,7 @@ def test_conversion_purchase_creates_order_and_conversion(client, api_db, monkey
         "type": "Purchase",
         "customer_key": "Conv@Example.com",
         "session_id": "sess-conv-1",
+        "visitor_id": "vis-conv-1",
         "utm_source": "tiktok",
     }
     resp = client.post("/api/webhooks/conversion", json=payload)
@@ -428,14 +430,17 @@ def test_conversion_purchase_creates_order_and_conversion(client, api_db, monkey
     o = _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("conv-ord-1",))[0]
     assert float(o["gross"]) == 75.50
     assert o["customer_key"] == ck
+    assert o["visitor_id"] == "vis-conv-1"
 
     conv = _rows(api_db, "SELECT * FROM conversions WHERE order_id = ?", ("conv-ord-1",))[0]
     assert conv["type"] == "Purchase"
     assert float(conv["value"]) == 75.50
+    assert conv["visitor_id"] == "vis-conv-1"
 
     tp = _rows(api_db, "SELECT * FROM touchpoints WHERE session_id = ?", ("sess-conv-1",))[0]
     assert tp["platform"] == "tiktok"
     assert tp["channel"] == "paid_social"
+    assert tp["visitor_id"] == "vis-conv-1"
 
 
 def test_conversion_lead_no_order_row(client, api_db, monkeypatch):

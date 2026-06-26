@@ -95,10 +95,15 @@ def _ensure_tracking_schema(db_path: str) -> None:
             if col not in conversion_cols:
                 conn.execute(f"ALTER TABLE conversions ADD COLUMN {col} TEXT DEFAULT ''")
 
+        touchpoint_cols = _table_columns(conn, "touchpoints")
+        if "visitor_id" not in touchpoint_cols:
+            conn.execute("ALTER TABLE touchpoints ADD COLUMN visitor_id TEXT DEFAULT ''")
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_visitor_id ON sessions(visitor_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_customer_key ON sessions(customer_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_touchpoints_session_id ON touchpoints(session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_touchpoints_visitor_id ON touchpoints(visitor_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_touchpoints_customer_key ON touchpoints(customer_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_customer_key ON orders(customer_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_session_id ON orders(session_id)")
@@ -190,6 +195,10 @@ def _backfill_customer_key(conn: sqlite3.Connection, customer_key: str, visitor_
     if visitor_id:
         conn.execute(
             "UPDATE sessions SET customer_key = ? WHERE COALESCE(customer_key, '') = '' AND visitor_id = ?",
+            (customer_key, visitor_id),
+        )
+        conn.execute(
+            "UPDATE touchpoints SET customer_key = ? WHERE COALESCE(customer_key, '') = '' AND visitor_id = ?",
             (customer_key, visitor_id),
         )
         conn.execute(
@@ -444,8 +453,8 @@ async def track_event(request: Request):
             ),
         )
         conn.execute(
-            """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id, visitor_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 now,
                 channel,
@@ -459,6 +468,7 @@ async def track_event(request: Request):
                 str(payload.get("ttclid", "")),
                 customer_key,
                 session_id,
+                visitor_id,
             ),
         )
         conn.commit()
@@ -650,8 +660,8 @@ async def track_conversion(request: Request):
             (_sha256(f"pxconv|{order_id}"), now, conv_type, str(gross), order_id, customer_key, session_id, visitor_id),
         )
         conn.execute(
-            """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id, visitor_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 now,
                 channel,
@@ -665,6 +675,7 @@ async def track_conversion(request: Request):
                 str(payload.get("ttclid", "")),
                 customer_key,
                 session_id,
+                visitor_id,
             ),
         )
         conn.commit()

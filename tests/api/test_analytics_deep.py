@@ -444,6 +444,57 @@ def test_journey_leads_date_filter(client, api_db):
     assert body["date_range"] == {"start": "2026-01-01", "end": "2026-01-31"}
 
 
+def test_journey_leads_includes_anonymous_visitor_path(client, api_db):
+    """Anonymous browser conversions still show the lead path via session/visitor id."""
+    insert_rows(api_db, "sessions", [
+        _session(
+            "s-anon",
+            "2026-01-10T08:00:00Z",
+            "",
+            visitor_id="v-anon",
+            landing_page="/checkout",
+            ttclid="tt-click",
+        ),
+    ])
+    insert_rows(api_db, "touchpoints", [
+        touchpoint(
+            "2026-01-10T08:01:00Z",
+            "",
+            platform="tiktok",
+            campaign_id="tt-campaign",
+            session_id="s-anon",
+        ),
+    ])
+    insert_rows(api_db, "conversions", [
+        {
+            "conversion_id": "anon-lead",
+            "ts": "2026-01-10T08:05:00Z",
+            "type": "Lead",
+            "value": "0",
+            "order_id": "",
+            "customer_key": "",
+            "session_id": "s-anon",
+            "visitor_id": "v-anon",
+        }
+    ])
+
+    with _no_net() as router:
+        router.post(url__startswith="https://api.anthropic.com").mock(return_value=httpx.Response(200, json={}))
+        r = client.get("/api/journey/leads", params={"include_purchases": "false"})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    row = body["rows"][0]
+    assert row["customer_key"] == ""
+    assert row["session_id"] == "s-anon"
+    assert row["visitor_id"] == "v-anon"
+    assert row["customer_key_short"].startswith("visitor:")
+    assert row["touchpoint_count"] >= 2
+    assert "tiktok: tt-campaign" in row["path"]
+    assert [event["type"] for event in row["timeline"]] == ["session", "touchpoint", "conversion"]
+
+
 # ===========================================================================
 # journey/common-paths
 # ===========================================================================

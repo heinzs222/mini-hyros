@@ -41,6 +41,7 @@ def touchpoint(
     fbclid: str = "",
     ttclid: str = "",
     session_id: str = "sess1",
+    visitor_id: str = "",
 ) -> dict[str, Any]:
     return {
         "ts": ts,
@@ -55,6 +56,7 @@ def touchpoint(
         "ttclid": ttclid,
         "customer_key": customer_key,
         "session_id": session_id,
+        "visitor_id": visitor_id,
     }
 
 

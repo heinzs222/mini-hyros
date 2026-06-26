@@ -3,8 +3,14 @@ from __future__ import annotations
 from attributionops.db import query
 
 
+def _table_columns(db_path: str, table: str) -> set[str]:
+    try:
+        return {str(r.get("name") or "") for r in query(db_path, f"PRAGMA table_info({table})").rows}
+    except Exception:
+        return set()
+
+
 def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int = 30) -> dict[str, object]:
-    # Coverage stats
     sessions_total = query(db_path, "SELECT COUNT(*) AS n FROM sessions;").rows[0]["n"]
     sessions_with_click_id = query(
         db_path,
@@ -17,36 +23,105 @@ def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int =
 
     orders_total = query(db_path, "SELECT COUNT(*) AS n FROM orders;").rows[0]["n"]
 
-    # orders_with_source = orders that have at least one touchpoint for that
-    # customer within the lookback window before the order timestamp. This was
-    # previously a full touchpoints load + O(orders × touches) Python loop with
-    # repeated timestamp parsing; SQLite can do it directly with an EXISTS
-    # subquery backed by the touchpoints(customer_key, ts) index. The ts columns
-    # are ISO-8601 strings, so strftime reproduces the exact stored format for a
-    # sargable lexical comparison.
+    order_cols = _table_columns(db_path, "orders")
+    conversion_cols = _table_columns(db_path, "conversions")
+    touchpoint_cols = _table_columns(db_path, "touchpoints")
+
+    def order_expr(col: str) -> str:
+        return f"COALESCE(o.{col}, '')" if col in order_cols else "''"
+
+    def conversion_agg(col: str) -> str:
+        return f"MAX(NULLIF({col}, '')) AS {col}" if col in conversion_cols else f"'' AS {col}"
+
+    touchpoint_visitor_expr = (
+        "COALESCE(NULLIF(t.visitor_id, ''), s.visitor_id, '') AS visitor_id"
+        if "visitor_id" in touchpoint_cols
+        else "COALESCE(s.visitor_id, '') AS visitor_id"
+    )
+    order_direct_source = " OR ".join(
+        [
+            f"LOWER({order_expr('channel')}) NOT IN ('', 'organic', 'direct')",
+            f"{order_expr('platform')} <> ''",
+            f"{order_expr('campaign_id')} <> ''",
+            f"{order_expr('adset_id')} <> ''",
+            f"{order_expr('ad_id')} <> ''",
+            f"{order_expr('creative_id')} <> ''",
+            f"{order_expr('gclid')} <> ''",
+            f"{order_expr('fbclid')} <> ''",
+            f"{order_expr('ttclid')} <> ''",
+        ]
+    )
+
     orders_with_source = query(
         db_path,
-        """
+        f"""
+        WITH conversion_identity AS (
+            SELECT order_id,
+                   MAX(NULLIF(customer_key, '')) AS customer_key,
+                   {conversion_agg("session_id")},
+                   {conversion_agg("visitor_id")}
+            FROM conversions
+            WHERE COALESCE(order_id, '') <> ''
+            GROUP BY order_id
+        ),
+        order_identity AS (
+            SELECT o.order_id, o.ts,
+                   COALESCE(NULLIF(o.customer_key, ''), c.customer_key, '') AS customer_key,
+                   COALESCE(NULLIF({order_expr("session_id")}, ''), c.session_id, '') AS session_id,
+                   COALESCE(NULLIF({order_expr("visitor_id")}, ''), c.visitor_id, '') AS visitor_id,
+                   ({order_direct_source}) AS has_direct_source
+            FROM orders o
+            LEFT JOIN conversion_identity c ON c.order_id = o.order_id
+        ),
+        touch_identity AS (
+            SELECT t.ts, t.channel, t.platform, t.campaign_id, t.adset_id, t.ad_id, t.creative_id,
+                   t.gclid, t.fbclid, t.ttclid,
+                   COALESCE(NULLIF(t.customer_key, ''), s.customer_key, '') AS customer_key,
+                   t.session_id,
+                   {touchpoint_visitor_expr}
+            FROM touchpoints t
+            LEFT JOIN (
+                SELECT session_id,
+                       MAX(NULLIF(visitor_id, '')) AS visitor_id,
+                       MAX(NULLIF(customer_key, '')) AS customer_key
+                FROM sessions
+                WHERE COALESCE(session_id, '') <> ''
+                GROUP BY session_id
+            ) s ON s.session_id = t.session_id
+        )
         SELECT COUNT(*) AS n
-        FROM orders o
-        WHERE COALESCE(o.customer_key, '') <> ''
-          AND EXISTS (
-            SELECT 1 FROM touchpoints t
-            WHERE t.customer_key = o.customer_key
+        FROM order_identity o
+        WHERE o.has_direct_source
+          OR EXISTS (
+            SELECT 1 FROM touch_identity t
+            WHERE (
+                (COALESCE(o.customer_key, '') <> '' AND t.customer_key = o.customer_key)
+                OR (COALESCE(o.session_id, '') <> '' AND t.session_id = o.session_id)
+                OR (COALESCE(o.visitor_id, '') <> '' AND t.visitor_id = o.visitor_id)
+              )
               AND t.ts <= o.ts
               AND t.ts >= strftime('%Y-%m-%dT%H:%M:%SZ', o.ts, :lookback)
+              AND (
+                LOWER(COALESCE(t.channel, '')) NOT IN ('', 'organic', 'direct')
+                OR COALESCE(t.platform, '') <> ''
+                OR COALESCE(t.campaign_id, '') <> ''
+                OR COALESCE(t.adset_id, '') <> ''
+                OR COALESCE(t.ad_id, '') <> ''
+                OR COALESCE(t.creative_id, '') <> ''
+                OR COALESCE(t.gclid, '') <> ''
+                OR COALESCE(t.fbclid, '') <> ''
+                OR COALESCE(t.ttclid, '') <> ''
+              )
           );
         """,
         {"lookback": f"-{int(lookback_days_for_order_source)} days"},
     ).rows[0]["n"]
 
-    # Freshness
     last_session_ts = query(db_path, "SELECT MAX(ts) AS max_ts FROM sessions;").rows[0]["max_ts"]
     last_order_ts = query(db_path, "SELECT MAX(ts) AS max_ts FROM orders;").rows[0]["max_ts"]
     last_touch_ts = query(db_path, "SELECT MAX(ts) AS max_ts FROM touchpoints;").rows[0]["max_ts"]
     last_conv_ts = query(db_path, "SELECT MAX(ts) AS max_ts FROM conversions;").rows[0]["max_ts"]
 
-    # Gaps
     gaps: list[dict[str, str]] = []
     if int(sessions_total) > 0:
         missing_click_id_rate = 1.0 - (int(sessions_with_click_id) / int(sessions_total))
@@ -64,8 +139,8 @@ def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int =
             gaps.append(
                 {
                     "issue": "Orders missing attributable source",
-                    "impact": f"{missing_source_rate:.0%} of orders have no touchpoint within {lookback_days_for_order_source}d.",
-                    "fix": "Verify identity stitching (customer_key), server-side touchpoint logging, and UTM governance.",
+                    "impact": f"{missing_source_rate:.0%} of orders have no paid source within {lookback_days_for_order_source}d.",
+                    "fix": "Verify identity stitching, server-side touchpoint logging, and UTM/click-id capture.",
                 }
             )
 
@@ -94,4 +169,3 @@ def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int =
             "Tracking health computed from live local SQLite warehouse tables.",
         ],
     }
-

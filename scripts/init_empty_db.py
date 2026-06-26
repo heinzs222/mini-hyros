@@ -35,7 +35,7 @@ def init_db(db_path: str) -> None:
             ts TEXT, channel TEXT, platform TEXT, campaign_id TEXT,
             adset_id TEXT, ad_id TEXT, creative_id TEXT,
             gclid TEXT, fbclid TEXT, ttclid TEXT,
-            customer_key TEXT, session_id TEXT
+            customer_key TEXT, session_id TEXT, visitor_id TEXT DEFAULT ''
         );""")
 
         conn.execute("""CREATE TABLE orders (
@@ -67,6 +67,7 @@ def init_db(db_path: str) -> None:
         # Composite covers the attribution customer+window scan and tracking EXISTS.
         conn.execute("CREATE INDEX idx_touchpoints_customer_key_ts ON touchpoints(customer_key, ts);")
         conn.execute("CREATE INDEX idx_touchpoints_session_id ON touchpoints(session_id);")
+        conn.execute("CREATE INDEX idx_touchpoints_visitor_id ON touchpoints(visitor_id);")
         conn.execute("CREATE INDEX idx_touchpoints_customer_key ON touchpoints(customer_key);")
         conn.execute("CREATE INDEX idx_touchpoints_ts ON touchpoints(ts);")
         conn.execute("CREATE INDEX idx_touchpoints_campaign_id ON touchpoints(campaign_id);")
