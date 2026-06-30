@@ -139,8 +139,6 @@ async function withSyncDeadline<T>(label: string, timeoutMs: number, run: (signa
   }
 }
 
-const REPORT_CACHE_KEY = "hyros_report_cache";
-
 const REPORT_TABS = [
   { key: "attribution", label: "Attribution", icon: <BarChart3 size={14} /> },
   { key: "funnel", label: "Funnel", icon: <Filter size={14} /> },
@@ -243,22 +241,8 @@ export default function DashboardPage() {
         active_tab: activeTab,
         use_click_date: useClickDate,
       };
-      const cacheKey = JSON.stringify(primaryParams);
-      let cacheHit = false;
 
-      const cached = typeof window !== "undefined" ? window.localStorage.getItem(REPORT_CACHE_KEY) : null;
-      if (cached) {
-        try {
-          const { data, key } = JSON.parse(cached);
-          if (key === cacheKey && data) {
-            setReport(data);
-            setLoading(false);
-            cacheHit = true;
-          }
-        } catch {}
-      }
-
-      if (!cacheHit) setLoading(true);
+      setLoading(true);
       setError(null);
       setCompareReport(null);
 
@@ -307,9 +291,6 @@ export default function DashboardPage() {
       setReport(data);
       setCompareReport(compareData);
       setCompareLabel(compareData ? nextCompareLabel : "");
-      if (data && typeof window !== "undefined") {
-        try { window.localStorage.setItem(REPORT_CACHE_KEY, JSON.stringify({ key: cacheKey, data, ts: Date.now() })); } catch {}
-      }
     } catch (err: any) {
       if (isAbortError(err)) return;
       if (requestSeq !== reportRequestSeqRef.current) return;

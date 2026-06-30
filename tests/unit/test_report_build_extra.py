@@ -114,6 +114,36 @@ def test_campaign_tab_falls_back_to_touchpoints_without_spend(empty_db):
     assert "cmp1" in names
 
 
+def test_summary_uses_account_spend_not_filtered_campaign_rows(empty_db):
+    insert_rows(
+        empty_db,
+        "spend",
+        [
+            spend(date="2026-01-10", platform="meta", account_id="acc_meta",
+                  campaign_id="cmp1", adset_id="set1", ad_id="ad1", clicks=10, cost=100, impressions=1000),
+            spend(date="2026-01-10", platform="google", account_id="acc_google",
+                  campaign_id="", adset_id="", ad_id="", clicks=50, cost=900, impressions=9000),
+        ],
+    )
+    insert_rows(
+        empty_db,
+        "touchpoints",
+        [touchpoint("2026-01-12T00:00:00Z", "c1", platform="meta",
+                    campaign_id="cmp1", adset_id="set1", ad_id="ad1")],
+    )
+    insert_rows(empty_db, "orders", [order("o1", "2026-01-15T00:00:00Z", "c1", net=800)])
+
+    report = build_hyros_like_report(empty_db, _inputs("campaign"))
+    table_total = report["table"]["totals_row"]
+    summary = report["summary_totals"]
+
+    assert table_total["cost"] == 100.0
+    assert table_total["clicks"] == 10
+    assert summary["cost"] == 1000.0
+    assert summary["clicks"] == 60
+    assert summary["blended_roas"] == 0.8
+
+
 def test_action_plan_flags_losers_winners_and_tracking(empty_db):
     # meta campaign: $200 spend, no attributed revenue -> losing.
     # google campaign: $100 spend, $800 attributed revenue -> winning.

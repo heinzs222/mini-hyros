@@ -160,15 +160,24 @@ export default function DateRangePicker({
   const isStart = (iso: string) => iso === draft.start;
   const isEnd = (iso: string) => iso === draft.end;
 
+  const commitRange = (range: Range) => {
+    const start = range.start || range.end;
+    const end = range.end || range.start;
+    if (!start || !end) return;
+    onChange(start <= end ? { start, end } : { start: end, end: start });
+    setOpen(false);
+  };
+
   const pickDay = (iso: string) => {
     if (!anchor) {
       setDraft({ start: iso, end: iso });
       setAnchor(iso);
       return;
     }
-    if (iso < anchor) setDraft({ start: iso, end: anchor });
-    else setDraft({ start: anchor, end: iso });
+    const next = iso < anchor ? { start: iso, end: anchor } : { start: anchor, end: iso };
+    setDraft(next);
     setAnchor(null);
+    commitRange(next);
   };
 
   const applyPreset = (p: Preset) => {
@@ -176,13 +185,11 @@ export default function DateRangePicker({
     setDraft(r);
     setAnchor(null);
     setViewIso(r.end);
+    commitRange(r);
   };
 
   const apply = () => {
-    const start = draft.start || draft.end;
-    const end = draft.end || draft.start;
-    onChange(start <= end ? { start, end } : { start: end, end: start });
-    setOpen(false);
+    commitRange(draft);
   };
 
   const activePresetLabel = useMemo(() => {

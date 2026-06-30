@@ -501,6 +501,29 @@ def _breakdown_key_has_value(key: str, breakdown: str) -> bool:
     return True
 
 
+def _account_spend_totals(db_path: str, *, start_date: str, end_date: str) -> dict[str, float]:
+    """Account-level ad spend totals for headline widgets.
+
+    Breakdown tabs intentionally hide rows that do not have the selected
+    dimension populated. Hyros' account cards still include that spend, so keep
+    the dashboard summary independent from the selected table grouping.
+    """
+
+    rows = ads_get_spend(
+        db_path,
+        platform="all",
+        start_date=start_date,
+        end_date=end_date,
+        breakdown="platform",
+    )["rows"]
+
+    return {
+        "clicks": float(sum(to_int(r.get("clicks")) for r in rows)),
+        "impressions": float(sum(to_int(r.get("impressions")) for r in rows)),
+        "cost": float(sum(to_float(r.get("cost")) for r in rows)),
+    }
+
+
 def _child_count_map(db_path: str, *, start_date: str, end_date: str, active_tab: TabKey) -> dict[str, int]:
     if active_tab == "ad":
         return {}
@@ -889,7 +912,29 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         fixed_cost_allocation=None,
     )
 
-    total_cost = float(totals["cost"])
+    account_spend = _account_spend_totals(
+        db_path,
+        start_date=inputs.start_date,
+        end_date=inputs.end_date,
+    )
+    account_clicks = int(account_spend["clicks"])
+    account_impressions = int(account_spend["impressions"])
+    account_cost = float(account_spend["cost"])
+
+    summary_totals_metrics = _format_metrics(
+        clicks=account_clicks,
+        impressions=account_impressions,
+        cost=account_cost,
+        total_revenue=float(totals["total_revenue"]),
+        revenue=float(totals["revenue"]),
+        cogs=float(totals["cogs"]),
+        fees=float(totals["fees"]),
+        orders=float(totals["_orders"]),
+        reported=float(totals["reported"]) if totals["_reported_any"] else None,
+        fixed_cost_allocation=None,
+    )
+
+    total_cost = account_cost
     roas = safe_div(float(totals["revenue"]), total_cost)
     conversions_count = float(totals["_orders"])
     cpa = safe_div(total_cost, conversions_count) if conversions_count else None
@@ -980,7 +1025,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     # Cost per Lead = ad spend / leads (distinct from CAC and CPA).
     cost_per_lead = safe_div(total_cost, float(leads_count)) if leads_count else None
 
-    total_clicks = int(totals["clicks"])
+    total_clicks = account_clicks
     attributed_orders = round(float(totals["_orders"]), 2)
     attributed_revenue = float(totals["revenue"])
     unattributed_orders = round(max(float(all_orders_count) - attributed_orders, 0.0), 2)
@@ -995,7 +1040,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     blended_cpa = safe_div(total_cost, all_orders_count) if all_orders_count else None
 
     summary_totals = {
-        **totals_metrics,
+        **summary_totals_metrics,
         "roas": round_money(roas) if roas is not None else None,
         "mer": round_money(mer) if mer is not None else None,
         "cac": round_money(net_cac) if net_cac is not None else None,
