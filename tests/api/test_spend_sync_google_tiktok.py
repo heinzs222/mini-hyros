@@ -150,8 +150,11 @@ def test_google_spend_sync_with_mocked_api(client, api_db, monkeypatch):
     assert gaql.called
     body = r.json()
     g = body["platforms"]["google"]
-    assert g["fetched"] == 1
-    assert g["synced"] == 1
+    assert g["fetched"] == 2  # 1 ad row + 1 campaign-total row (same payload reused)
+    assert g["fetched_ads"] == 1
+    assert g["fetched_campaigns"] == 1
+    assert g["synced"] == 1  # campaign total == ad total -> no adjustment row
+    assert g["inserted_campaign_adjustments"] == 0
     assert g["customer_id"] == "1234567890"
     assert body["synced"] >= 1
     # Spend row landed and is queryable.
@@ -165,13 +168,19 @@ def test_google_spend_sync_paginates_with_next_page_token(client, api_db, monkey
     second = dict(_google_result_row())
     second["adGroupAd"] = {"ad": {"id": "444", "name": "Ad Y"}}
     page2 = {"results": [second]}
+    # Campaign-level GAQL call happens after ad pagination finishes.
+    campaign_page = {"results": [_google_result_row()]}
 
     with respx.mock(assert_all_mocked=False) as router:
         router.post("https://oauth2.googleapis.com/token").mock(
             return_value=Response(200, json={"access_token": "ya29.abc"})
         )
         router.post(url__startswith="https://googleads.googleapis.com/").mock(
-            side_effect=[Response(200, json=page1), Response(200, json=page2)]
+            side_effect=[
+                Response(200, json=page1),
+                Response(200, json=page2),
+                Response(200, json=campaign_page),
+            ]
         )
         r = client.post(
             "/api/spend/sync",
@@ -179,8 +188,9 @@ def test_google_spend_sync_paginates_with_next_page_token(client, api_db, monkey
         )
 
     body = r.json()["platforms"]["google"]
-    assert body["fetched"] == 2
-    assert body["synced"] == 2
+    assert body["fetched_ads"] == 2
+    assert body["fetched_campaigns"] == 1
+    assert body["inserted_ads"] == 2
 
 
 def test_google_spend_sync_missing_credentials(client, api_db, monkeypatch):
@@ -600,3 +610,162 @@ def test_google_ads_script_empty_replace_preserves_existing_google_spend(client,
             "WHERE platform='google' AND account_id='1234567890'"
         ).fetchone()
     assert row == ("7", "12.34", "99")
+
+
+# -- Performance Max / campaign-level reconciliation (root cause of undercounted
+# Google cost: ad_group_ad has no rows at all for PMax/Smart/Demand Gen) --------
+
+
+def test_write_google_spend_rows_reconciles_campaign_level_adjustment(api_db):
+    ss._ensure_spend_table(api_db)
+    ad_rows = [_google_result_row()]  # campaign 111, cost 5.5
+
+    campaign_rows = [
+        {
+            "segments": {"date": "2026-01-10"},
+            "campaign": {"id": "111", "name": "Spring Sale"},
+            "metrics": {"clicks": "60", "impressions": "3000", "costMicros": "20000000"},
+        },
+        {
+            "segments": {"date": "2026-01-10"},
+            "campaign": {"id": "999", "name": "PMax Catalog"},
+            "metrics": {"clicks": "8", "impressions": "400", "costMicros": "8000000"},
+        },
+    ]
+
+    stats = ss._write_google_spend_rows(
+        api_db, "123-456-7890", "2026-01-01", "2026-01-31", ad_rows, campaign_rows
+    )
+    assert stats["inserted_ads"] == 1
+    # campaign 111: 20 - 5.5 = 14.5 adjustment; campaign 999 has no ad rows at all
+    # (PMax-style) so its full 8.0 cost becomes an adjustment row.
+    assert stats["inserted_campaign_adjustments"] == 2
+    assert stats["inserted"] == 3
+    assert stats["adjustment_cost"] == 22.5
+
+    with sqlite3.connect(api_db) as conn:
+        rows = conn.execute(
+            "SELECT campaign_id, adset_id, ad_id, cost FROM spend "
+            "WHERE platform='google' ORDER BY campaign_id, ad_id"
+        ).fetchall()
+    assert ("111", "222", "333", "5.5") in rows  # original ad row, untouched
+    assert ("111", "", "", "14.5") in rows  # campaign 111 adjustment (20 - 5.5)
+    assert ("999", "", "", "8") in rows  # pure campaign adjustment row (no ad rows at all)
+    assert len(rows) == 3
+
+
+def test_write_google_spend_rows_no_adjustment_when_campaign_matches_ad_sum(api_db):
+    ss._ensure_spend_table(api_db)
+    ad_rows = [_google_result_row()]  # campaign 111, cost 5.5
+    campaign_rows = [
+        {
+            "segments": {"date": "2026-01-10"},
+            "campaign": {"id": "111", "name": "Spring Sale"},
+            "metrics": {"clicks": "40", "impressions": "2000", "costMicros": "5500000"},
+        }
+    ]
+
+    stats = ss._write_google_spend_rows(
+        api_db, "123-456-7890", "2026-01-01", "2026-01-31", ad_rows, campaign_rows
+    )
+    assert stats["inserted_ads"] == 1
+    assert stats["inserted_campaign_adjustments"] == 0
+    assert stats["inserted"] == 1
+    assert stats["adjustment_cost"] == 0
+
+
+def test_google_ads_script_push_campaign_only_row_creates_adjustment(client, api_db, monkeypatch):
+    monkeypatch.setenv("GOOGLE_ADS_SCRIPT_TOKEN", "tok")
+
+    # One normal ad-level row for campaign c1, plus a PMax-style campaign-only
+    # row for campaign c2 (no adset_id/ad_id) that ad_group_ad would never report.
+    payload = _script_payload(
+        rows=[
+            {
+                "date": "2026-01-10",
+                "campaign_id": "c1",
+                "campaign_name": "Search",
+                "adset_id": "g1",
+                "adset_name": "Group 1",
+                "ad_id": "a1",
+                "ad_name": "Ad 1",
+                "clicks": 10,
+                "impressions": 500,
+                "cost": 10.0,
+            },
+            {
+                "date": "2026-01-10",
+                "campaign_id": "c2",
+                "campaign_name": "PMax Catalog",
+                "clicks": 20,
+                "impressions": 1000,
+                "cost": 8.0,
+            },
+        ]
+    )
+    r = client.post(
+        "/api/spend/google-ads-script",
+        json=payload,
+        headers={"x-mini-hyros-token": "tok"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["inserted"] == 2
+    assert body["inserted_ads"] == 1
+    assert body["inserted_campaign_adjustments"] == 1
+    assert body["adjustment_cost"] == 8.0
+
+    with sqlite3.connect(api_db) as conn:
+        rows = conn.execute(
+            "SELECT campaign_id, adset_id, ad_id, cost FROM spend "
+            "WHERE platform='google' ORDER BY campaign_id"
+        ).fetchall()
+    by_campaign = {r[0]: r for r in rows}
+    assert by_campaign["c1"] == ("c1", "g1", "a1", "10")
+    assert by_campaign["c2"] == ("c2", "", "", "8")
+
+
+def test_google_ads_script_push_campaign_total_matches_ad_sum_no_double_count(client, api_db, monkeypatch):
+    monkeypatch.setenv("GOOGLE_ADS_SCRIPT_TOKEN", "tok")
+
+    # Campaign-total row reports the exact same cost as the ad-level row for
+    # the same campaign+day -> must not be double-counted.
+    payload = _script_payload(
+        rows=[
+            {
+                "date": "2026-01-10",
+                "campaign_id": "c1",
+                "campaign_name": "Search",
+                "adset_id": "g1",
+                "adset_name": "Group 1",
+                "ad_id": "a1",
+                "ad_name": "Ad 1",
+                "clicks": 10,
+                "impressions": 500,
+                "cost": 10.0,
+            },
+            {
+                "date": "2026-01-10",
+                "campaign_id": "c1",
+                "campaign_name": "Search",
+                "clicks": 10,
+                "impressions": 500,
+                "cost": 10.0,
+            },
+        ]
+    )
+    r = client.post(
+        "/api/spend/google-ads-script",
+        json=payload,
+        headers={"x-mini-hyros-token": "tok"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["inserted"] == 1
+    assert body["inserted_campaign_adjustments"] == 0
+
+    with sqlite3.connect(api_db) as conn:
+        total_cost = conn.execute(
+            "SELECT SUM(CAST(cost AS REAL)) FROM spend WHERE platform='google'"
+        ).fetchone()[0]
+    assert total_cost == 10.0

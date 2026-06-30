@@ -560,9 +560,23 @@ def _import_spend_csv_rows(payload: SpendCsvImportPayload) -> dict[str, Any]:
 
 
 def _import_google_ads_script_rows(payload: GoogleAdsScriptSpendPayload) -> dict[str, Any]:
+    """Import spend rows pushed by the Google Ads Script.
+
+    Rows that carry an ad_id (or adset_id) are treated as ad-level rows from the
+    `ad_group_ad` resource. Rows with only a campaign_id (no adset_id/ad_id) are
+    treated as campaign-level totals pulled from the `campaign` resource, which is
+    the only resource that reports cost for Performance Max / Smart / Demand Gen
+    campaigns (those campaign types have no ad_group_ad rows at all, so relying on
+    ad_group_ad alone silently undercounts cost). We reconcile the two: for each
+    (date, campaign_id), only the positive delta between the campaign-level total
+    and the summed ad-level cost is inserted, as an unattributed "campaign
+    adjustment" row — mirroring the same ad+campaign reconciliation already used
+    for TikTok below.
+    """
     account_id_default = _clean_google_customer_id(_clean_id(payload.account_id))
     imported_at = _now()
-    parsed_rows: list[dict[str, Any]] = []
+    ad_rows: list[dict[str, Any]] = []
+    campaign_total_rows: list[dict[str, Any]] = []
     skipped = 0
     warnings: list[str] = []
 
@@ -584,11 +598,47 @@ def _import_google_ads_script_rows(payload: GoogleAdsScriptSpendPayload) -> dict
             skipped += 1
             continue
 
+        parsed = {
+            "platform": "google",
+            "date": day,
+            "account_id": account_id,
+            "campaign_id": campaign_id,
+            "adset_id": adset_id,
+            "ad_id": ad_id,
+            "creative_id": "",
+            "clicks": max(_num(row.clicks), 0.0),
+            "cost": max(_num(row.cost), 0.0),
+            "impressions": max(_num(row.impressions), 0.0),
+            "campaign_name": campaign_name,
+            "adset_name": adset_name,
+            "ad_name": ad_name,
+        }
+
+        if campaign_id and not adset_id and not ad_id:
+            campaign_total_rows.append(parsed)
+        else:
+            ad_rows.append(parsed)
+
+    parsed_rows: list[dict[str, Any]] = []
+    inserted_ads = 0
+    inserted_campaign_adjustments = 0
+    adjustment_cost = 0.0
+
+    ad_totals_by_campaign_day: dict[tuple[str, str], dict[str, float]] = defaultdict(
+        lambda: {"cost": 0.0, "clicks": 0.0, "impressions": 0.0}
+    )
+    for r in ad_rows:
+        if r["campaign_id"]:
+            totals = ad_totals_by_campaign_day[(r["date"], r["campaign_id"])]
+            totals["cost"] += r["cost"]
+            totals["clicks"] += r["clicks"]
+            totals["impressions"] += r["impressions"]
+
         metadata = json.dumps(
             {
-                "campaign_name": campaign_name,
-                "adset_name": adset_name,
-                "ad_name": ad_name,
+                "campaign_name": r["campaign_name"],
+                "adset_name": r["adset_name"],
+                "ad_name": r["ad_name"],
                 "source": "google_ads_script",
                 "imported_at": imported_at,
             },
@@ -596,22 +646,51 @@ def _import_google_ads_script_rows(payload: GoogleAdsScriptSpendPayload) -> dict
         )
         parsed_rows.append(
             {
-                "platform": "google",
-                "date": day,
-                "account_id": account_id,
-                "campaign_id": campaign_id,
-                "adset_id": adset_id,
-                "ad_id": ad_id,
-                "creative_id": "",
-                "clicks": str(max(int(round(_num(row.clicks))), 0)),
-                "cost": _fmt_decimal(max(_num(row.cost), 0.0)),
-                "impressions": str(max(int(round(_num(row.impressions))), 0)),
+                **r,
+                "clicks": str(int(round(r["clicks"]))),
+                "cost": _fmt_decimal(r["cost"]),
+                "impressions": str(int(round(r["impressions"]))),
                 "metadata": metadata,
-                "campaign_name": campaign_name,
-                "adset_name": adset_name,
-                "ad_name": ad_name,
             }
         )
+        inserted_ads += 1
+
+    for r in campaign_total_rows:
+        ad_total = ad_totals_by_campaign_day.get((r["date"], r["campaign_id"]), {})
+        cost_delta = round(r["cost"] - float(ad_total.get("cost") or 0.0), 6)
+        clicks_delta = r["clicks"] - float(ad_total.get("clicks") or 0.0)
+        impressions_delta = r["impressions"] - float(ad_total.get("impressions") or 0.0)
+
+        if cost_delta <= 0.000001 and clicks_delta <= 0 and impressions_delta <= 0:
+            continue
+
+        metadata = json.dumps(
+            {
+                "campaign_name": r["campaign_name"],
+                "adset_name": "",
+                "ad_name": "",
+                "source": "google_ads_script_campaign_adjustment",
+                "imported_at": imported_at,
+                "campaign_total_cost": _fmt_decimal(r["cost"]),
+                "mapped_ad_cost": _fmt_decimal(float(ad_total.get("cost") or 0.0)),
+            },
+            separators=(",", ":"),
+        )
+        parsed_rows.append(
+            {
+                **r,
+                "adset_id": "",
+                "ad_id": "",
+                "adset_name": "",
+                "ad_name": "",
+                "clicks": str(int(round(max(clicks_delta, 0.0)))),
+                "cost": _fmt_decimal(max(cost_delta, 0.0)),
+                "impressions": str(int(round(max(impressions_delta, 0.0)))),
+                "metadata": metadata,
+            }
+        )
+        inserted_campaign_adjustments += 1
+        adjustment_cost += max(cost_delta, 0.0)
 
     if not parsed_rows:
         start_date = _parse_import_date(payload.start_date)
@@ -731,6 +810,9 @@ def _import_google_ads_script_rows(payload: GoogleAdsScriptSpendPayload) -> dict
         "ok": True,
         "platform": "google",
         "inserted": inserted,
+        "inserted_ads": inserted_ads,
+        "inserted_campaign_adjustments": inserted_campaign_adjustments,
+        "adjustment_cost": round(adjustment_cost, 2),
         "deleted": int(deleted or 0),
         "skipped": skipped,
         "names_upserted": names_upserted,
@@ -1103,16 +1185,76 @@ async def _fetch_google_insights(
     return rows
 
 
+async def _fetch_google_campaign_insights(
+    access_token: str,
+    developer_token: str,
+    customer_id: str,
+    start_date: str,
+    end_date: str,
+    login_customer_id: str = "",
+) -> list[dict[str, Any]]:
+    """Campaign-level totals — the only resource that reports cost for every
+    campaign type. Performance Max / Smart / Demand Gen campaigns have no
+    ad_group_ad rows at all, so `_fetch_google_insights` alone misses their
+    cost entirely."""
+    clean_customer_id = _clean_google_customer_id(customer_id)
+    gaql = (
+        "SELECT "
+        "segments.date, "
+        "campaign.id, campaign.name, "
+        "metrics.clicks, metrics.impressions, metrics.cost_micros "
+        "FROM campaign "
+        f"WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'"
+    )
+
+    api_version = _google_ads_api_version()
+    url = f"https://googleads.googleapis.com/{api_version}/customers/{clean_customer_id}/googleAds:search"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "developer-token": developer_token,
+        "Content-Type": "application/json",
+    }
+    if login_customer_id.strip():
+        headers["login-customer-id"] = _clean_google_customer_id(login_customer_id)
+
+    rows: list[dict[str, Any]] = []
+    next_page_token = ""
+
+    async with httpx.AsyncClient(timeout=45) as client:
+        while True:
+            payload: dict[str, Any] = {"query": gaql, "pageSize": 10000}
+            if next_page_token:
+                payload["pageToken"] = next_page_token
+
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            result = resp.json()
+            rows.extend(result.get("results") or [])
+
+            next_page_token = str(result.get("nextPageToken") or "").strip()
+            if not next_page_token:
+                break
+
+    return rows
+
+
 def _write_google_spend_rows(
     db_path: str,
     customer_id: str,
     start_date: str,
     end_date: str,
     rows: list[dict[str, Any]],
+    campaign_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, int]:
     clean_customer_id = _clean_google_customer_id(customer_id)
     synced_at = _now()
     inserted = 0
+    inserted_ads = 0
+    inserted_campaign_adjustments = 0
+    adjustment_cost = 0.0
+    ad_totals_by_campaign_day: dict[tuple[str, str], dict[str, float]] = defaultdict(
+        lambda: {"cost": 0.0, "clicks": 0.0, "impressions": 0.0}
+    )
 
     with connect(db_path) as conn:
         deleted = conn.execute(
@@ -1139,10 +1281,16 @@ def _write_google_spend_rows(
                     ("ad_group_ad", "ad", "id"),
                 )
             ).strip()
-            clicks = str(int(_num(_first_present(r, ("metrics", "clicks")), 0.0)))
-            impressions = str(int(_num(_first_present(r, ("metrics", "impressions")), 0.0)))
+            clicks = _num(_first_present(r, ("metrics", "clicks")), 0.0)
+            impressions = _num(_first_present(r, ("metrics", "impressions")), 0.0)
             cost_micros = _num(_first_present(r, ("metrics", "costMicros"), ("metrics", "cost_micros")), 0.0)
-            cost = _fmt_decimal(cost_micros / 1_000_000.0)
+            cost = cost_micros / 1_000_000.0
+
+            if campaign_id:
+                totals = ad_totals_by_campaign_day[(day, campaign_id)]
+                totals["cost"] += cost
+                totals["clicks"] += clicks
+                totals["impressions"] += impressions
 
             metadata = json.dumps(
                 {
@@ -1177,17 +1325,81 @@ def _write_google_spend_rows(
                     adset_id,
                     ad_id,
                     "",
-                    clicks,
-                    cost,
-                    impressions,
+                    str(int(round(clicks))),
+                    _fmt_decimal(cost),
+                    str(int(round(impressions))),
                     metadata,
                 ),
             )
             inserted += 1
+            inserted_ads += 1
+
+        for r in campaign_rows or []:
+            day = str(_first_present(r, ("segments", "date"), ("segments", "date_start"))).strip()
+            campaign_id = str(_first_present(r, ("campaign", "id"), ("campaign", "resourceName"))).strip()
+            if not day or not campaign_id:
+                continue
+
+            campaign_clicks = _num(_first_present(r, ("metrics", "clicks")), 0.0)
+            campaign_impressions = _num(_first_present(r, ("metrics", "impressions")), 0.0)
+            campaign_cost_micros = _num(_first_present(r, ("metrics", "costMicros"), ("metrics", "cost_micros")), 0.0)
+            campaign_cost = campaign_cost_micros / 1_000_000.0
+
+            ad_total = ad_totals_by_campaign_day.get((day, campaign_id), {})
+            cost_delta = round(campaign_cost - float(ad_total.get("cost") or 0.0), 6)
+            clicks_delta = campaign_clicks - float(ad_total.get("clicks") or 0.0)
+            impressions_delta = campaign_impressions - float(ad_total.get("impressions") or 0.0)
+
+            if cost_delta <= 0.000001 and clicks_delta <= 0 and impressions_delta <= 0:
+                continue
+
+            metadata = json.dumps(
+                {
+                    "campaign_name": str(_first_present(r, ("campaign", "name"))).strip(),
+                    "adset_name": "",
+                    "ad_name": "",
+                    "source": "google_ads_api_campaign_adjustment",
+                    "synced_at": synced_at,
+                    "campaign_total_cost": _fmt_decimal(campaign_cost),
+                    "mapped_ad_cost": _fmt_decimal(float(ad_total.get("cost") or 0.0)),
+                },
+                separators=(",", ":"),
+            )
+            conn.execute(
+                """
+                INSERT INTO spend (
+                    platform, date, account_id, campaign_id,
+                    adset_id, ad_id, creative_id,
+                    clicks, cost, impressions, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "google",
+                    day,
+                    clean_customer_id,
+                    campaign_id,
+                    "",
+                    "",
+                    "",
+                    str(int(round(max(clicks_delta, 0.0)))),
+                    _fmt_decimal(max(cost_delta, 0.0)),
+                    str(int(round(max(impressions_delta, 0.0)))),
+                    metadata,
+                ),
+            )
+            inserted += 1
+            inserted_campaign_adjustments += 1
+            adjustment_cost += max(cost_delta, 0.0)
 
         conn.commit()
 
-    return {"deleted": int(deleted if deleted is not None and deleted > 0 else 0), "inserted": inserted}
+    return {
+        "deleted": int(deleted if deleted is not None and deleted > 0 else 0),
+        "inserted": inserted,
+        "inserted_ads": inserted_ads,
+        "inserted_campaign_adjustments": inserted_campaign_adjustments,
+        "adjustment_cost": round(adjustment_cost, 2),
+    }
 
 
 async def _sync_google_spend(start_date: str, end_date: str) -> dict[str, Any]:
@@ -1228,10 +1440,23 @@ async def _sync_google_spend(start_date: str, end_date: str) -> dict[str, Any]:
             end_date=end_date,
             login_customer_id=login_customer_id,
         )
-        write_stats = _write_google_spend_rows(db_path, customer_id, start_date, end_date, api_rows)
+        campaign_rows = await _fetch_google_campaign_insights(
+            access_token=access_token,
+            developer_token=developer_token,
+            customer_id=customer_id,
+            start_date=start_date,
+            end_date=end_date,
+            login_customer_id=login_customer_id,
+        )
+        write_stats = _write_google_spend_rows(db_path, customer_id, start_date, end_date, api_rows, campaign_rows)
         return {
             "synced": write_stats["inserted"],
-            "fetched": len(api_rows),
+            "fetched": len(api_rows) + len(campaign_rows),
+            "fetched_ads": len(api_rows),
+            "fetched_campaigns": len(campaign_rows),
+            "inserted_ads": write_stats["inserted_ads"],
+            "inserted_campaign_adjustments": write_stats["inserted_campaign_adjustments"],
+            "adjustment_cost": write_stats["adjustment_cost"],
             "deleted": write_stats["deleted"],
             "date_range": {"start": start_date, "end": end_date},
             "customer_id": _clean_google_customer_id(customer_id),

@@ -6,7 +6,8 @@
 */
 
 var MINI_HYROS_ENDPOINT = "https://mini-hyros.onrender.com";
-var MINI_HYROS_TOKEN = "PASTE_SITE_OR_GOOGLE_ADS_SCRIPT_TOKEN_HERE";
+var MINI_HYROS_TOKEN =
+  "mini-hyros-google-spend-2026-xguard-CHANGE-THIS-LONG-RANDOM";
 
 // DATE_MODE options:
 // - "LOOKBACK": push today plus the previous LOOKBACK_DAYS days.
@@ -28,7 +29,13 @@ function main() {
   var end = dateRange.end;
 
   Logger.log("Mini Hyros: running Google Ads spend push for " + start + " to " + end + " (" + dateRange.mode + ").");
+  // ad_group_ad rows cover standard Search/Display/Video ads. Performance Max,
+  // Smart, and Demand Gen campaigns have no ad_group_ad rows at all, so we also
+  // pull campaign-level totals; the backend reconciles the difference so PMax/
+  // Smart cost isn't silently dropped.
   var rows = fetchSpendRows(accountId, start, end);
+  var campaignRows = fetchCampaignSpendRows(accountId, start, end);
+  rows = rows.concat(campaignRows);
 
   if (!rows.length) {
     postRows(accountId, start, end, [], true);
@@ -36,9 +43,13 @@ function main() {
     return;
   }
 
-  for (var offset = 0; offset < rows.length; offset += BATCH_SIZE) {
-    var batch = rows.slice(offset, offset + BATCH_SIZE);
-    postRows(accountId, start, end, batch, offset === 0);
+  // Batch by whole date groups (never split a date's ad rows from its
+  // campaign-total rows across two network calls) — the backend reconciles
+  // ad-level vs campaign-level cost per (date, campaign_id) within a single
+  // request, so both must always arrive together.
+  var batches = chunkRowsByDate(rows, BATCH_SIZE);
+  for (var i = 0; i < batches.length; i++) {
+    postRows(accountId, start, end, batches[i], i === 0);
   }
 
   Logger.log("Mini Hyros: pushed " + rows.length + " Google Ads spend rows for " + start + " to " + end + ".");
@@ -88,6 +99,32 @@ function getDateRange(tz) {
   };
 }
 
+function chunkRowsByDate(rows, targetBatchSize) {
+  var byDate = {};
+  var order = [];
+  for (var i = 0; i < rows.length; i++) {
+    var d = rows[i].date || "";
+    if (!byDate[d]) {
+      byDate[d] = [];
+      order.push(d);
+    }
+    byDate[d].push(rows[i]);
+  }
+
+  var batches = [];
+  var current = [];
+  for (var j = 0; j < order.length; j++) {
+    var group = byDate[order[j]];
+    if (current.length && current.length + group.length > targetBatchSize) {
+      batches.push(current);
+      current = [];
+    }
+    current = current.concat(group);
+  }
+  if (current.length) batches.push(current);
+  return batches;
+}
+
 function parseDateString(value) {
   var text = String(value || "").trim();
   var match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -130,6 +167,42 @@ function fetchSpendRows(accountId, start, end) {
       adset_name: safe(row.adGroup && row.adGroup.name),
       ad_id: safe(row.adGroupAd && row.adGroupAd.ad && row.adGroupAd.ad.id),
       ad_name: safe(row.adGroupAd && row.adGroupAd.ad && row.adGroupAd.ad.name),
+      clicks: Number(row.metrics && row.metrics.clicks || 0),
+      impressions: Number(row.metrics && row.metrics.impressions || 0),
+      cost: Number(row.metrics && row.metrics.costMicros || 0) / 1000000
+    });
+  }
+  return output;
+}
+
+function fetchCampaignSpendRows(accountId, start, end) {
+  // Campaign-level totals include cost for every campaign type (Performance
+  // Max, Smart, Demand Gen, Search, Display, Video), unlike ad_group_ad which
+  // only exists for standard ad groups. These rows have no adset_id/ad_id so
+  // the backend treats them as campaign totals and only stores the delta over
+  // the matching ad_group_ad rows (avoids double-counting standard campaigns).
+  var query = [
+    "SELECT",
+    "segments.date,",
+    "campaign.id, campaign.name,",
+    "metrics.clicks, metrics.impressions, metrics.cost_micros",
+    "FROM campaign",
+    "WHERE segments.date BETWEEN '" + start + "' AND '" + end + "'"
+  ].join(" ");
+
+  var output = [];
+  var iterator = AdsApp.search(query);
+  while (iterator.hasNext()) {
+    var row = iterator.next();
+    output.push({
+      date: safe(row.segments && row.segments.date),
+      account_id: accountId,
+      campaign_id: safe(row.campaign && row.campaign.id),
+      campaign_name: safe(row.campaign && row.campaign.name),
+      adset_id: "",
+      adset_name: "",
+      ad_id: "",
+      ad_name: "",
       clicks: Number(row.metrics && row.metrics.clicks || 0),
       impressions: Number(row.metrics && row.metrics.impressions || 0),
       cost: Number(row.metrics && row.metrics.costMicros || 0) / 1000000
