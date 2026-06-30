@@ -157,8 +157,9 @@ async def get_or_refresh_tiktok_token(db_path: str) -> str:
                     token_data = data.get("data") or {}
                     new_access = str(token_data.get("access_token") or "")
                     new_refresh = str(token_data.get("refresh_token") or refresh_token)
+                    expires_at = _tiktok_expires_at(token_data)
                     if new_access:
-                        _save_tiktok_token(db_path, new_access, new_refresh, advertiser_id)
+                        _save_tiktok_token(db_path, new_access, new_refresh, advertiser_id, expires_at)
                         return new_access
             except Exception:
                 pass  # Fall through to return current token
@@ -189,6 +190,19 @@ def _save_tiktok_token(db_path: str, access_token: str, refresh_token: str,
             (access_token, refresh_token, advertiser_id, expires_at, _now()),
         )
         conn.commit()
+
+
+def _tiktok_expires_at(token_data: dict[str, Any]) -> str:
+    """Return an ISO expiry timestamp from TikTok token response metadata."""
+    for key in ("expires_in", "access_token_expire_in", "access_token_expires_in"):
+        raw = token_data.get(key)
+        try:
+            seconds = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if seconds > 0:
+            return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
+    return ""
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -254,13 +268,14 @@ async def tiktok_callback(auth_code: str = Query(default=""), state: str = Query
         token_data: dict[str, Any] = data.get("data") or {}
         access_token = str(token_data.get("access_token") or "")
         refresh_token = str(token_data.get("refresh_token") or "")
+        expires_at = _tiktok_expires_at(token_data)
         advertiser_ids: list = token_data.get("advertiser_ids") or []
         advertiser_id = str(advertiser_ids[0]) if advertiser_ids else os.environ.get("TIKTOK_ADVERTISER_ID", "")
 
         if not access_token:
             return HTMLResponse("<h3>No access_token in TikTok response.</h3>", status_code=400)
 
-        _save_tiktok_token(_db(), access_token, refresh_token, advertiser_id)
+        _save_tiktok_token(_db(), access_token, refresh_token, advertiser_id, expires_at)
 
         return RedirectResponse(url=f"{_dashboard_url()}?tiktok_connected=1")
 
@@ -299,11 +314,12 @@ async def tiktok_refresh():
         token_data: dict[str, Any] = data.get("data") or {}
         new_access = str(token_data.get("access_token") or "")
         new_refresh = str(token_data.get("refresh_token") or refresh_token)
+        expires_at = _tiktok_expires_at(token_data)
 
         if not new_access:
             return {"error": "No access_token returned from refresh"}
 
-        _save_tiktok_token(db_path, new_access, new_refresh, advertiser_id)
+        _save_tiktok_token(db_path, new_access, new_refresh, advertiser_id, expires_at)
         return {"refreshed": True, "advertiser_id": advertiser_id}
 
     except Exception as e:

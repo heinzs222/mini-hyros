@@ -136,6 +136,7 @@ def test_callback_success_stores_token_and_redirects(client, api_db, monkeypatch
         "data": {
             "access_token": "fresh_access_token",
             "refresh_token": "fresh_refresh_token",
+            "expires_in": 86400,
             "advertiser_ids": ["adv-999"],
         },
     }
@@ -160,6 +161,7 @@ def test_callback_success_stores_token_and_redirects(client, api_db, monkeypatch
     assert rows[0]["access_token"] == "fresh_access_token"
     assert rows[0]["refresh_token"] == "fresh_refresh_token"
     assert rows[0]["advertiser_id"] == "adv-999"
+    assert rows[0]["expires_at"]
 
 
 def test_callback_ignores_placeholder_dashboard_url(client, api_db, monkeypatch):
@@ -174,6 +176,7 @@ def test_callback_ignores_placeholder_dashboard_url(client, api_db, monkeypatch)
         "data": {
             "access_token": "fresh_access_token",
             "refresh_token": "fresh_refresh_token",
+            "expires_in": 86400,
             "advertiser_ids": ["adv-999"],
         },
     }
@@ -412,7 +415,7 @@ def test_get_or_refresh_auto_refreshes_when_expiring(api_db, monkeypatch):
     past = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     _seed_token(api_db, access_token="stale", refresh_token="r1", advertiser_id="adv-x", expires_at=past)
 
-    refresh_response = {"code": 0, "data": {"access_token": "auto_refreshed", "refresh_token": "r2"}}
+    refresh_response = {"code": 0, "data": {"access_token": "auto_refreshed", "refresh_token": "r2", "expires_in": 86400}}
     with respx.mock(assert_all_mocked=False) as router:
         route = router.post(
             url__startswith="https://business-api.tiktok.com/open_api/v1.3/oauth2/refresh_token"
@@ -422,4 +425,6 @@ def test_get_or_refresh_auto_refreshes_when_expiring(api_db, monkeypatch):
     assert route.called
     assert result == "auto_refreshed"
     # The refreshed token is persisted.
-    assert _token_row(api_db)[0]["access_token"] == "auto_refreshed"
+    row = _token_row(api_db)[0]
+    assert row["access_token"] == "auto_refreshed"
+    assert row["expires_at"]
