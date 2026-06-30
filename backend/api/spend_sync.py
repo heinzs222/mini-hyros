@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1314,37 +1315,6 @@ async def _fetch_tiktok_report_level(
     return rows
 
 
-async def _fetch_tiktok_report(
-    access_token: str,
-    advertiser_id: str,
-    start_date: str,
-    end_date: str,
-) -> list[dict[str, Any]]:
-    """Fetch TikTok spend at ad level. Each data_level uses its own valid dimensions."""
-    async with httpx.AsyncClient(timeout=45) as client:
-        # AUCTION_AD only allows ad_id + time as dimensions (not campaign_id/adgroup_id)
-        ad_rows = await _fetch_tiktok_report_level(
-            client, access_token, advertiser_id, start_date, end_date,
-            data_level="AUCTION_AD",
-            dimensions=["ad_id", "stat_time_day"],
-        )
-
-        # Also fetch campaign level so we have campaign_id → spend mapping
-        # to enrich ad rows with campaign_id via ad_names lookup
-        campaign_rows = await _fetch_tiktok_report_level(
-            client, access_token, advertiser_id, start_date, end_date,
-            data_level="AUCTION_CAMPAIGN",
-            dimensions=["campaign_id", "stat_time_day"],
-        )
-
-    # If ad-level rows came back, return them (preferred — more granular)
-    if ad_rows:
-        return ad_rows
-
-    # Fall back to campaign-level if ad-level returned nothing
-    return campaign_rows
-
-
 def _build_tiktok_ad_parent_map(db_path: str) -> dict[str, dict[str, str]]:
     """Build {ad_id: {campaign_id, adset_id}} lookup from ad_names table."""
     ad_map: dict[str, dict[str, str]] = {}
@@ -1373,19 +1343,53 @@ def _build_tiktok_ad_parent_map(db_path: str) -> dict[str, dict[str, str]]:
     return ad_map
 
 
+async def _fetch_tiktok_report(
+    access_token: str,
+    advertiser_id: str,
+    start_date: str,
+    end_date: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Fetch TikTok spend at both ad and campaign levels."""
+    async with httpx.AsyncClient(timeout=45) as client:
+        ad_rows = await _fetch_tiktok_report_level(
+            client, access_token, advertiser_id, start_date, end_date,
+            data_level="AUCTION_AD",
+            dimensions=["ad_id", "stat_time_day"],
+        )
+        campaign_rows = await _fetch_tiktok_report_level(
+            client, access_token, advertiser_id, start_date, end_date,
+            data_level="AUCTION_CAMPAIGN",
+            dimensions=["campaign_id", "stat_time_day"],
+        )
+
+    return {"ad_rows": ad_rows, "campaign_rows": campaign_rows}
+
+
 def _write_tiktok_spend_rows(
     db_path: str,
     advertiser_id: str,
     start_date: str,
     end_date: str,
-    rows: list[dict[str, Any]],
-) -> dict[str, int]:
+    rows: list[dict[str, Any]] | None = None,
+    *,
+    ad_rows: list[dict[str, Any]] | None = None,
+    campaign_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     clean_advertiser_id = advertiser_id.strip()
     synced_at = _now()
     inserted = 0
+    inserted_ads = 0
+    inserted_campaign_adjustments = 0
+    skipped_unmapped_ads = 0
+    adjustment_cost = 0.0
 
-    # Build lookup for ad_id → campaign_id/adset_id from ad_names
+    ad_rows = list(ad_rows if ad_rows is not None else (rows or []))
+    campaign_rows = list(campaign_rows or [])
+    campaign_report_available = bool(campaign_rows)
     ad_parent_map = _build_tiktok_ad_parent_map(db_path)
+    ad_totals_by_campaign_day: dict[tuple[str, str], dict[str, float]] = defaultdict(
+        lambda: {"cost": 0.0, "clicks": 0.0, "impressions": 0.0}
+    )
 
     with connect(db_path) as conn:
         deleted = conn.execute(
@@ -1398,7 +1402,7 @@ def _write_tiktok_spend_rows(
             (start_date, end_date, clean_advertiser_id),
         ).rowcount
 
-        for r in rows:
+        for r in ad_rows:
             day = str(_tiktok_value(r, "stat_time_day") or _tiktok_value(r, "date")).strip()
             if not day:
                 continue
@@ -1407,28 +1411,37 @@ def _write_tiktok_spend_rows(
             campaign_id = str(_tiktok_value(r, "campaign_id")).strip()
             adset_id = str(_tiktok_value(r, "adgroup_id") or _tiktok_value(r, "adset_id")).strip()
 
-            # If campaign_id/adset_id missing (ad-level report), look up from ad_names
             if ad_id and (not campaign_id or not adset_id):
                 parent = ad_parent_map.get(ad_id, {})
                 if not campaign_id:
                     campaign_id = parent.get("campaign_id", "")
                 if not adset_id:
                     adset_id = parent.get("adset_id", "")
-            clicks = str(int(_num(_tiktok_value(r, "clicks"), 0.0)))
-            impressions = str(int(_num(_tiktok_value(r, "impressions"), 0.0)))
-            spend = _fmt_decimal(_num(_tiktok_value(r, "spend"), 0.0))
+
+            cost_value = _num(_tiktok_value(r, "spend"), 0.0)
+            clicks_value = int(_num(_tiktok_value(r, "clicks"), 0.0))
+            impressions_value = int(_num(_tiktok_value(r, "impressions"), 0.0))
+
+            if campaign_report_available and not campaign_id:
+                skipped_unmapped_ads += 1
+                continue
+
+            if campaign_id:
+                ad_total = ad_totals_by_campaign_day[(day, campaign_id)]
+                ad_total["cost"] += cost_value
+                ad_total["clicks"] += clicks_value
+                ad_total["impressions"] += impressions_value
 
             metadata = json.dumps(
                 {
                     "campaign_name": str(_tiktok_value(r, "campaign_name")).strip(),
                     "adset_name": str(_tiktok_value(r, "adgroup_name") or _tiktok_value(r, "adset_name")).strip(),
                     "ad_name": str(_tiktok_value(r, "ad_name")).strip(),
-                    "source": "tiktok_report_api",
+                    "source": "tiktok_report_api_ad",
                     "synced_at": synced_at,
                 },
                 separators=(",", ":"),
             )
-
             conn.execute(
                 """
                 INSERT INTO spend (
@@ -1445,17 +1458,81 @@ def _write_tiktok_spend_rows(
                     adset_id,
                     ad_id,
                     "",
-                    clicks,
-                    spend,
-                    impressions,
+                    str(clicks_value),
+                    _fmt_decimal(cost_value),
+                    str(impressions_value),
                     metadata,
                 ),
             )
             inserted += 1
+            inserted_ads += 1
+
+        for r in campaign_rows:
+            day = str(_tiktok_value(r, "stat_time_day") or _tiktok_value(r, "date")).strip()
+            campaign_id = str(_tiktok_value(r, "campaign_id")).strip()
+            if not day or not campaign_id:
+                continue
+
+            campaign_cost = _num(_tiktok_value(r, "spend"), 0.0)
+            campaign_clicks = int(_num(_tiktok_value(r, "clicks"), 0.0))
+            campaign_impressions = int(_num(_tiktok_value(r, "impressions"), 0.0))
+            ad_total = ad_totals_by_campaign_day.get((day, campaign_id), {})
+
+            cost_delta = round(campaign_cost - float(ad_total.get("cost") or 0.0), 6)
+            clicks_delta = campaign_clicks - int(ad_total.get("clicks") or 0)
+            impressions_delta = campaign_impressions - int(ad_total.get("impressions") or 0)
+
+            if cost_delta <= 0.000001 and clicks_delta <= 0 and impressions_delta <= 0:
+                continue
+
+            metadata = json.dumps(
+                {
+                    "campaign_name": str(_tiktok_value(r, "campaign_name")).strip(),
+                    "adset_name": "",
+                    "ad_name": "",
+                    "source": "tiktok_report_api_campaign_adjustment",
+                    "synced_at": synced_at,
+                    "campaign_total_cost": _fmt_decimal(campaign_cost),
+                    "mapped_ad_cost": _fmt_decimal(float(ad_total.get("cost") or 0.0)),
+                },
+                separators=(",", ":"),
+            )
+            conn.execute(
+                """
+                INSERT INTO spend (
+                    platform, date, account_id, campaign_id,
+                    adset_id, ad_id, creative_id,
+                    clicks, cost, impressions, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "tiktok",
+                    day,
+                    clean_advertiser_id,
+                    campaign_id,
+                    "",
+                    "",
+                    "",
+                    str(max(clicks_delta, 0)),
+                    _fmt_decimal(max(cost_delta, 0.0)),
+                    str(max(impressions_delta, 0)),
+                    metadata,
+                ),
+            )
+            inserted += 1
+            inserted_campaign_adjustments += 1
+            adjustment_cost += max(cost_delta, 0.0)
 
         conn.commit()
 
-    return {"deleted": int(deleted if deleted is not None and deleted > 0 else 0), "inserted": inserted}
+    return {
+        "deleted": int(deleted if deleted is not None and deleted > 0 else 0),
+        "inserted": inserted,
+        "inserted_ads": inserted_ads,
+        "inserted_campaign_adjustments": inserted_campaign_adjustments,
+        "skipped_unmapped_ads": skipped_unmapped_ads,
+        "adjustment_cost": round(adjustment_cost, 2),
+    }
 
 
 async def _sync_tiktok_spend(start_date: str, end_date: str) -> dict[str, Any]:
@@ -1472,12 +1549,27 @@ async def _sync_tiktok_spend(start_date: str, end_date: str) -> dict[str, Any]:
     _ensure_spend_table(db_path)
 
     try:
-        api_rows = await _fetch_tiktok_report(access_token, advertiser_id, start_date, end_date)
-        write_stats = _write_tiktok_spend_rows(db_path, advertiser_id, start_date, end_date, api_rows)
+        api_report = await _fetch_tiktok_report(access_token, advertiser_id, start_date, end_date)
+        ad_rows = api_report.get("ad_rows") or []
+        campaign_rows = api_report.get("campaign_rows") or []
+        write_stats = _write_tiktok_spend_rows(
+            db_path,
+            advertiser_id,
+            start_date,
+            end_date,
+            ad_rows=ad_rows,
+            campaign_rows=campaign_rows,
+        )
         return {
             "synced": write_stats["inserted"],
-            "fetched": len(api_rows),
+            "fetched": len(ad_rows) + len(campaign_rows),
+            "fetched_ads": len(ad_rows),
+            "fetched_campaigns": len(campaign_rows),
             "deleted": write_stats["deleted"],
+            "inserted_ads": write_stats.get("inserted_ads", 0),
+            "inserted_campaign_adjustments": write_stats.get("inserted_campaign_adjustments", 0),
+            "skipped_unmapped_ads": write_stats.get("skipped_unmapped_ads", 0),
+            "adjustment_cost": write_stats.get("adjustment_cost", 0.0),
             "date_range": {"start": start_date, "end": end_date},
             "advertiser_id": advertiser_id,
         }
