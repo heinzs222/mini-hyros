@@ -66,6 +66,9 @@ def ads_get_spend(
         if breakdown == "day":
             key = (d,)
             name = d
+        elif breakdown == "platform":
+            key = (p,)
+            name = p or "unknown"
         elif breakdown == "traffic_source":
             utm_source, utm_medium = _traffic_source_for_platform(p)
             key = (utm_source, utm_medium)
@@ -83,7 +86,7 @@ def ads_get_spend(
             key = (p, account_id, campaign_id, adset_id, ad_id)
             name = md.get("ad_name") or ad_id
         else:
-            raise ValueError("breakdown must be one of: day, traffic_source, ad_account, campaign, ad_set, ad")
+            raise ValueError("breakdown must be one of: day, platform, traffic_source, ad_account, campaign, ad_set, ad")
 
         clicks = to_int(r.get("clicks"))
         cost = to_float(r.get("cost"))
@@ -160,6 +163,9 @@ def ads_get_reported_value(
         if breakdown == "day":
             key = (d,)
             name = d
+        elif breakdown == "platform":
+            key = (p,)
+            name = p or "unknown"
         elif breakdown == "traffic_source":
             utm_source, utm_medium = _traffic_source_for_platform(p)
             key = (utm_source, utm_medium)
@@ -177,7 +183,7 @@ def ads_get_reported_value(
             key = (p, account_id, campaign_id, adset_id, ad_id)
             name = ad_id
         else:
-            raise ValueError("breakdown must be one of: day, traffic_source, ad_account, campaign, ad_set, ad")
+            raise ValueError("breakdown must be one of: day, platform, traffic_source, ad_account, campaign, ad_set, ad")
 
         if key not in agg:
             agg[key] = {
@@ -196,4 +202,3 @@ def ads_get_reported_value(
     for row in out_rows:
         row["reported_value"] = float(f"{float(row['reported_value']):.2f}")
     return {"rows": out_rows, "breakdown": breakdown, "start_date": start_date, "end_date": end_date}
-

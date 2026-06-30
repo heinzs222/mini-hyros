@@ -283,11 +283,12 @@ def test_write_tiktok_spend_rows_enriches_parents_from_ad_names(api_db):
 
     with sqlite3.connect(api_db) as conn:
         row = conn.execute(
-            "SELECT account_id, campaign_id, adset_id, ad_id, clicks, cost, impressions "
+            "SELECT account_id, date, campaign_id, adset_id, ad_id, clicks, cost, impressions "
             "FROM spend WHERE platform='tiktok'"
         ).fetchone()
-    account_id, campaign_id, adset_id, ad_id, clicks, cost, impressions = row
+    account_id, date_value, campaign_id, adset_id, ad_id, clicks, cost, impressions = row
     assert account_id == "adv1"
+    assert date_value == "2026-01-12"
     assert ad_id == "ad777"
     assert adset_id == "set5"        # resolved from ad_names
     assert campaign_id == "cmp5"     # resolved via adset -> campaign chain
@@ -366,10 +367,49 @@ def test_tiktok_spend_sync_falls_back_to_campaign_level(client, api_db, monkeypa
     assert body["synced"] == 1
 
     with sqlite3.connect(api_db) as conn:
-        campaign_id = conn.execute(
-            "SELECT campaign_id FROM spend WHERE platform='tiktok'"
-        ).fetchone()[0]
+        date_value, campaign_id = conn.execute(
+            "SELECT date, campaign_id FROM spend WHERE platform='tiktok'"
+        ).fetchone()
+    assert date_value == "2026-01-13"
     assert campaign_id == "cmp42"
+
+
+def test_write_tiktok_spend_rows_normalizes_dates_before_replacing(api_db):
+    ss._ensure_spend_table(api_db)
+    insert_rows(
+        api_db,
+        "spend",
+        [
+            spend(
+                date="2026-01-12",
+                platform="tiktok",
+                account_id="adv1",
+                campaign_id="old",
+                clicks=1,
+                cost=99,
+                impressions=1,
+            )
+        ],
+    )
+
+    rows = [
+        {
+            "dimensions": {"ad_id": "ad777", "stat_time_day": "2026-01-12 00:00:00"},
+            "metrics": {"spend": "33.30", "impressions": "900", "clicks": "12"},
+        }
+    ]
+
+    stats = ss._write_tiktok_spend_rows(api_db, "adv1", "2026-01-12", "2026-01-12", rows)
+    assert stats["deleted"] == 1
+    assert stats["inserted"] == 1
+
+    with sqlite3.connect(api_db) as conn:
+        rows = conn.execute(
+            "SELECT date, campaign_id, ad_id, clicks, cost, impressions "
+            "FROM spend WHERE platform='tiktok' AND account_id='adv1'"
+        ).fetchall()
+
+    assert rows == [("2026-01-12", "", "ad777", "12", "33.3", "900")]
 
 
 def test_tiktok_spend_sync_not_connected(client, api_db, monkeypatch):

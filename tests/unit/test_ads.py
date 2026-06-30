@@ -75,6 +75,14 @@ def test_get_spend_traffic_source_breakdown(spend_db):
     assert rows["facebook / paid_social"]["clicks"] == 30
 
 
+def test_get_spend_platform_breakdown(spend_db):
+    rows = _by_name(ads_get_spend(spend_db, platform="all", start_date=JAN, end_date=JAN_END, breakdown="platform"))
+    assert rows["meta"]["clicks"] == 30
+    assert rows["meta"]["cost"] == 12.5
+    assert rows["google"]["clicks"] == 5
+    assert rows["google"]["cost"] == 3.0
+
+
 def test_get_spend_platform_filter(spend_db):
     result = ads_get_spend(spend_db, platform="meta", start_date=JAN, end_date=JAN_END, breakdown="ad")
     platforms = {r["platform"] for r in result["rows"]}

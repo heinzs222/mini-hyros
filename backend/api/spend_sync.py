@@ -1403,7 +1403,7 @@ def _write_tiktok_spend_rows(
         ).rowcount
 
         for r in ad_rows:
-            day = str(_tiktok_value(r, "stat_time_day") or _tiktok_value(r, "date")).strip()
+            day = _parse_import_date(str(_tiktok_value(r, "stat_time_day") or _tiktok_value(r, "date")).strip())
             if not day:
                 continue
 
@@ -1468,7 +1468,7 @@ def _write_tiktok_spend_rows(
             inserted_ads += 1
 
         for r in campaign_rows:
-            day = str(_tiktok_value(r, "stat_time_day") or _tiktok_value(r, "date")).strip()
+            day = _parse_import_date(str(_tiktok_value(r, "stat_time_day") or _tiktok_value(r, "date")).strip())
             campaign_id = str(_tiktok_value(r, "campaign_id")).strip()
             if not day or not campaign_id:
                 continue
