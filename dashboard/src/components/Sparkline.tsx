@@ -14,7 +14,12 @@ interface Props {
  * No axes, no tooltip — purely a trend glyph.
  */
 export default function Sparkline({ data, color = "#22c55e", height = 60, strokeWidth = 2 }: Props) {
-  const series = (data && data.length ? data : [0, 0]).map((v, i) => ({ i, v: Number(v) || 0 }));
+  // Map null/undefined/non-finite points to null (not 0) so Recharts breaks the
+  // line into gaps instead of plotting fake dips to zero.
+  const series = (data && data.length ? data : [0, 0]).map((v, i) => {
+    const n = Number(v);
+    return { i, v: v == null || !Number.isFinite(n) ? null : n };
+  });
   const gradientId = `spark-${color.replace(/[^a-z0-9]/gi, "")}`;
 
   return (

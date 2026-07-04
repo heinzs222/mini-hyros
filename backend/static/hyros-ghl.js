@@ -69,13 +69,20 @@
       );
 
       forms.forEach(function (form) {
-        if (form._hyrosHooked) return;
-        form._hyrosHooked = true;
+        // Mirror hyros.js: skip checkout/payment/calendar forms so they never
+        // get a Lead conversion (those are handled by the order-form / calendar
+        // hooks and by the server-side payment webhook).
+        if (form.matches && form.matches('.order-form, .payment-form, [data-product-id], #order-form, .hl-order-form, .checkout-form, form[action*="checkout"], form[action*="payment"], form[id*="checkout"], form[class*="checkout"], [data-calendar-id], .hl-calendar, .calendar-widget')) return;
+        if (form._hyrosGhlHooked) return;
+        form._hyrosGhlHooked = true;
 
         form.addEventListener("submit", function (e) {
           var email = findEmailInForm(form);
           var name = findNameInForm(form);
           var phone = findPhoneInForm(form);
+
+          // No contact info captured — don't fire a Lead for an empty submit.
+          if (!email && !phone) return;
 
           if (email) {
             hyros.identify(email);
@@ -121,8 +128,8 @@
       );
 
       calendarBtns.forEach(function (btn) {
-        if (btn._hyrosHooked) return;
-        btn._hyrosHooked = true;
+        if (btn._hyrosGhlHooked) return;
+        btn._hyrosGhlHooked = true;
 
         btn.addEventListener("click", function () {
           // Find the parent form/container
@@ -163,8 +170,8 @@
       );
 
       paymentForms.forEach(function (form) {
-        if (form._hyrosPayHooked) return;
-        form._hyrosPayHooked = true;
+        if (form._hyrosGhlPayHooked) return;
+        form._hyrosGhlPayHooked = true;
 
         form.addEventListener("submit", function () {
           var email = findEmailInForm(form);
@@ -190,11 +197,15 @@
             price = parseFloat(hiddenPrice.value) || price;
           }
 
-          hyros.conversion({
-            type: "Purchase",
+          // Do NOT fire a Purchase on SUBMIT — the payment hasn't succeeded yet,
+          // so declined cards and retries would each create a phantom revenue row
+          // with a synthetic "ghl-order-"+Date.now() id. Fire a non-revenue
+          // CheckoutSubmit signal and let the GHL PaymentReceived / Stripe webhook
+          // record the actual order as the source of truth for revenue.
+          hyros.event("CheckoutSubmit", {
             value: price,
-            order_id: "ghl-order-" + Date.now(),
             email: email,
+            page: window.location.pathname,
           });
         });
       });
@@ -263,7 +274,18 @@
       }
     });
 
-    observer.observe(document.body, { childList: true, subtree: true });
+    // document.body is null when this script loads in <head>; observing null
+    // throws and kills the MutationObserver. Observe now if the body exists,
+    // otherwise wait for DOMContentLoaded.
+    if (document.body) {
+      observer.observe(document.body, { childList: true, subtree: true });
+    } else {
+      document.addEventListener("DOMContentLoaded", function () {
+        if (document.body) {
+          observer.observe(document.body, { childList: true, subtree: true });
+        }
+      });
+    }
 
     // Also re-hook on GHL page navigation (GHL uses client-side routing)
     window.addEventListener("hashchange", function () { setTimeout(init, 200); });

@@ -99,9 +99,35 @@ async def _push_meta(event: dict) -> dict:
     if not access_token or not pixel_id:
         return {"ok": False, "error": "META_ACCESS_TOKEN and META_PIXEL_ID env vars required"}
 
-    # Hash PII for Meta (they require SHA256 hashing)
-    customer_key = event.get("customer_key", "")
-    email_hash = customer_key if len(customer_key) == 64 else _sha256(customer_key)
+    # Meta requires the SHA256 of the normalized email. Our customer_key is a
+    # TRUNCATED (32-char) hash, so re-hashing it would produce a hash-of-a-hash
+    # Meta can never match. Only send `em` when we actually have a full email
+    # hash: a raw email on the event (hash it fully), or an already-64-char hash.
+    customer_key = str(event.get("customer_key", ""))
+    raw_email = str(event.get("email") or "").strip().lower()
+    if raw_email and "@" in raw_email:
+        email_hash = _sha256(raw_email)
+    elif len(customer_key) == 64:
+        email_hash = customer_key
+    else:
+        email_hash = ""
+
+    # fbp must be the _fbp browser cookie (never the fbclid). fbc is derived from
+    # the click id as fb.1.<ms>.<fbclid> when a formatted value wasn't captured.
+    fbp = str(event.get("fbp") or "")
+    fbclid = str(event.get("fbclid") or "")
+    fbc = str(event.get("fbc") or "")
+    if not fbc and fbclid:
+        fbc = f"fb.1.{int(_time.time() * 1000)}.{fbclid}"
+
+    user_data: dict[str, Any] = {
+        "client_ip_address": event.get("ip", ""),
+        "client_user_agent": event.get("user_agent", ""),
+        "fbp": fbp,
+        "fbc": fbc,
+    }
+    if email_hash:
+        user_data["em"] = [email_hash]
 
     payload = {
         "data": [{
@@ -109,13 +135,7 @@ async def _push_meta(event: dict) -> dict:
             "event_time": int(datetime.fromisoformat(event["ts"].replace("Z", "+00:00")).timestamp()),
             "event_source_url": event.get("landing_page", ""),
             "action_source": "website",
-            "user_data": {
-                "em": [email_hash],
-                "client_ip_address": event.get("ip", ""),
-                "client_user_agent": event.get("user_agent", ""),
-                "fbp": event.get("fbclid", ""),
-                "fbc": event.get("fbc", ""),
-            },
+            "user_data": user_data,
             "custom_data": {
                 "currency": event.get("currency", "USD"),
                 "value": float(event.get("value", 0)),
@@ -312,11 +332,23 @@ async def auto_sync_conversions():
     # Conversions not yet successfully pushed. NOT EXISTS avoids building an
     # unbounded `NOT IN ('id', ...)` string (which grows with history and is an
     # injection vector) and lets SQLite use the order_id index.
+    # Join each conversion to its LAST touchpoint (deterministic), and never on
+    # an empty customer_key (which would cross-product every anonymous conversion
+    # with every anonymous touchpoint and pick an arbitrary platform/click id).
     conversions = db_query(db_path, """
         SELECT c.conversion_id, c.ts, c.type, c.value, c.order_id, c.customer_key,
                t.platform, t.gclid, t.fbclid, t.ttclid, t.campaign_id, t.session_id
         FROM conversions c
-        LEFT JOIN touchpoints t ON c.customer_key = t.customer_key
+        LEFT JOIN (
+            SELECT customer_key, platform, gclid, fbclid, ttclid, campaign_id, session_id
+            FROM (
+                SELECT tp.*,
+                       ROW_NUMBER() OVER (PARTITION BY tp.customer_key ORDER BY tp.ts DESC) AS rn
+                FROM touchpoints tp
+                WHERE COALESCE(tp.customer_key, '') != ''
+            )
+            WHERE rn = 1
+        ) t ON c.customer_key = t.customer_key AND COALESCE(c.customer_key, '') != ''
         WHERE NOT EXISTS (
             SELECT 1 FROM capi_log l WHERE l.order_id = c.order_id AND l.status = 'success'
         )

@@ -32,6 +32,7 @@ import {
   Tag,
   Home,
   Plus,
+  Target,
 } from "lucide-react";
 
 // Code-split heavy client components so recharts and the feature panels load on demand.
@@ -50,6 +51,7 @@ const CohortPanel = dynamic(() => import("@/components/CohortPanel"), { ssr: fal
 const CapiPanel = dynamic(() => import("@/components/CapiPanel"), { ssr: false, loading: PanelLoading });
 const AdNamesPanel = dynamic(() => import("@/components/AdNamesPanel"), { ssr: false, loading: PanelLoading });
 const SpendImportPanel = dynamic(() => import("@/components/SpendImportPanel"), { ssr: false, loading: PanelLoading });
+const CampaignTrackingPanel = dynamic(() => import("@/components/CampaignTrackingPanel"), { ssr: false, loading: PanelLoading });
 
 interface LiveEvent {
   _id?: number;
@@ -148,6 +150,7 @@ const REPORT_TABS = [
   { key: "capi", label: "CAPI Sync", icon: <Send size={14} /> },
   { key: "spend", label: "Spend", icon: <DollarSign size={14} /> },
   { key: "names", label: "Ad Names", icon: <Tag size={14} /> },
+  { key: "tracking", label: "Tracking", icon: <Target size={14} /> },
 ];
 
 const SECTION_TITLES: Record<Section, string> = {
@@ -164,11 +167,15 @@ export default function DashboardPage() {
   useEffect(() => { toastRef.current = toast; });
   const [report, setReport] = useState<any>(null);
   const [compareReport, setCompareReport] = useState<any>(null);
+  const [compareUnavailable, setCompareUnavailable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(false);
   const [authUser, setAuthUser] = useState("");
+  // True while /api/auth/me is unreachable (e.g. Render cold start): we retry
+  // rather than bouncing an authenticated user to /login.
+  const [backendWaking, setBackendWaking] = useState(false);
 
   const [section, setSection] = useState<Section>("dashboard");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -201,6 +208,13 @@ export default function DashboardPage() {
   const reportRequestSeqRef = useRef(0);
   const reportInFlightRef = useRef(false);
   const reportAbortRef = useRef<AbortController | null>(null);
+  // Separate request/abort tracking for the deferred comparison fetch so it can
+  // fail (or be superseded) without disturbing the primary report.
+  const compareRequestSeqRef = useRef(0);
+  const compareAbortRef = useRef<AbortController | null>(null);
+  // Mirrors the currently-selected window so background sync covers what's on
+  // screen without re-subscribing the sync interval on every range change.
+  const syncRangeRef = useRef<{ start: string; end: string }>({ start: primaryStartDate, end: primaryEndDate });
   // Coalesces bursts of WS new_order events into a single trailing refetch.
   const wsRefetchTimerRef = useRef<NodeJS.Timeout | null>(null);
   // Monotonic id assigned to each live event on receipt (stable list key).
@@ -217,6 +231,12 @@ export default function DashboardPage() {
     : compareMode === "none"
     ? "previous_period"
     : compareMode;
+
+  // Flips true once (and stays true) after the first primary report renders.
+  // Background sync and the deferred comparison gate on this so neither races
+  // the initial report load. `report` is only ever replaced with a fresh
+  // (non-null) object afterward, so the boolean stays stable.
+  const reportReady = report !== null;
 
   const loadReport = useCallback(async () => {
     // Dashboard and the attribution report consume the full report; feature
@@ -244,57 +264,19 @@ export default function DashboardPage() {
 
       setLoading(true);
       setError(null);
-      setCompareReport(null);
 
-      let comparePromise: Promise<any> | null = null;
-      let nextCompareLabel = "";
-
-      if (effectiveCompareMode === "previous_period") {
-        const { start: previousStart, end: previousEnd } = previousPeriod(startDate, endDate);
-        comparePromise = fetchReport({
-          start_date: previousStart,
-          end_date: previousEnd,
-          model,
-          active_tab: activeTab,
-          use_click_date: useClickDate,
-        }, abortController.signal);
-        nextCompareLabel = `${previousStart} to ${previousEnd}`;
-      } else if (effectiveCompareMode === "custom_range") {
-        const [customStart, customEnd] = normalizeDateRange(compareStartDate, compareEndDate);
-        if (customStart && customEnd) {
-          comparePromise = fetchReport({
-            start_date: customStart,
-            end_date: customEnd,
-            model,
-            active_tab: activeTab,
-            use_click_date: useClickDate,
-          }, abortController.signal);
-          nextCompareLabel = `${customStart} to ${customEnd}`;
-        }
-      } else if (effectiveCompareMode === "model" && compareModel !== model) {
-        comparePromise = fetchReport({
-          start_date: startDate,
-          end_date: endDate,
-          model: compareModel,
-          active_tab: activeTab,
-          use_click_date: useClickDate,
-        }, abortController.signal);
-        nextCompareLabel = `${modelLabel(compareModel)} model`;
-      }
-
-      const [data, compareData] = await Promise.all([
-        fetchReport(primaryParams, abortController.signal),
-        comparePromise ?? Promise.resolve(null),
-      ]);
+      // Only the PRIMARY report is on the critical path. The comparison period
+      // is fetched lazily by a separate effect once this has rendered, so the
+      // dashboard never waits on (or is blanked by) a second report build.
+      const data = await fetchReport(primaryParams, abortController.signal);
 
       if (requestSeq !== reportRequestSeqRef.current) return;
       setReport(data);
-      setCompareReport(compareData);
-      setCompareLabel(compareData ? nextCompareLabel : "");
     } catch (err: any) {
       if (isAbortError(err)) return;
       if (requestSeq !== reportRequestSeqRef.current) return;
-      if (String(err?.message || "").includes("401")) {
+      const status = typeof err?.status === "number" ? err.status : 0;
+      if (status === 401 || status === 403) {
         router.replace("/login");
         return;
       }
@@ -315,11 +297,83 @@ export default function DashboardPage() {
     primaryStartDate,
     primaryEndDate,
     useClickDate,
+    router,
+    section,
+  ]);
+
+  // Deferred comparison fetch. Runs off the critical path (after the primary
+  // report has rendered) and NEVER blanks the primary: on failure it clears the
+  // comparison and flags it unavailable instead of propagating the error.
+  const loadCompare = useCallback(async () => {
+    const needsFullReport = section === "dashboard" || (section === "reports" && mainTab === "attribution");
+
+    // Resolve the comparison request for the current mode, if any.
+    let compareParams: Parameters<typeof fetchReport>[0] | null = null;
+    let nextCompareLabel = "";
+    if (needsFullReport && effectiveCompareMode !== "none") {
+      const [startDate, endDate] = normalizeDateRange(primaryStartDate, primaryEndDate);
+      if (effectiveCompareMode === "previous_period") {
+        const { start: previousStart, end: previousEnd } = previousPeriod(startDate, endDate);
+        compareParams = { start_date: previousStart, end_date: previousEnd, model, active_tab: activeTab, use_click_date: useClickDate };
+        nextCompareLabel = `${previousStart} to ${previousEnd}`;
+      } else if (effectiveCompareMode === "custom_range") {
+        const [customStart, customEnd] = normalizeDateRange(compareStartDate, compareEndDate);
+        if (customStart && customEnd) {
+          compareParams = { start_date: customStart, end_date: customEnd, model, active_tab: activeTab, use_click_date: useClickDate };
+          nextCompareLabel = `${customStart} to ${customEnd}`;
+        }
+      } else if (effectiveCompareMode === "model" && compareModel !== model) {
+        compareParams = { start_date: startDate, end_date: endDate, model: compareModel, active_tab: activeTab, use_click_date: useClickDate };
+        nextCompareLabel = `${modelLabel(compareModel)} model`;
+      }
+    }
+
+    const requestSeq = compareRequestSeqRef.current + 1;
+    compareRequestSeqRef.current = requestSeq;
+    compareAbortRef.current?.abort();
+
+    // No comparison requested (disabled, unsupported mode, or model matches):
+    // clear any stale comparison state and stop.
+    if (!compareParams) {
+      compareAbortRef.current = null;
+      setCompareReport(null);
+      setCompareLabel("");
+      setCompareUnavailable(false);
+      return;
+    }
+
+    const abortController = new AbortController();
+    compareAbortRef.current = abortController;
+    setCompareUnavailable(false);
+
+    try {
+      const compareData = await fetchReport(compareParams, abortController.signal);
+      if (requestSeq !== compareRequestSeqRef.current) return;
+      setCompareReport(compareData);
+      setCompareLabel(nextCompareLabel);
+    } catch (err: any) {
+      if (isAbortError(err)) return;
+      if (requestSeq !== compareRequestSeqRef.current) return;
+      // A comparison failure must not discard the primary report.
+      setCompareReport(null);
+      setCompareLabel("");
+      setCompareUnavailable(true);
+    } finally {
+      if (compareAbortRef.current === abortController) {
+        compareAbortRef.current = null;
+      }
+    }
+  }, [
+    mainTab,
+    activeTab,
+    model,
+    primaryStartDate,
+    primaryEndDate,
+    useClickDate,
     effectiveCompareMode,
     compareModel,
     compareStartDate,
     compareEndDate,
-    router,
     section,
   ]);
 
@@ -330,7 +384,9 @@ export default function DashboardPage() {
     if (syncingSpendRef.current) return null;
 
     const notify = Boolean(opts?.notify);
-    const syncEnd = range?.end_date || daysAgo(1);
+    // Include today so the current day's spend/orders are covered; prefer the
+    // caller-supplied (on-screen) window and only fall back to a 7-day trailer.
+    const syncEnd = range?.end_date || daysAgo(0);
     const syncStart = range?.start_date || daysAgo(7);
     syncingSpendRef.current = true;
     setSyncingSpend(true);
@@ -402,6 +458,9 @@ export default function DashboardPage() {
 
   useEffect(() => {
     let cancelled = false;
+    let attempt = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
     const checkAuth = async () => {
       try {
         const status = await fetchAuthMe();
@@ -410,16 +469,32 @@ export default function DashboardPage() {
           router.replace("/login");
           return;
         }
+        setBackendWaking(false);
         setAuthEnabled(Boolean(status?.auth_enabled));
         setAuthUser(String(status?.user?.username || ""));
         setAuthChecked(true);
-      } catch {
-        if (!cancelled) router.replace("/login");
+      } catch (err: any) {
+        if (cancelled) return;
+        const status = typeof err?.status === "number" ? err.status : 0;
+        // Only a genuine auth rejection should bounce the user to /login.
+        if (status === 401 || status === 403) {
+          router.replace("/login");
+          return;
+        }
+        // Network error / timeout (e.g. Render cold start): keep the user here,
+        // surface a "waking up" state, and retry with capped exponential backoff.
+        setBackendWaking(true);
+        attempt += 1;
+        const delay = Math.min(2000 * 2 ** (attempt - 1), 15000);
+        retryTimer = setTimeout(() => {
+          void checkAuth();
+        }, delay);
       }
     };
     void checkAuth();
     return () => {
       cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
     };
   }, [router]);
 
@@ -435,12 +510,31 @@ export default function DashboardPage() {
     sectionRef.current = section;
   }, [section]);
 
+  // Dedicated single initial primary loader.
   useEffect(() => {
     if (!authChecked) return;
+    loadReport();
+  }, [loadReport, authChecked]);
+
+  // Deferred comparison loader: only after the primary report has rendered, and
+  // re-run whenever the primary refreshes or the compare settings change. This
+  // keeps the comparison off the critical path (#6) while staying in sync.
+  useEffect(() => {
+    if (!authChecked || !reportReady) return;
+    void loadCompare();
+  }, [authChecked, reportReady, report, loadCompare]);
+
+  // Background sync (spend/names/Stripe/GHL). Deferred until after the first
+  // report render so it never runs concurrently with the initial load; only
+  // the post-sync refetch remains (the pre-sync loadReport was removed). Reads
+  // the selected window from a ref so the interval isn't torn down on range
+  // changes.
+  useEffect(() => {
+    if (!authChecked || !reportReady) return;
 
     const runBackgroundSync = () => {
-      void loadReportRef.current();
-      void syncSpendData().finally(() => {
+      const { start, end } = syncRangeRef.current;
+      void syncSpendData({ start_date: start, end_date: end }).finally(() => {
         void loadReportRef.current();
       });
     };
@@ -457,12 +551,7 @@ export default function DashboardPage() {
         spendSyncTimerRef.current = null;
       }
     };
-  }, [authChecked, syncSpendData]);
-
-  useEffect(() => {
-    if (!authChecked) return;
-    loadReport();
-  }, [loadReport, authChecked]);
+  }, [authChecked, reportReady, syncSpendData]);
 
   // Auto-refresh every 30s — only on the attribution tab, paused while the tab is
   // hidden, and never while a report request is already in flight.
@@ -501,24 +590,27 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!authChecked) return;
-    const managed = createWebSocket((data: LiveEvent) => {
-      const eventId = (liveEventSeqRef.current += 1);
-      setLiveEvents((prev) => [...prev.slice(-49), { ...data, _id: eventId }]);
-      // Coalesce bursts of new_order events into a single trailing refetch
-      // ~1s after the last event (instead of one timer per event).
-      if (data.type === "new_order") {
-        if (wsRefetchTimerRef.current) clearTimeout(wsRefetchTimerRef.current);
-        wsRefetchTimerRef.current = setTimeout(() => {
-          wsRefetchTimerRef.current = null;
-          if (sectionRef.current === "reports" && mainTabRef.current !== "attribution") return;
-          void loadReportRef.current();
-        }, 1000);
-      }
-    });
+    const managed = createWebSocket(
+      (data: LiveEvent) => {
+        const eventId = (liveEventSeqRef.current += 1);
+        setLiveEvents((prev) => [...prev.slice(-49), { ...data, _id: eventId }]);
+        // Coalesce bursts of new_order events into a single trailing refetch
+        // ~1s after the last event (instead of one timer per event).
+        if (data.type === "new_order") {
+          if (wsRefetchTimerRef.current) clearTimeout(wsRefetchTimerRef.current);
+          wsRefetchTimerRef.current = setTimeout(() => {
+            wsRefetchTimerRef.current = null;
+            if (sectionRef.current === "reports" && mainTabRef.current !== "attribution") return;
+            void loadReportRef.current();
+          }, 1000);
+        }
+      },
+      // Status callback survives reconnects (unlike overriding socket.onopen,
+      // which the internal backoff logic re-assigns on each new socket).
+      (status) => setWsConnected(status === "open"),
+    );
     if (managed) {
       wsRef.current = managed;
-      managed.socket.onopen = () => setWsConnected(true);
-      managed.socket.onclose = () => setWsConnected(false);
     }
     return () => {
       if (wsRefetchTimerRef.current) {
@@ -548,6 +640,16 @@ export default function DashboardPage() {
   const [windowStart, windowEnd] = normalizeDateRange(primaryStartDate, primaryEndDate);
   const activeWindowLabel = `${windowStart} to ${windowEnd}`;
 
+  // Keep the background-sync range ref pointed at the on-screen window so the
+  // 10-minute sync always covers what the user is looking at (#8), without
+  // re-subscribing the sync interval when the range changes.
+  useEffect(() => {
+    syncRangeRef.current = { start: windowStart, end: windowEnd };
+  }, [windowStart, windowEnd]);
+
+  // Stable value object for the DateRangePicker (primitive-keyed) — see #11/#12.
+  const primaryRange = useMemo(() => ({ start: primaryStartDate, end: primaryEndDate }), [primaryStartDate, primaryEndDate]);
+
   const compareRange =
     effectiveCompareMode === "previous_period"
       ? previousPeriod(windowStart, windowEnd)
@@ -572,8 +674,11 @@ export default function DashboardPage() {
 
   if (!authChecked) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3">
         <RefreshCw size={24} className="animate-spin text-brand-500" />
+        {backendWaking && (
+          <p className="text-sm text-ink-dim">Backend is waking up, retrying…</p>
+        )}
       </div>
     );
   }
@@ -606,7 +711,7 @@ export default function DashboardPage() {
             <div className="ml-auto flex flex-wrap items-center gap-2">
               {showDateControls && (
                 <DateRangePicker
-                  value={{ start: primaryStartDate, end: primaryEndDate }}
+                  value={primaryRange}
                   onChange={setRange}
                   compareRange={compareRange}
                   compareEnabled={compareEnabled}
@@ -668,6 +773,12 @@ export default function DashboardPage() {
             </div>
           )}
 
+          {section === "dashboard" && compareEnabled && compareUnavailable && (
+            <div className="mb-5 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-2.5 text-sm text-amber-400">
+              Comparison unavailable — showing the primary period only.
+            </div>
+          )}
+
           {/* ───────── Dashboard ───────── */}
           {section === "dashboard" && (
             report ? (
@@ -702,15 +813,21 @@ export default function DashboardPage() {
             {error && (
               <div className="mx-6 mt-4 rounded-xl border border-rose-500/30 bg-rose-500/5 p-4 text-sm text-rose-400">{error} — Check API URL, CORS, and backend logs.</div>
             )}
+            {mainTab === "attribution" && compareEnabled && compareUnavailable && (
+              <div className="mx-6 mt-4 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-2.5 text-sm text-amber-400">
+                Comparison unavailable — showing the primary period only.
+              </div>
+            )}
             {mainTab !== "attribution" && (
               <div className="px-6 py-6">
-                {mainTab === "funnel" && <FunnelPanel />}
+                {mainTab === "funnel" && <FunnelPanel startDate={windowStart} endDate={windowEnd} />}
                 {mainTab === "ltv" && <LtvPanel />}
                 {mainTab === "journey" && <JourneyPanel startDate={windowStart} endDate={windowEnd} />}
                 {mainTab === "cohort" && <CohortPanel />}
                 {mainTab === "capi" && <CapiPanel />}
                 {mainTab === "spend" && <SpendImportPanel startDate={windowStart} endDate={windowEnd} onImported={loadReport} />}
                 {mainTab === "names" && <AdNamesPanel />}
+                {mainTab === "tracking" && <CampaignTrackingPanel onChange={loadReport} />}
               </div>
             )}
             {mainTab === "attribution" && (

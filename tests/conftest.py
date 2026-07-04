@@ -9,10 +9,16 @@ which keeps golden-value assertions deterministic and easy to reason about.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# Pin the reporting timezone to UTC for tests so golden-value date-range
+# assertions stay deterministic regardless of the host zone. Production defaults
+# to America/Toronto (see attributionops.util.report_timezone).
+os.environ.setdefault("REPORT_TIMEZONE", "UTC")
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

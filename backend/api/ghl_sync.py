@@ -18,6 +18,7 @@ Endpoints (mounted at /api/ghl):
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from datetime import datetime, timezone, timedelta
@@ -30,6 +31,9 @@ from fastapi import APIRouter, Query, Request
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows as db_query
+from attributionops.util import try_parse_iso_ts
+
+logger = logging.getLogger("ghl_sync")
 
 # Reuse the webhook write-helpers so GHL leads stitch to the same customer_key
 # (sha256 of email) as Stripe orders and the tracking pixel.
@@ -133,11 +137,14 @@ def _contact_ts(contact: dict, fallback: str) -> str:
     raw = str(contact.get("dateAdded") or contact.get("createdAt") or contact.get("dateUpdated") or "")
     if not raw:
         return fallback
-    try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return _iso_ts(dt)
-    except (ValueError, TypeError):
+    # Tolerant parse (handles Hyros-style "…Z UTC-06:00" and naive strings) so a
+    # non-standard timestamp no longer silently collapses every lead onto the
+    # sync day.
+    dt = try_parse_iso_ts(raw)
+    if dt is None:
+        logger.warning("GHL contact ts unparseable, using fallback: %r", raw)
         return fallback
+    return _iso_ts(dt)
 
 
 def _src_info_from_attribution(contact: dict) -> dict:
@@ -228,14 +235,24 @@ async def _fetch_contacts(client: httpx.AsyncClient, token: str, location_id: st
 
 async def _fetch_opportunities(client: httpx.AsyncClient, token: str, location_id: str,
                                limit: int) -> list[dict]:
-    resp = await client.get(
-        f"{GHL_API_BASE}/opportunities/search",
-        headers=_headers(token),
-        params={"location_id": location_id, "limit": min(limit, 100)},
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return list(data.get("opportunities") or [])[:limit]
+    """Fetch up to ``limit`` opportunities, following pagination (was first-page only)."""
+    opps: list[dict] = []
+    params: dict[str, Any] = {"location_id": location_id, "limit": min(limit, 100)}
+    page_url: str | None = f"{GHL_API_BASE}/opportunities/search"
+    guard = 0
+    while page_url and len(opps) < limit and guard < 50:
+        guard += 1
+        resp = await client.get(page_url, headers=_headers(token), params=params)
+        resp.raise_for_status()
+        data = resp.json()
+        batch = list(data.get("opportunities") or [])
+        opps.extend(batch)
+        meta = data.get("meta") or {}
+        next_url = meta.get("nextPageUrl")
+        if not batch or not next_url:
+            break
+        page_url, params = next_url, {}
+    return opps[:limit]
 
 
 # ── Writers ────────────────────────────────────────────────────────────────────
@@ -262,7 +279,9 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
             src_info["utm_source"], src_info["utm_medium"], src_info["source"], src_info=src_info,
         )
 
-        conv_id = _sha256(f"ghl_api_lead|{contact_id}")
+        # Same canonical key as the webhook path so a lead captured by both the
+        # webhook and this sync is counted once, not twice.
+        conv_id = _sha256(f"ghl_lead|{contact_id}")
         _insert_conversion(db_path, conv_id, ts, LEAD_TYPE, 0.0, conv_id, customer_key)
 
         session_id = _sha256(f"ghl_api_session|{contact_id}")
@@ -284,10 +303,8 @@ def _write_opportunities(db_path: str, opportunities: list[dict], start_date: st
     won_stages = {"won", "closed won", "closedwon", "paid", "sale", "customer", "purchased"}
     for opp in opportunities:
         ts_raw = str(opp.get("createdAt") or opp.get("dateAdded") or "")
-        try:
-            ts = _iso_ts(datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))) if ts_raw else now
-        except (ValueError, TypeError):
-            ts = now
+        _dt = try_parse_iso_ts(ts_raw) if ts_raw else None
+        ts = _iso_ts(_dt) if _dt is not None else now
         if not _within(ts, start_date, end_date):
             skipped += 1
             continue
@@ -303,7 +320,9 @@ def _write_opportunities(db_path: str, opportunities: list[dict], start_date: st
             value = 0.0
 
         if status in won_stages and value > 0:
-            order_id = _sha256(f"ghl_api_opp|{opp_id}")
+            # Canonical keys shared with the webhook path (ghl.py) so the same won
+            # opportunity isn't double-counted when both paths run.
+            order_id = _sha256(f"ghl_opp|{opp_id}")
             with connect(db_path) as conn:
                 conn.execute(
                     """INSERT OR IGNORE INTO orders
@@ -313,12 +332,12 @@ def _write_opportunities(db_path: str, opportunities: list[dict], start_date: st
                      str(round(value * 0.029 + 0.30, 2)), customer_key),
                 )
                 conn.commit()
-            _insert_conversion(db_path, _sha256(f"ghl_api_oppconv|{opp_id}"),
+            _insert_conversion(db_path, _sha256(f"ghl_oppconv|{opp_id}"),
                                ts, PURCHASE_TYPE, value, order_id, customer_key)
             orders += 1
         else:
-            _insert_conversion(db_path, _sha256(f"ghl_api_oppopen|{opp_id}"),
-                               ts, "Opportunity", value, _sha256(f"ghl_api_oppopen|{opp_id}"), customer_key)
+            _insert_conversion(db_path, _sha256(f"ghl_oppopen|{opp_id}"),
+                               ts, "Opportunity", value, _sha256(f"ghl_oppopen|{opp_id}"), customer_key)
             open_opps += 1
     return {"orders": orders, "open_opportunities": open_opps, "skipped": skipped}
 

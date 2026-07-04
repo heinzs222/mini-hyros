@@ -29,9 +29,31 @@ UTC = timezone.utc
 STRIPE_CHARGES_URL = "https://api.stripe.com/v1/charges"
 STRIPE_PAYMENT_INTENTS_URL = "https://api.stripe.com/v1/payment_intents"
 
+# Fee estimate used only when the real balance_transaction fee is unavailable.
+_FEE_RATE = 0.029
+_FEE_FIXED = 0.30
+
 
 def _db() -> str:
     return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+
+
+def _payment_intent_id(charge: dict) -> str:
+    """Extract the payment_intent id whether or not it was expanded to an object."""
+    pi = charge.get("payment_intent")
+    if isinstance(pi, dict):
+        return str(pi.get("id") or "")
+    return str(pi or "")
+
+
+def _stripe_order_id(charge: dict) -> str:
+    """Canonical Stripe order id shared with the realtime webhook.
+
+    Keyed on payment_intent (falling back to charge id) and NOT hashed, so a
+    charge ingested via the webhook and via this backfill produce the identical
+    order id and dedupe against each other.
+    """
+    return "stripe|" + (_payment_intent_id(charge) or str(charge.get("id") or ""))
 
 
 def _now() -> str:
@@ -140,6 +162,8 @@ async def _fetch_stripe_charges(
                 ("limit", 100),
                 ("expand[]", "data.customer"),
                 ("expand[]", "data.payment_intent"),
+                ("expand[]", "data.invoice"),
+                ("expand[]", "data.balance_transaction"),
             ]
             if starting_after:
                 params.append(("starting_after", starting_after))
@@ -155,8 +179,9 @@ async def _fetch_stripe_charges(
                 break
             starting_after = charges[-1]["id"]
 
-    # Only return successful, non-refunded charges
-    return [c for c in all_charges if c.get("paid") and not c.get("refunded") and c.get("amount", 0) > 0]
+    # Return all successful charges — INCLUDING refunded/fully-refunded ones, so
+    # their refund amount is recorded and net revenue is reduced correctly.
+    return [c for c in all_charges if c.get("paid") and c.get("amount", 0) > 0]
 
 
 def _extract_email_from_charge(charge: dict) -> str:
@@ -315,7 +340,7 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
     _ensure_orders_table(db_path)
 
     inserted = 0
-    skipped = 0
+    updated = 0
     now = _now()
 
     with connect(db_path) as conn:
@@ -324,22 +349,20 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
             if not charge_id:
                 continue
 
-            order_id = _sha256(f"stripe|{charge_id}")
-
-            # Check if already exists
-            existing = conn.execute(
-                "SELECT order_id FROM orders WHERE order_id = ?", (order_id,)
-            ).fetchone()
-            if existing:
-                skipped += 1
-                continue
+            # Canonical id shared with the webhook (payment_intent-based, unhashed).
+            order_id = _stripe_order_id(charge)
 
             amount_cents = int(charge.get("amount", 0))
             amount_refunded_cents = int(charge.get("amount_refunded", 0))
             gross = round(amount_cents / 100, 2)
             refunds = round(amount_refunded_cents / 100, 2)
             net = round(gross - refunds, 2)
-            fees = round(gross * 0.029 + 0.30, 2)  # Stripe standard fee estimate
+            # Prefer the real Stripe fee from the (expanded) balance_transaction.
+            bt = charge.get("balance_transaction")
+            if isinstance(bt, dict) and bt.get("fee") is not None:
+                fees = round(int(bt.get("fee", 0)) / 100, 2)
+            else:
+                fees = round(gross * _FEE_RATE + _FEE_FIXED, 2)
             currency = str(charge.get("currency", "usd")).upper()
 
             # Convert amount if not USD (basic — just note currency)
@@ -356,9 +379,15 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
                 session_id=tracking["session_id"],
             )
 
-            subscription_id = str(charge.get("subscription") or "")
+            # subscription lives on the (expanded) invoice, not the charge.
+            invoice = charge.get("invoice")
+            subscription_id = str(
+                (invoice.get("subscription") if isinstance(invoice, dict) else None)
+                or charge.get("subscription")
+                or ""
+            )
 
-            conn.execute(
+            cur = conn.execute(
                 """INSERT OR IGNORE INTO orders
                    (order_id, ts, gross, net, refunds, chargebacks, cogs, fees,
                     customer_key, subscription_id, session_id, visitor_id, channel,
@@ -371,9 +400,19 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
                  tracking["ad_id"], tracking["creative_id"], tracking["gclid"],
                  tracking["fbclid"], tracking["ttclid"]),
             )
+            if cur.rowcount and cur.rowcount > 0:
+                inserted += 1
+            else:
+                # Already synced: refresh refunds/net so refunds issued after the
+                # first sync actually reduce reported revenue.
+                conn.execute(
+                    "UPDATE orders SET refunds = ?, net = ? WHERE order_id = ?",
+                    (str(refunds), str(net), order_id),
+                )
+                updated += 1
 
-            # Insert Purchase conversion
-            conv_id = _sha256(f"stripe_conv|{charge_id}")
+            # Insert Purchase conversion (canonical id shared with the webhook path).
+            conv_id = _sha256(f"conv|{order_id}")
             conn.execute(
                 """INSERT OR IGNORE INTO conversions
                    (conversion_id, ts, type, value, order_id, customer_key, session_id, visitor_id)
@@ -390,11 +429,9 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
                 ),
             )
 
-            inserted += 1
-
         conn.commit()
 
-    return {"inserted": inserted, "skipped": skipped}
+    return {"inserted": inserted, "updated": updated}
 
 
 @router.post("/sync")
@@ -419,7 +456,7 @@ async def stripe_sync(
         stats = _write_stripe_orders(db_path, charges)
         return {
             "synced": stats["inserted"],
-            "skipped": stats["skipped"],
+            "updated": stats["updated"],
             "fetched": len(charges),
             "start_date": start_date,
             "end_date": end_date,

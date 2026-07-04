@@ -129,7 +129,7 @@ async def upsert_name(mapping: NameMapping):
         )
         conn.commit()
 
-    return {"ok": True, "mapping": mapping.dict()}
+    return {"ok": True, "mapping": mapping.model_dump()}
 
 
 @router.post("/batch")
@@ -708,7 +708,7 @@ async def _google_gaql(
     next_page_token = ""
     async with httpx.AsyncClient(timeout=45) as client:
         while True:
-            payload: dict = {"query": query, "pageSize": 10000}
+            payload: dict = {"query": query}
             if next_page_token:
                 payload["pageToken"] = next_page_token
             resp = await client.post(url, json=payload, headers=headers)
@@ -848,17 +848,25 @@ async def _sync_tiktok() -> dict:
     try:
         headers = {"Access-Token": access_token, "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=30) as client:
-            # Fetch campaigns
-            resp = await client.get(
-                "https://business-api.tiktok.com/open_api/v1.3/campaign/get/",
-                params={"advertiser_id": advertiser_id, "page_size": 200},
-                headers=headers,
-            )
-            rj = resp.json()
-            if rj.get("code", 0) != 0:
-                return {"synced": 0, "error": f"TikTok campaigns error {rj.get('code')}: {rj.get('message')}"}
-            data = rj.get("data", {})
-            campaigns = data.get("list", [])
+            # Fetch campaigns (paginated)
+            campaigns = []
+            page = 1
+            while True:
+                resp = await client.get(
+                    "https://business-api.tiktok.com/open_api/v1.3/campaign/get/",
+                    params={"advertiser_id": advertiser_id, "page_size": 200, "page": page},
+                    headers=headers,
+                )
+                rj = resp.json()
+                if rj.get("code", 0) != 0:
+                    return {"synced": 0, "error": f"TikTok campaigns error {rj.get('code')}: {rj.get('message')}"}
+                data = rj.get("data", {})
+                campaigns.extend(data.get("list", []))
+                page_info = data.get("page_info") or {}
+                total_page = int(page_info.get("total_page") or 1)
+                if page >= total_page:
+                    break
+                page += 1
             with connect(db_path) as conn:
                 for c in campaigns:
                     conn.execute(
@@ -869,17 +877,25 @@ async def _sync_tiktok() -> dict:
                     synced += 1
                 conn.commit()
 
-            # Fetch adgroups (adsets)
-            resp = await client.get(
-                "https://business-api.tiktok.com/open_api/v1.3/adgroup/get/",
-                params={"advertiser_id": advertiser_id, "page_size": 200},
-                headers=headers,
-            )
-            rj = resp.json()
-            if rj.get("code", 0) != 0:
-                return {"synced": synced, "error": f"TikTok adgroups error {rj.get('code')}: {rj.get('message')}"}
-            data = rj.get("data", {})
-            adgroups = data.get("list", [])
+            # Fetch adgroups (adsets, paginated)
+            adgroups = []
+            page = 1
+            while True:
+                resp = await client.get(
+                    "https://business-api.tiktok.com/open_api/v1.3/adgroup/get/",
+                    params={"advertiser_id": advertiser_id, "page_size": 200, "page": page},
+                    headers=headers,
+                )
+                rj = resp.json()
+                if rj.get("code", 0) != 0:
+                    return {"synced": synced, "error": f"TikTok adgroups error {rj.get('code')}: {rj.get('message')}"}
+                data = rj.get("data", {})
+                adgroups.extend(data.get("list", []))
+                page_info = data.get("page_info") or {}
+                total_page = int(page_info.get("total_page") or 1)
+                if page >= total_page:
+                    break
+                page += 1
             with connect(db_path) as conn:
                 for a in adgroups:
                     conn.execute(
@@ -891,21 +907,30 @@ async def _sync_tiktok() -> dict:
                     synced += 1
                 conn.commit()
 
-            # Fetch ads with creative fields for thumbnails
-            resp = await client.get(
-                "https://business-api.tiktok.com/open_api/v1.3/ad/get/",
-                params={
-                    "advertiser_id": advertiser_id,
-                    "page_size": 200,
-                    "fields": '["ad_id","ad_name","adgroup_id","video_id","image_ids","ad_format"]',
-                },
-                headers=headers,
-            )
-            rj = resp.json()
-            if rj.get("code", 0) != 0:
-                return {"synced": synced, "error": f"TikTok ads error {rj.get('code')}: {rj.get('message')}"}
-            data = rj.get("data", {})
-            ads = data.get("list", [])
+            # Fetch ads with creative fields for thumbnails (paginated)
+            ads = []
+            page = 1
+            while True:
+                resp = await client.get(
+                    "https://business-api.tiktok.com/open_api/v1.3/ad/get/",
+                    params={
+                        "advertiser_id": advertiser_id,
+                        "page_size": 200,
+                        "page": page,
+                        "fields": '["ad_id","ad_name","adgroup_id","video_id","image_ids","ad_format"]',
+                    },
+                    headers=headers,
+                )
+                rj = resp.json()
+                if rj.get("code", 0) != 0:
+                    return {"synced": synced, "error": f"TikTok ads error {rj.get('code')}: {rj.get('message')}"}
+                data = rj.get("data", {})
+                ads.extend(data.get("list", []))
+                page_info = data.get("page_info") or {}
+                total_page = int(page_info.get("total_page") or 1)
+                if page >= total_page:
+                    break
+                page += 1
 
             # Collect video IDs and image IDs to bulk-fetch thumbnail URLs
             video_ids = list({str(a.get("video_id") or "") for a in ads if a.get("video_id")})

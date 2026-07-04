@@ -45,10 +45,12 @@ def test_time_decay_weights_sum_to_one_and_favor_recent():
     assert w[1] > w[0]
 
 
-def test_data_driven_proxy_two_touches_is_forty_sixty_split_endpoints():
-    # With only two touches there is no middle, so 0.4 + 0.4 normalised stays as-is.
+def test_data_driven_proxy_two_touches_is_fifty_fifty_split_endpoints():
+    # With only two touches there is no middle; weights are normalised to sum to
+    # 1.0 (previously they summed to 0.8, silently dropping 20% of the revenue).
     w = _weights_for_model("data_driven_proxy", _tps("a", "b"), ORDER_TS)
-    assert w == [0.4, 0.4]
+    assert w == [0.5, 0.5]
+    assert sum(w) == pytest.approx(1.0)
 
 
 def test_data_driven_proxy_distributes_middle_evenly():

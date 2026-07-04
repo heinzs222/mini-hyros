@@ -62,7 +62,7 @@ def test_sync_writes_orders_and_conversions(client, api_db, monkeypatch):
     assert route.called
     body = r.json()
     assert body["synced"] == 2
-    assert body["skipped"] == 0
+    assert body["updated"] == 0
     assert body["fetched"] == 2
     assert body["start_date"] == "2025-01-01"
     assert body["end_date"] == "2025-01-31"
@@ -81,7 +81,7 @@ def test_sync_writes_orders_and_conversions(client, api_db, monkeypatch):
     assert all(c["order_id"] in order_ids for c in convs)
 
 
-def test_sync_filters_refunded_and_unpaid_and_zero(client, api_db, monkeypatch):
+def test_sync_includes_refunded_filters_unpaid_and_zero(client, api_db, monkeypatch):
     monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
     payload = _charges_page([
         _charge("ch_ok", amount=2000),
@@ -95,10 +95,16 @@ def test_sync_filters_refunded_and_unpaid_and_zero(client, api_db, monkeypatch):
         )
         body = client.post("/api/stripe/sync").json()
 
-    # Only the single clean charge survives the filter.
-    assert body["fetched"] == 1
-    assert body["synced"] == 1
-    assert len(sql_rows(api_db, "SELECT * FROM orders")) == 1
+    # Refunded charges are now KEPT (so their refund reduces net revenue); only
+    # unpaid and zero-amount charges are excluded.
+    assert body["fetched"] == 2
+    assert body["synced"] == 2
+    orders = sql_rows(api_db, "SELECT * FROM orders")
+    assert len(orders) == 2
+    refunded = sql_rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ["stripe|ch_refunded"])[0]
+    assert float(refunded["gross"]) == 20.0
+    assert float(refunded["refunds"]) == 20.0
+    assert float(refunded["net"]) == 0.0
 
 
 def test_sync_dedupes_on_second_run(client, api_db, monkeypatch):
@@ -112,8 +118,10 @@ def test_sync_dedupes_on_second_run(client, api_db, monkeypatch):
         first = client.post("/api/stripe/sync").json()
         second = client.post("/api/stripe/sync").json()
 
-    assert first["synced"] == 1 and first["skipped"] == 0
-    assert second["synced"] == 0 and second["skipped"] == 1
+    assert first["synced"] == 1 and first["updated"] == 0
+    # Second run re-syncs the same charge as an UPDATE (refresh refunds/net),
+    # not a new insert.
+    assert second["synced"] == 0 and second["updated"] == 1
     # Still exactly one order in the warehouse.
     assert len(sql_rows(api_db, "SELECT * FROM orders WHERE order_id != ''")) == 1
 

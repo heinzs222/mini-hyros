@@ -166,19 +166,11 @@ export default function ReportsView(props: Props) {
   const quickPresets = [
     { label: "Today", range: { start: today, end: today } },
     { label: "Yesterday", range: { start: addDaysIso(today, -1), end: addDaysIso(today, -1) } },
-    { label: "7 days", range: { start: addDaysIso(today, -6), end: today } },
-    { label: "30 days", range: { start: addDaysIso(today, -29), end: today } },
+    { label: "7 days", range: { start: addDaysIso(today, -7), end: addDaysIso(today, -1) } },
+    { label: "30 days", range: { start: addDaysIso(today, -30), end: addDaysIso(today, -1) } },
   ];
   const activePreset = quickPresets.find((p) => p.range.start === range.start && p.range.end === range.end)?.label;
 
-  const toggleColumn = (key: string) => {
-    setHiddenCols((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
   const setFiltersOpenPref = (open: boolean) => {
     setOpenByDefault(open);
     if (typeof window !== "undefined") window.localStorage.setItem("vigil_filters_open", open ? "1" : "0");
@@ -488,7 +480,7 @@ export default function ReportsView(props: Props) {
         <ColumnsModal
           metricCols={metricCols}
           hiddenCols={hiddenCols}
-          onToggle={toggleColumn}
+          onApply={(next) => { setHiddenCols(next); setShowColumns(false); }}
           onClose={() => setShowColumns(false)}
         />
       )}
@@ -535,19 +527,30 @@ function ViewTab({ active, onClick, icon, label }: { active: boolean; onClick: (
 function ColumnsModal({
   metricCols,
   hiddenCols,
-  onToggle,
+  onApply,
   onClose,
 }: {
   metricCols: any[];
   hiddenCols: Set<string>;
-  onToggle: (key: string) => void;
+  onApply: (next: Set<string>) => void;
   onClose: () => void;
 }) {
   const [cat, setCat] = useState("all");
   const [q, setQ] = useState("");
+  // Local draft of hidden columns — toggles only mutate this copy so Cancel /
+  // backdrop discards changes and only Apply commits them to the parent.
+  const [draft, setDraft] = useState<Set<string>>(() => new Set(hiddenCols));
+  const toggleDraft = (key: string) => {
+    setDraft((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
   const catDef = COLUMN_CATEGORIES.find((c) => c.key === cat) || COLUMN_CATEGORIES[0];
   const filtered = metricCols.filter((c) => catDef.match(c.key) && c.label.toLowerCase().includes(q.toLowerCase()));
-  const selected = metricCols.filter((c) => !hiddenCols.has(c.key));
+  const selected = metricCols.filter((c) => !draft.has(c.key));
 
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
@@ -581,9 +584,9 @@ function ColumnsModal({
             </div>
             <div className="max-h-[420px] space-y-0.5 overflow-auto">
               {filtered.map((c) => {
-                const visible = !hiddenCols.has(c.key);
+                const visible = !draft.has(c.key);
                 return (
-                  <button key={c.key} onClick={() => onToggle(c.key)} className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-[13px] text-ink hover:bg-white/5">
+                  <button key={c.key} onClick={() => toggleDraft(c.key)} className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-[13px] text-ink hover:bg-white/5">
                     {c.label}
                     <span className={`flex h-4 w-4 items-center justify-center rounded border ${visible ? "border-brand-500 bg-brand-500" : "border-[var(--card-border)]"}`}>
                       {visible && <Check size={11} className="text-white" />}
@@ -601,7 +604,7 @@ function ColumnsModal({
               {selected.map((c) => (
                 <div key={c.key} className="flex items-center justify-between rounded-lg border border-[var(--card-border)] bg-white/[0.02] px-2.5 py-2 text-[13px] text-ink">
                   <span className="flex items-center gap-2"><SlidersHorizontal size={12} className="text-ink-faint" /> {c.label}</span>
-                  <button onClick={() => onToggle(c.key)} className="text-ink-faint hover:text-rose-400" title="Remove column"><X size={14} /></button>
+                  <button onClick={() => toggleDraft(c.key)} className="text-ink-faint hover:text-rose-400" title="Remove column"><X size={14} /></button>
                 </div>
               ))}
             </div>
@@ -609,7 +612,7 @@ function ColumnsModal({
         </div>
         <div className="flex items-center justify-between border-t border-[var(--card-border)] px-5 py-3">
           <button onClick={onClose} className="rounded-lg border border-[var(--card-border)] px-4 py-1.5 text-[13px] text-ink-dim hover:text-ink">Cancel</button>
-          <button onClick={onClose} className="rounded-lg bg-white px-5 py-1.5 text-[13px] font-semibold text-black hover:bg-white/90">Apply</button>
+          <button onClick={() => onApply(draft)} className="rounded-lg bg-white px-5 py-1.5 text-[13px] font-semibold text-black hover:bg-white/90">Apply</button>
         </div>
       </div>
     </div>

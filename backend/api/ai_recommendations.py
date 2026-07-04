@@ -17,6 +17,8 @@ from fastapi import APIRouter, Query
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import sql_rows as db_query
+from attributionops.util import local_day_bounds_utc
+from attributionops.tools.campaign_filter import ensure_campaign_settings_table, not_excluded_sql
 
 router = APIRouter()
 UTC = timezone.utc
@@ -34,7 +36,7 @@ def _safe_float(val, default=0.0) -> float:
 
 
 @router.get("/recommendations")
-async def get_recommendations(
+def get_recommendations(
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
 ):
@@ -46,32 +48,52 @@ async def get_recommendations(
     if not end_date:
         end_date = datetime.now(UTC).strftime("%Y-%m-%d")
 
+    ensure_campaign_settings_table(db_path)
+    # Half-open UTC instant bounds for the timestamp columns (touchpoints/orders).
+    start_utc, end_excl_utc = local_day_bounds_utc(start_date, end_date)
+
     recommendations = []
 
-    # Get spend + attribution per campaign
+    # Get spend per campaign (spend.date is a calendar-day string), excluding
+    # campaigns flagged not-tracked.
     try:
-        campaigns = db_query(db_path, """
+        campaigns = db_query(db_path, f"""
             SELECT s.platform, s.campaign_id,
                    SUM(CAST(s.cost AS REAL)) as spend,
                    SUM(CAST(s.clicks AS REAL)) as clicks
             FROM spend s
             WHERE s.date >= ? AND s.date <= ?
+              AND {not_excluded_sql("s.platform", "s.campaign_id")}
             GROUP BY s.platform, s.campaign_id
         """, [start_date, end_date])
     except Exception:
         campaigns = []
 
     try:
-        # Revenue per campaign from attribution
-        revenue_data = db_query(db_path, """
-            SELECT t.platform, t.campaign_id,
-                   COUNT(DISTINCT o.order_id) as orders,
-                   SUM(CAST(o.gross AS REAL)) as revenue
-            FROM touchpoints t
-            JOIN orders o ON t.customer_key = o.customer_key
-            WHERE t.ts >= ? AND o.ts >= ?
-            GROUP BY t.platform, t.campaign_id
-        """, [start_date, start_date])
+        # Revenue per campaign, last-touch attributed. Deduplicate to ONE touch
+        # per order (the most recent touch) before summing, so an order's revenue
+        # is credited once instead of fanning out across every touched campaign.
+        # Both t.ts and o.ts are bounded to the requested window.
+        revenue_data = db_query(db_path, f"""
+            SELECT platform, campaign_id,
+                   COUNT(*) as orders,
+                   SUM(revenue) as revenue
+            FROM (
+                SELECT o.order_id,
+                       t.platform, t.campaign_id,
+                       CAST(o.gross AS REAL) as revenue,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY o.order_id ORDER BY t.ts DESC
+                       ) as rn
+                FROM touchpoints t
+                JOIN orders o ON t.customer_key = o.customer_key
+                WHERE t.ts >= ? AND t.ts < ?
+                  AND o.ts >= ? AND o.ts < ?
+                  AND {not_excluded_sql("t.platform", "t.campaign_id")}
+            )
+            WHERE rn = 1
+            GROUP BY platform, campaign_id
+        """, [start_utc, end_excl_utc, start_utc, end_excl_utc])
     except Exception:
         revenue_data = []
 
@@ -167,7 +189,7 @@ async def get_recommendations(
 
 
 @router.get("/insights")
-async def get_insights():
+def get_insights():
     """Key performance insights and trends."""
     db_path = _db()
     insights = []

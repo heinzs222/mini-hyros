@@ -36,7 +36,7 @@ def _month_key(ts_str: str) -> str:
 
 
 @router.get("/analysis")
-async def cohort_analysis(
+def cohort_analysis(
     granularity: str = Query(default="month", description="month or week"),
     breakdown: str = Query(default="", description="Optional: platform, campaign_id"),
 ):
@@ -159,7 +159,7 @@ async def cohort_analysis(
 
 
 @router.get("/retention")
-async def cohort_retention(
+def cohort_retention(
     granularity: str = Query(default="month"),
 ):
     """Retention rates per cohort — what % of customers from each cohort made repeat purchases."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import respx
 from httpx import Response
 
+from attributionops.db import sql_rows
 from attributionops.tools.ads import ads_list_platforms
 
 CSV = (
@@ -81,8 +82,13 @@ def test_meta_spend_sync_with_mocked_api(client, api_db, monkeypatch):
     assert r.status_code == 200
     assert graph.called
     body = r.json()
-    assert body["platforms"]["meta"]["fetched"] == 1
+    # Meta now also fetches a campaign-level report for reconciliation; the mocked
+    # ad-level report has exactly one row.
+    assert body["platforms"]["meta"]["fetched_ads"] == 1
     assert body["synced"] >= 1
+    # Campaign total equals the summed ad total, so no adjustment row is added.
+    meta_rows = sql_rows(api_db, "SELECT * FROM spend WHERE platform = 'meta'")
+    assert len(meta_rows) == 1
     # The mocked spend row is now queryable.
     assert "meta" in ads_list_platforms(api_db)["platforms"]
 

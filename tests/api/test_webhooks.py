@@ -10,10 +10,12 @@ HMAC / signature enforcement branches where applicable.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
 import sqlite3
+import time
 
 import httpx
 import respx
@@ -97,7 +99,14 @@ def test_shopify_customer_nested_email(client, api_db, monkeypatch):
 
 
 def _shopify_hmac(secret: str, body: bytes) -> str:
-    return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    # Shopify sends the HMAC base64-encoded (not hex).
+    return base64.b64encode(hmac.new(secret.encode(), body, hashlib.sha256).digest()).decode()
+
+
+def _stripe_sig(secret: str, body: bytes, t: int | None = None) -> str:
+    t = int(time.time()) if t is None else t
+    v1 = hmac.new(secret.encode(), f"{t}.{body.decode()}".encode(), hashlib.sha256).hexdigest()
+    return f"t={t},v1={v1}"
 
 
 def test_shopify_valid_hmac_accepted(client, api_db, monkeypatch):
@@ -148,15 +157,16 @@ def test_stripe_checkout_completed_inserts_order(client, api_db, monkeypatch):
     }
     resp = client.post("/api/webhooks/stripe", json=payload)
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "order_id": "cs_test_1"}
+    # Canonical id: "stripe|" + (payment_intent or object id).
+    assert resp.json() == {"ok": True, "order_id": "stripe|cs_test_1"}
 
-    o = _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("cs_test_1",))[0]
+    o = _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("stripe|cs_test_1",))[0]
     assert float(o["gross"]) == 123.45
     assert float(o["net"]) == 123.45
     assert o["customer_key"] == _sha256("s@example.com")
     assert o["subscription_id"] == "sub_123"
 
-    convs = _rows(api_db, "SELECT * FROM conversions WHERE order_id = ?", ("cs_test_1",))
+    convs = _rows(api_db, "SELECT * FROM conversions WHERE order_id = ?", ("stripe|cs_test_1",))
     assert len(convs) == 1
 
 
@@ -174,7 +184,7 @@ def test_stripe_charge_succeeded_uses_amount_and_receipt_email(client, api_db, m
     }
     resp = client.post("/api/webhooks/stripe", json=payload)
     assert resp.status_code == 200
-    o = _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("ch_1",))[0]
+    o = _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("stripe|ch_1",))[0]
     assert float(o["gross"]) == 50.0
     assert o["customer_key"] == _sha256("c@example.com")
 
@@ -187,8 +197,8 @@ def test_stripe_payment_intent_uses_payment_intent_id(client, api_db, monkeypatc
     }
     resp = client.post("/api/webhooks/stripe", json=payload)
     assert resp.status_code == 200
-    assert resp.json()["order_id"] == "pi_99"
-    assert len(_rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("pi_99",))) == 1
+    assert resp.json()["order_id"] == "stripe|pi_99"
+    assert len(_rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("stripe|pi_99",))) == 1
 
 
 def test_stripe_unsupported_event_skipped(client, api_db, monkeypatch):
@@ -205,21 +215,36 @@ def test_stripe_secret_set_missing_signature_rejected(client, api_db, monkeypatc
     payload = {"type": "charge.succeeded", "data": {"object": {"id": "ch_x", "amount": 100}}}
     resp = client.post("/api/webhooks/stripe", json=payload)
     assert resp.status_code == 401
-    assert resp.json()["detail"] == "Missing Stripe-Signature"
+    assert resp.json()["detail"] == "Invalid Stripe signature"
     assert _rows(api_db, "SELECT * FROM orders") == []
 
 
-def test_stripe_secret_set_with_signature_accepted(client, api_db, monkeypatch):
+def test_stripe_secret_set_bad_signature_rejected(client, api_db, monkeypatch):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_x")
-    payload = {"type": "charge.succeeded", "data": {"object": {"id": "ch_ok", "amount": 100}}}
+    payload = {"type": "charge.succeeded", "data": {"object": {"id": "ch_bad", "amount": 100}}}
+    # A present-but-invalid signature must now be rejected (was accepted before).
     resp = client.post(
         "/api/webhooks/stripe",
         json=payload,
         headers={"Stripe-Signature": "t=1,v1=anything"},
     )
+    assert resp.status_code == 401
+    assert _rows(api_db, "SELECT * FROM orders") == []
+
+
+def test_stripe_secret_set_with_signature_accepted(client, api_db, monkeypatch):
+    secret = "whsec_x"
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", secret)
+    payload = {"type": "charge.succeeded", "data": {"object": {"id": "ch_ok", "amount": 100}}}
+    body = json.dumps(payload).encode()
+    resp = client.post(
+        "/api/webhooks/stripe",
+        content=body,
+        headers={"Stripe-Signature": _stripe_sig(secret, body), "Content-Type": "application/json"},
+    )
     assert resp.status_code == 200
-    assert resp.json()["order_id"] == "ch_ok"
-    assert len(_rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("ch_ok",))) == 1
+    assert resp.json()["order_id"] == "stripe|ch_ok"
+    assert len(_rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("stripe|ch_ok",))) == 1
 
 
 # ── /track ─────────────────────────────────────────────────────────────────────

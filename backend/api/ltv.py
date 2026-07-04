@@ -8,12 +8,13 @@ Endpoints:
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
@@ -28,7 +29,7 @@ def _db() -> str:
 
 
 @router.get("/by-source")
-async def ltv_by_source(
+def ltv_by_source(
     breakdown: str = Query(default="platform", description="platform, campaign_id, ad_id"),
     windows: str = Query(default="30,60,90,365", description="Comma-separated day windows"),
 ):
@@ -132,7 +133,7 @@ async def ltv_by_source(
 
 
 @router.get("/by-customer")
-async def ltv_by_customer(
+def ltv_by_customer(
     limit: int = Query(default=50),
     sort: str = Query(default="total_revenue", description="Sort by: total_revenue, orders, first_ts"),
 ):
@@ -191,7 +192,7 @@ async def ltv_by_customer(
 
 
 @router.get("/summary")
-async def ltv_summary():
+def ltv_summary():
     """Overall LTV metrics."""
     db_path = _db()
 
@@ -235,8 +236,7 @@ async def ltv_summary():
             "repeat_customers": repeat_count,
         }
     except Exception:
-        return {
-            "total_customers": 0, "total_orders": 0, "total_revenue": 0,
-            "total_net_revenue": 0, "avg_ltv": 0, "avg_order_value": 0,
-            "avg_orders_per_customer": 0, "repeat_purchase_rate": 0, "repeat_customers": 0,
-        }
+        # Don't return fabricated all-zero metrics that look like a real empty
+        # account — surface the error instead.
+        logging.exception("ltv_summary failed")
+        raise HTTPException(500, "Failed to compute LTV summary")

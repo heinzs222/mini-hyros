@@ -9,6 +9,7 @@ Endpoints:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timezone
@@ -156,10 +157,15 @@ def _conversion_timeline(
     conversion_ts: str,
     conversion: dict[str, Any],
     names: dict[tuple[str, str, str], str],
+    session_cols: set[str] | None = None,
+    touchpoint_cols: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     timeline: list[dict[str, Any]] = []
 
-    session_cols = _table_columns(db_path, "sessions")
+    # Column sets are hoisted by the caller (constant across the /leads loop);
+    # fall back to a lookup if called standalone.
+    if session_cols is None:
+        session_cols = _table_columns(db_path, "sessions")
     session_select = [
         "session_id", "ts", "utm_source", "utm_medium", "utm_campaign", "utm_content",
         "landing_page", "device", "referrer", "gclid", "fbclid", "ttclid",
@@ -207,7 +213,8 @@ def _conversion_timeline(
                 details["custom_data"] = {}
         timeline.append({"type": "session", "ts": s.get("ts", ""), "details": details})
 
-    touchpoint_cols = _table_columns(db_path, "touchpoints")
+    if touchpoint_cols is None:
+        touchpoint_cols = _table_columns(db_path, "touchpoints")
     touchpoint_customer_expr = (
         "COALESCE(NULLIF(t.customer_key, ''), s.customer_key, '') AS customer_key"
         if "customer_key" in touchpoint_cols
@@ -235,6 +242,15 @@ def _conversion_timeline(
         session_id=session_id,
         visitor_id=visitor_id,
     )
+    # Constrain the session_identity CTE to just the identity being resolved,
+    # instead of GROUP BY-ing the entire sessions table on every conversion.
+    sid_where, sid_params = _identity_predicate(
+        session_cols,
+        customer_key=customer_key,
+        session_id=session_id,
+        visitor_id=visitor_id,
+    )
+    sid_filter = f" AND ({sid_where})" if sid_where else ""
     touchpoints = []
     if touch_where:
         touchpoints = db_query(db_path, f"""
@@ -243,7 +259,7 @@ def _conversion_timeline(
                        {session_visitor_agg},
                        {session_customer_agg}
                 FROM sessions
-                WHERE COALESCE(session_id, '') != ''
+                WHERE COALESCE(session_id, '') != ''{sid_filter}
                 GROUP BY session_id
             ),
             touch_identity AS (
@@ -259,7 +275,7 @@ def _conversion_timeline(
             FROM touch_identity
             WHERE ({touch_where}) AND ts <= ?
             ORDER BY ts
-        """, [*touch_params, conversion_ts])
+        """, [*sid_params, *touch_params, conversion_ts])
 
     for t in touchpoints:
         platform = str(t.get("platform") or "")
@@ -316,7 +332,7 @@ def _conversion_timeline(
 
 
 @router.get("/customer")
-async def customer_journey(
+def customer_journey(
     customer_key: str = Query(..., description="Customer key (SHA256 hash)"),
 ):
     """Full journey timeline for a specific customer."""
@@ -475,7 +491,7 @@ async def customer_journey(
 
 
 @router.get("/leads")
-async def lead_paths(
+def lead_paths(
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
     limit: int = Query(default=50, ge=1, le=200),
@@ -529,14 +545,20 @@ async def lead_paths(
         LIMIT ?
     """, params)
 
+    # Hoist name-map + table-column lookups out of the per-conversion loop.
     names = _ad_name_map(db_path)
+    session_cols = _table_columns(db_path, "sessions")
+    touchpoint_cols = _table_columns(db_path, "touchpoints")
     rows: list[dict[str, Any]] = []
     for conv in conversions:
         customer_key = str(conv.get("customer_key") or "")
         session_id = str(conv.get("session_id") or "")
         visitor_id = str(conv.get("visitor_id") or "")
         conversion_ts = str(conv.get("ts") or "")
-        timeline = _conversion_timeline(db_path, customer_key, session_id, visitor_id, conversion_ts, conv, names)
+        timeline = _conversion_timeline(
+            db_path, customer_key, session_id, visitor_id, conversion_ts, conv, names,
+            session_cols=session_cols, touchpoint_cols=touchpoint_cols,
+        )
         pre_conversion = [event for event in timeline if event.get("type") not in ("conversion", "order")]
         first_touch = pre_conversion[0] if pre_conversion else None
         last_touch = pre_conversion[-1] if pre_conversion else None
@@ -572,7 +594,7 @@ async def lead_paths(
 
 
 @router.get("/common-paths")
-async def common_paths(
+def common_paths(
     limit: int = Query(default=20),
     min_conversions: int = Query(default=2),
 ):
@@ -635,7 +657,7 @@ async def common_paths(
 
 
 @router.get("/stats")
-async def journey_stats():
+def journey_stats():
     """Overall journey statistics."""
     db_path = _db()
 
@@ -685,10 +707,7 @@ async def journey_stats():
             "total_journeys": total,
         }
     except Exception:
-        return {
-            "avg_touchpoints_before_conversion": 0,
-            "avg_time_to_convert_hours": 0,
-            "single_touch_pct": 0,
-            "multi_touch_pct": 0,
-            "total_journeys": 0,
-        }
+        # Don't fabricate all-zero stats (indistinguishable from a real empty
+        # dataset) — surface the failure so it can be diagnosed.
+        logging.exception("journey_stats failed")
+        raise HTTPException(500, "Failed to compute journey stats")

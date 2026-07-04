@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import logging
 import os
 import subprocess
 import sys
 import traceback
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,8 +27,11 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from attributionops.config import default_db_path
 from attributionops.report import ReportInputs, build_hyros_like_report
+from attributionops.schema import ensure_schema
+from attributionops.util import report_timezone, local_day_bounds_utc
 from attributionops.tools.ads import ads_get_spend, ads_get_reported_value, ads_list_platforms
 from attributionops.tools.attribution import attribution_run, attribution_day_totals
+from attributionops.tools.campaign_filter import ensure_campaign_settings_table, not_excluded_sql
 from attributionops.tools.integrations import integrations_status
 from attributionops.tools.tracking import tracking_health_check
 from attributionops.tools.forecasting import forecasting_run
@@ -45,6 +49,7 @@ from api.cohort import router as cohort_router
 from api.refunds import router as refunds_router
 from api.email_sms import router as email_sms_router
 from api.ai_recommendations import router as ai_router
+from api.campaign_settings import router as campaign_settings_router
 from api.ad_names import router as ad_names_router, get_name_map, get_thumbnails_map
 from api.spend_sync import router as spend_sync_router
 from api.stripe_sync import router as stripe_sync_router
@@ -94,6 +99,13 @@ def _ensure_db_exists(db_path: str) -> None:
 
     cmd = [sys.executable, str(init_script), "--sqlite-path", db_path]
     subprocess.run(cmd, check=True)
+    # A brand-new empty DB means prior data was NOT found at the configured
+    # path. Log a prominent warning so accidental data loss (wrong path, unmounted
+    # volume) is visible instead of silently starting from scratch.
+    logging.warning(
+        "Created EMPTY database at %s — prior data not found (starting from scratch)",
+        db_path,
+    )
 
 
 @asynccontextmanager
@@ -101,6 +113,9 @@ async def lifespan(app: FastAPI):
     # Ensure configured DB exists (create schema if missing)
     db = default_db_path()
     _ensure_db_exists(db)
+    # Apply idempotent migrations (unique indexes, campaign_settings) to any
+    # pre-existing database so read-time guarantees hold on older DBs too.
+    ensure_schema(db)
     yield
 
 app = FastAPI(title="AttributionOps – Mini Hyros", version="0.1.0", lifespan=lifespan)
@@ -156,6 +171,7 @@ app.include_router(cohort_router, prefix="/api/cohort", tags=["cohort"])
 app.include_router(refunds_router, prefix="/api/refunds", tags=["refunds"])
 app.include_router(email_sms_router, prefix="/api/email-sms", tags=["email-sms"])
 app.include_router(ai_router, prefix="/api/ai", tags=["ai"])
+app.include_router(campaign_settings_router, prefix="/api/campaigns", tags=["campaigns"])
 app.include_router(ad_names_router, prefix="/api/ad-names", tags=["ad-names"])
 app.include_router(spend_sync_router, prefix="/api/spend", tags=["spend"])
 app.include_router(stripe_sync_router, prefix="/api/stripe", tags=["stripe"])
@@ -222,9 +238,28 @@ async def _report_slot():
 
 
 def _default_dates() -> tuple[str, str]:
-    end = date.today()
+    # Compute "today" in the reporting timezone, not the server's UTC clock, so
+    # the default window matches what the operator sees on their dashboard.
+    end = datetime.now(report_timezone()).date()
     start = end - timedelta(days=30)
     return start.isoformat(), end.isoformat()
+
+
+def _report_currency() -> str:
+    return os.environ.get("REPORT_CURRENCY", "CAD").strip() or "CAD"
+
+
+def _validate_conversion_type(conversion_type: str) -> None:
+    """The report/attribution engine only supports purchase-based conversions.
+
+    Any other value raises deep inside the engine (→ 500). Reject it cleanly at
+    the endpoint boundary instead. An empty value means "engine default".
+    """
+    if str(conversion_type or "").strip().lower() not in ("purchase", ""):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported conversion_type: {conversion_type!r}. Only 'purchase' is supported.",
+        )
 
 
 def _optional_script_attr(name: str, value: str) -> str:
@@ -265,6 +300,7 @@ def get_report(
     use_click_date: bool = Query(default=False),
     _slot: None = Depends(_report_slot),
 ):
+    _validate_conversion_type(conversion_type)
     s, e = _default_dates()
     if not start_date:
         start_date = s
@@ -275,7 +311,7 @@ def get_report(
         start_date=start_date,
         end_date=end_date,
         preset="Custom",
-        currency="USD",
+        currency=_report_currency(),
         attribution_model=model,
         lookback_days=lookback_days,
         conversion_type=conversion_type,
@@ -341,6 +377,7 @@ def get_report_children(
     parent_tab=traffic_source → returns campaigns under that platform
     parent_tab=ad_account → returns campaigns under that account
     """
+    _validate_conversion_type(conversion_type)
     s, e = _default_dates()
     if not start_date:
         start_date = s
@@ -348,6 +385,7 @@ def get_report_children(
         end_date = e
 
     db_path = _db()
+    ensure_campaign_settings_table(db_path)
     date_basis = "click" if use_click_date else "conversion"
 
     # Parse parent_id (pipe-separated: platform|account_id|campaign_id|adset_id|...)
@@ -395,18 +433,24 @@ def get_report_children(
     from attributionops.util import to_float
     from collections import defaultdict
 
-    # Build WHERE clause for touchpoints
-    # NOTE: touchpoints table has no account_id column — skip that filter there
+    # Build WHERE clause for touchpoints.
+    # NOTE: touchpoints table has no account_id column — skip that filter there.
+    # touchpoints.ts is a full UTC timestamp, so filter on a half-open UTC
+    # instant range derived from the inclusive local-day range. This is sargable
+    # (uses the ts index) and timezone-correct, unlike date(substr(ts,1,10)).
+    start_utc, end_excl_utc = local_day_bounds_utc(start_date, end_date)
     TP_VALID_COLS = {"platform", "campaign_id", "adset_id", "ad_id"}
-    where_parts = ["date(substr(t.ts,1,10)) BETWEEN :start_date AND :end_date"]
-    params: dict[str, Any] = {"start_date": start_date, "end_date": end_date}
+    where_parts = ["t.ts >= :start_utc AND t.ts < :end_excl_utc"]
+    params: dict[str, Any] = {"start_utc": start_utc, "end_excl_utc": end_excl_utc}
     for k, v in filters.items():
         if v and k in TP_VALID_COLS:
             where_parts.append(f"t.{k} = :{k}")
             params[k] = v
     where_sql = " AND ".join(where_parts)
 
-    # Build WHERE clause for spend (uses date column directly)
+    # Build WHERE clause for spend. spend.date is a calendar-day string (not a
+    # timestamp), so an inclusive BETWEEN on the day is the correct, sargable
+    # filter here — converting it to UTC instants would break the boundary.
     spend_where_parts = ["s.date BETWEEN :start_date AND :end_date"]
     spend_params: dict[str, Any] = {"start_date": start_date, "end_date": end_date}
     for k, v in filters.items():
@@ -415,22 +459,26 @@ def get_report_children(
             spend_params[f"sp_{k}"] = v
     spend_where_sql = " AND ".join(spend_where_parts)
 
-    # Determine grouping column for children
+    # Determine grouping column for children.
+    # Both templates drop the account_id segment so the touchpoint side and the
+    # spend side build IDENTICAL keys (platform|campaign[|adset[|ad]]); otherwise
+    # the spend template's account_id segment split the same campaign into two
+    # rows that never merged.
     if child_tab == "campaign":
         tp_group = "t.campaign_id"
         sp_group = "s.campaign_id"
-        tp_id_tmpl = "t.platform || '|' || '' || '|' || t.campaign_id"
-        sp_id_tmpl = "s.platform || '|' || s.account_id || '|' || s.campaign_id"
+        tp_id_tmpl = "t.platform || '|' || t.campaign_id"
+        sp_id_tmpl = "s.platform || '|' || s.campaign_id"
     elif child_tab == "ad_set":
         tp_group = "t.adset_id"
         sp_group = "s.adset_id"
-        tp_id_tmpl = "t.platform || '|' || '' || '|' || t.campaign_id || '|' || t.adset_id"
-        sp_id_tmpl = "s.platform || '|' || s.account_id || '|' || s.campaign_id || '|' || s.adset_id"
+        tp_id_tmpl = "t.platform || '|' || t.campaign_id || '|' || t.adset_id"
+        sp_id_tmpl = "s.platform || '|' || s.campaign_id || '|' || s.adset_id"
     elif child_tab == "ad":
         tp_group = "t.ad_id"
         sp_group = "s.ad_id"
-        tp_id_tmpl = "t.platform || '|' || '' || '|' || t.campaign_id || '|' || t.adset_id || '|' || t.ad_id"
-        sp_id_tmpl = "s.platform || '|' || s.account_id || '|' || s.campaign_id || '|' || s.adset_id || '|' || s.ad_id"
+        tp_id_tmpl = "t.platform || '|' || t.campaign_id || '|' || t.adset_id || '|' || t.ad_id"
+        sp_id_tmpl = "s.platform || '|' || s.campaign_id || '|' || s.adset_id || '|' || s.ad_id"
     else:
         return {"rows": [], "child_tab": child_tab}
 
@@ -444,6 +492,7 @@ def get_report_children(
         FROM touchpoints t
         WHERE {where_sql}
           AND COALESCE({tp_group}, '') <> ''
+          AND {not_excluded_sql("t.platform", "t.campaign_id")}
         GROUP BY {tp_id_tmpl}
         ORDER BY touchpoint_count DESC
     """
@@ -460,6 +509,7 @@ def get_report_children(
         FROM spend s
         WHERE {spend_where_sql}
           AND COALESCE({sp_group}, '') <> ''
+          AND {not_excluded_sql("s.platform", "s.campaign_id")}
         GROUP BY {sp_id_tmpl}
         ORDER BY sp_cost DESC
     """
@@ -524,17 +574,18 @@ def get_report_children(
             continue
 
         platform = str(ar.get("platform", "") or "")
-        account_id = str(ar.get("account_id", "") or "")
         campaign_id = str(ar.get("campaign_id", "") or "")
         adset_id = str(ar.get("adset_id", "") or "")
         ad_id = str(ar.get("ad_id", "") or "")
 
+        # Keys must match the account-less templates above so attribution
+        # revenue merges onto the spend/touchpoint rows (account_id is unused).
         if child_tab == "campaign":
-            ck = f"{platform}|{account_id}|{campaign_id}" if campaign_id else ""
+            ck = f"{platform}|{campaign_id}" if campaign_id else ""
         elif child_tab == "ad_set":
-            ck = f"{platform}|{account_id}|{campaign_id}|{adset_id}" if adset_id else ""
+            ck = f"{platform}|{campaign_id}|{adset_id}" if adset_id else ""
         elif child_tab == "ad":
-            ck = f"{platform}|{account_id}|{campaign_id}|{adset_id}|{ad_id}" if ad_id else ""
+            ck = f"{platform}|{campaign_id}|{adset_id}|{ad_id}" if ad_id else ""
         else:
             continue
 
@@ -549,14 +600,15 @@ def get_report_children(
     for ck in attrib_by_child.keys():
         if not ck or ck in known_child_keys:
             continue
+        # ck is platform|campaign[|adset[|ad]] (account-less, matching templates).
         parts_for_key = ck.split("|")
         tp_rows.append({
             "child_key": ck,
             "child_id": ck,
             "platform": parts_for_key[0] if len(parts_for_key) > 0 else "",
-            "campaign_id": parts_for_key[2] if len(parts_for_key) > 2 else "",
-            "adset_id": parts_for_key[3] if len(parts_for_key) > 3 else "",
-            "ad_id": parts_for_key[4] if len(parts_for_key) > 4 else "",
+            "campaign_id": parts_for_key[1] if len(parts_for_key) > 1 else "",
+            "adset_id": parts_for_key[2] if len(parts_for_key) > 2 else "",
+            "ad_id": parts_for_key[3] if len(parts_for_key) > 3 else "",
             "sessions": 0,
             "sp_clicks": 0.0,
             "sp_cost": 0.0,
@@ -694,6 +746,7 @@ def get_attribution(
     conversion_type: str = Query(default="Purchase"),
     value_type: str = Query(default="revenue"),
 ):
+    _validate_conversion_type(conversion_type)
     s, e = _default_dates()
     return attribution_run(
         _db(),

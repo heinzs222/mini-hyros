@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import sqlite3
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import anyio
 import httpx
 from fastapi import APIRouter, Request, HTTPException
 
@@ -18,12 +23,33 @@ from attributionops.config import default_db_path
 from attributionops.db import connect
 
 router = APIRouter()
+logger = logging.getLogger("webhooks")
 
 UTC = timezone.utc
+
+# Stripe payment-processing fee estimate used only when the real fee is not
+# available from the source event.
+_FEE_RATE = 0.029
+_FEE_FIXED = 0.30
 
 
 def _db() -> str:
     return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+
+
+def _norm_email(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _stripe_order_id(payment_intent: str, fallback_id: str) -> str:
+    """Canonical Stripe order id shared by the webhook and the backfill sync.
+
+    Prefer the payment_intent so the three event types (checkout.session/
+    charge/payment_intent) for one payment collapse to a single order.
+    """
+    pi = str(payment_intent or "").strip()
+    fb = str(fallback_id or "").strip()
+    return "stripe|" + (pi or fb)
 
 
 def _iso_ts(dt: datetime) -> str:
@@ -61,7 +87,22 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
+_tracking_schema_lock = threading.Lock()
+_tracking_schema_ready: set[str] = set()
+
+
 def _ensure_tracking_schema(db_path: str) -> None:
+    # Memoized per process+path: the ALTER/CREATE INDEX DDL only needs to run
+    # once, not on every tracking hit (which serialized on the write lock).
+    with _tracking_schema_lock:
+        if db_path in _tracking_schema_ready:
+            return
+    _run_tracking_schema(db_path)
+    with _tracking_schema_lock:
+        _tracking_schema_ready.add(db_path)
+
+
+def _run_tracking_schema(db_path: str) -> None:
     with connect(db_path) as conn:
         session_cols = _table_columns(conn, "sessions")
         if "visitor_id" not in session_cols:
@@ -262,12 +303,18 @@ async def shopify_webhook(request: Request):
 
     if secret:
         hmac_header = request.headers.get("X-Shopify-Hmac-Sha256", "")
-        digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        # Shopify sends the HMAC base64-encoded, not hex.
+        digest = base64.b64encode(
+            hmac.new(secret.encode(), body, hashlib.sha256).digest()
+        ).decode()
         if not hmac.compare_digest(digest, hmac_header):
             raise HTTPException(status_code=401, detail="Invalid HMAC")
+    else:
+        logger.warning("SHOPIFY_WEBHOOK_SECRET not set — accepting webhook without verification")
 
     payload = json.loads(body)
-    email = str(payload.get("email") or payload.get("customer", {}).get("email", ""))
+    # payload["customer"] can be null (guest/POS orders) — guard against .get on None.
+    email = _norm_email(payload.get("email") or (payload.get("customer") or {}).get("email"))
     customer_key = _sha256(email) if email else ""
 
     gross = float(payload.get("total_price", 0))
@@ -286,12 +333,12 @@ async def shopify_webhook(request: Request):
         "refunds": round(refunds_total, 2),
         "chargebacks": 0,
         "cogs": 0,
-        "fees": round(gross * 0.029 + 0.30, 2),  # Shopify payments estimate
+        "fees": round(gross * _FEE_RATE + _FEE_FIXED, 2),  # Shopify payments estimate
         "customer_key": customer_key,
         "subscription_id": "",
     }
 
-    _insert_order(_db(), order)
+    await anyio.to_thread.run_sync(_insert_order, _db(), order)
 
     # Broadcast to WebSocket clients
     from main import manager
@@ -309,6 +356,27 @@ async def shopify_webhook(request: Request):
 
 # ── Stripe webhook ─────────────────────────────────────────────────────────────
 
+def _verify_stripe_signature(body: bytes, sig_header: str, secret: str, tolerance: int = 300) -> bool:
+    """Verify a Stripe-Signature header (t=…,v1=…) against the raw body."""
+    if not sig_header:
+        return False
+    parts = dict(
+        p.split("=", 1) for p in sig_header.split(",") if "=" in p
+    )
+    t = parts.get("t", "")
+    v1 = parts.get("v1", "")
+    if not t or not v1:
+        return False
+    try:
+        if abs(time.time() - int(t)) > tolerance:
+            return False
+    except ValueError:
+        return False
+    signed = f"{t}.{body.decode('utf-8', 'replace')}".encode()
+    expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, v1)
+
+
 @router.post("/stripe")
 async def stripe_webhook(request: Request):
     """Receive Stripe checkout.session.completed or charge.succeeded webhook."""
@@ -317,10 +385,10 @@ async def stripe_webhook(request: Request):
 
     if secret:
         sig = request.headers.get("Stripe-Signature", "")
-        # In production, use stripe.Webhook.construct_event(body, sig, secret)
-        # For now we just log the warning
-        if not sig:
-            raise HTTPException(status_code=401, detail="Missing Stripe-Signature")
+        if not _verify_stripe_signature(body, sig, secret):
+            raise HTTPException(status_code=401, detail="Invalid Stripe signature")
+    else:
+        logger.warning("STRIPE_WEBHOOK_SECRET not set — accepting webhook without verification")
 
     payload = json.loads(body)
     event_type = payload.get("type", "")
@@ -329,25 +397,39 @@ async def stripe_webhook(request: Request):
         return {"ok": True, "skipped": True, "event_type": event_type}
 
     data = payload.get("data", {}).get("object", {})
-    email = str(data.get("customer_email") or data.get("receipt_email") or "")
+    email = _norm_email(data.get("customer_email") or data.get("receipt_email"))
     customer_key = _sha256(email) if email else ""
 
     amount = float(data.get("amount_total", data.get("amount", 0))) / 100.0  # cents → dollars
 
+    # One canonical order id per payment (payment_intent) so the three event
+    # types for the same payment collapse under the UNIQUE index; matches the
+    # scheme used by /api/stripe/sync.
+    payment_intent = str(data.get("payment_intent") or "")
+    order_id = _stripe_order_id(payment_intent, str(data.get("id") or ""))
+
+    # Stamp with the event's own creation time, not the receive time, so delayed
+    # deliveries/retries land in the correct day bucket.
+    created = payload.get("created") or data.get("created")
+    try:
+        ts = _iso_ts(datetime.fromtimestamp(int(created), tz=UTC)) if created else _iso_ts(datetime.now(UTC))
+    except (ValueError, TypeError, OSError):
+        ts = _iso_ts(datetime.now(UTC))
+
     order = {
-        "order_id": str(data.get("id") or data.get("payment_intent", "")),
-        "ts": _iso_ts(datetime.now(UTC)),
+        "order_id": order_id,
+        "ts": ts,
         "gross": round(amount, 2),
         "net": round(amount, 2),
         "refunds": 0,
         "chargebacks": 0,
         "cogs": 0,
-        "fees": round(amount * 0.029 + 0.30, 2),  # Stripe fee estimate
+        "fees": round(amount * _FEE_RATE + _FEE_FIXED, 2),  # Stripe fee estimate
         "customer_key": customer_key,
         "subscription_id": str(data.get("subscription", "") or ""),
     }
 
-    _insert_order(_db(), order)
+    await anyio.to_thread.run_sync(_insert_order, _db(), order)
 
     from main import manager
     import asyncio
@@ -384,7 +466,9 @@ async def track_event(request: Request):
     if "@" in customer_key:
         customer_key = _sha256(customer_key)
     if not customer_key:
-        customer_key = _lookup_customer_key(db_path, visitor_id=visitor_id, session_id=session_id)
+        customer_key = await anyio.to_thread.run_sync(
+            _lookup_customer_key, db_path, visitor_id, session_id
+        )
     utm_source = str(payload.get("utm_source", ""))
     utm_medium = str(payload.get("utm_medium", ""))
     event_name = str(payload.get("event", "")).strip() or "pageview"
@@ -425,53 +509,61 @@ async def track_event(request: Request):
             ad_id = ad_id or h_ad_id
 
     if platform == "meta" and not campaign_id and adset_id:
-        campaign_id = _meta_campaign_from_adset(db_path, adset_id)
+        campaign_id = await anyio.to_thread.run_sync(_meta_campaign_from_adset, db_path, adset_id)
 
-    with connect(db_path) as conn:
-        conn.execute(
-            """INSERT INTO sessions (session_id, visitor_id, ts, event_name, page_title, utm_source, utm_medium, utm_campaign, utm_content, utm_term, referrer, landing_page, device, gclid, fbclid, ttclid, customer_key, custom_data_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                session_id,
-                visitor_id,
-                now,
-                event_name,
-                str(payload.get("page_title", "")),
-                utm_source,
-                utm_medium,
-                campaign_id,
-                str(payload.get("utm_content", "")),
-                str(payload.get("utm_term", "")),
-                str(payload.get("referrer", "")),
-                str(payload.get("landing_page", "/")),
-                str(payload.get("device", "unknown")),
-                str(payload.get("gclid", "")),
-                str(payload.get("fbclid", "")),
-                str(payload.get("ttclid", "")),
-                customer_key,
-                custom_data_json,
-            ),
-        )
-        conn.execute(
-            """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id, visitor_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                now,
-                channel,
-                platform,
-                campaign_id,
-                adset_id,
-                ad_id,
-                str(payload.get("creative_id", "")),
-                str(payload.get("gclid", "")),
-                str(payload.get("fbclid", "")),
-                str(payload.get("ttclid", "")),
-                customer_key,
-                session_id,
-                visitor_id,
-            ),
-        )
-        conn.commit()
+    # Preserve the real UTM campaign string in the utm_campaign column; the
+    # derived campaign_id (which may be a numeric/gc id) only belongs on the
+    # touchpoints row.
+    utm_campaign = str(payload.get("utm_campaign", ""))
+
+    def _write_track() -> None:
+        with connect(db_path) as conn:
+            conn.execute(
+                """INSERT INTO sessions (session_id, visitor_id, ts, event_name, page_title, utm_source, utm_medium, utm_campaign, utm_content, utm_term, referrer, landing_page, device, gclid, fbclid, ttclid, customer_key, custom_data_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id,
+                    visitor_id,
+                    now,
+                    event_name,
+                    str(payload.get("page_title", "")),
+                    utm_source,
+                    utm_medium,
+                    utm_campaign,
+                    str(payload.get("utm_content", "")),
+                    str(payload.get("utm_term", "")),
+                    str(payload.get("referrer", "")),
+                    str(payload.get("landing_page", "/")),
+                    str(payload.get("device", "unknown")),
+                    str(payload.get("gclid", "")),
+                    str(payload.get("fbclid", "")),
+                    str(payload.get("ttclid", "")),
+                    customer_key,
+                    custom_data_json,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id, visitor_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    now,
+                    channel,
+                    platform,
+                    campaign_id,
+                    adset_id,
+                    ad_id,
+                    str(payload.get("creative_id", "")),
+                    str(payload.get("gclid", "")),
+                    str(payload.get("fbclid", "")),
+                    str(payload.get("ttclid", "")),
+                    customer_key,
+                    session_id,
+                    visitor_id,
+                ),
+            )
+            conn.commit()
+
+    await anyio.to_thread.run_sync(_write_track)
 
     from main import manager
     import asyncio
@@ -530,9 +622,12 @@ async def identify_visitor(request: Request):
     db_path = _db()
     _ensure_tracking_schema(db_path)
 
-    with connect(db_path) as conn:
-        _backfill_customer_key(conn, customer_key, visitor_id=visitor_id, session_id=session_id)
-        conn.commit()
+    def _write_identify() -> None:
+        with connect(db_path) as conn:
+            _backfill_customer_key(conn, customer_key, visitor_id=visitor_id, session_id=session_id)
+            conn.commit()
+
+    await anyio.to_thread.run_sync(_write_identify)
 
     from main import manager
     import asyncio
@@ -566,10 +661,14 @@ async def track_conversion(request: Request):
     if "@" in str(payload.get("customer_key", "")):
         customer_key = _sha256(payload["customer_key"].strip().lower())
 
-    order_id = str(payload.get("order_id", "")) or _sha256(f"px|{payload.get('visitor_id','')}|{now}")
     gross = float(payload.get("value", 0))
     conv_type = str(payload.get("type", "Purchase"))
     conv_lower = conv_type.strip().lower()
+    # Include a content nonce (type + value) so distinct same-second products
+    # from one visitor (bundle checkouts) don't collapse to a single order id.
+    order_id = str(payload.get("order_id", "")) or _sha256(
+        f"px|{visitor_id}|{now}|{conv_lower}|{gross}"
+    )
 
     utm_source = str(payload.get("utm_source", ""))
     utm_medium = str(payload.get("utm_medium", ""))
@@ -597,7 +696,9 @@ async def track_conversion(request: Request):
 
     session_id = str(payload.get("session_id", _sha256(now)))
     if not customer_key:
-        customer_key = _lookup_customer_key(db_path, visitor_id=visitor_id, session_id=session_id)
+        customer_key = await anyio.to_thread.run_sync(
+            _lookup_customer_key, db_path, visitor_id, session_id
+        )
 
     # Map custom params to standard fields (backend-side fallback)
     h_ad_id = str(payload.get("h_ad_id", ""))
@@ -613,33 +714,59 @@ async def track_conversion(request: Request):
             ad_id = ad_id or h_ad_id
 
     if platform == "meta" and not campaign_id and adset_id:
-        campaign_id = _meta_campaign_from_adset(db_path, adset_id)
+        campaign_id = await anyio.to_thread.run_sync(_meta_campaign_from_adset, db_path, adset_id)
 
     is_purchase = conv_lower in ("purchase", "payment")
+    fees = str(round(gross * _FEE_RATE + _FEE_FIXED, 2))
 
-    with connect(db_path) as conn:
-        _backfill_customer_key(conn, customer_key, visitor_id=visitor_id, session_id=session_id)
-        if is_purchase:
+    def _write_conversion() -> None:
+        with connect(db_path) as conn:
+            _backfill_customer_key(conn, customer_key, visitor_id=visitor_id, session_id=session_id)
+            if is_purchase:
+                conn.execute(
+                    """INSERT OR IGNORE INTO orders (
+                           order_id, ts, gross, net, refunds, chargebacks, cogs, fees,
+                           customer_key, subscription_id, session_id, visitor_id, channel,
+                           platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid
+                       )
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        order_id,
+                        now,
+                        str(gross),
+                        str(gross),
+                        "0",
+                        "0",
+                        "0",
+                        fees,
+                        customer_key,
+                        "",
+                        session_id,
+                        visitor_id,
+                        channel,
+                        platform,
+                        campaign_id,
+                        adset_id,
+                        ad_id,
+                        str(payload.get("creative_id", "")),
+                        str(payload.get("gclid", "")),
+                        str(payload.get("fbclid", "")),
+                        str(payload.get("ttclid", "")),
+                    ),
+                )
+
             conn.execute(
-                """INSERT OR IGNORE INTO orders (
-                       order_id, ts, gross, net, refunds, chargebacks, cogs, fees,
-                       customer_key, subscription_id, session_id, visitor_id, channel,
-                       platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid
+                """INSERT OR IGNORE INTO conversions (
+                       conversion_id, ts, type, value, order_id, customer_key, session_id, visitor_id
                    )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (_sha256(f"pxconv|{order_id}"), now, conv_type, str(gross), order_id, customer_key, session_id, visitor_id),
+            )
+            conn.execute(
+                """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id, visitor_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    order_id,
                     now,
-                    str(gross),
-                    str(gross),
-                    "0",
-                    "0",
-                    "0",
-                    str(round(gross * 0.029 + 0.30, 2)),
-                    customer_key,
-                    "",
-                    session_id,
-                    visitor_id,
                     channel,
                     platform,
                     campaign_id,
@@ -649,36 +776,14 @@ async def track_conversion(request: Request):
                     str(payload.get("gclid", "")),
                     str(payload.get("fbclid", "")),
                     str(payload.get("ttclid", "")),
+                    customer_key,
+                    session_id,
+                    visitor_id,
                 ),
             )
+            conn.commit()
 
-        conn.execute(
-            """INSERT OR IGNORE INTO conversions (
-                   conversion_id, ts, type, value, order_id, customer_key, session_id, visitor_id
-               )
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (_sha256(f"pxconv|{order_id}"), now, conv_type, str(gross), order_id, customer_key, session_id, visitor_id),
-        )
-        conn.execute(
-            """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id, visitor_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                now,
-                channel,
-                platform,
-                campaign_id,
-                adset_id,
-                ad_id,
-                str(payload.get("creative_id", "")),
-                str(payload.get("gclid", "")),
-                str(payload.get("fbclid", "")),
-                str(payload.get("ttclid", "")),
-                customer_key,
-                session_id,
-                visitor_id,
-            ),
-        )
-        conn.commit()
+    await anyio.to_thread.run_sync(_write_conversion)
 
     from main import manager
     import asyncio

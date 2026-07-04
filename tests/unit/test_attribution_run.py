@@ -32,17 +32,20 @@ def _row_by_ad(result: dict) -> dict[str, dict]:
 
 
 # ── input validation ──────────────────────────────────────────────────────────
-def test_non_purchase_conversion_type_raises(empty_db):
-    with pytest.raises(ValueError, match="conversion_type=Purchase"):
-        attribution_run(
-            empty_db,
-            model="last_click",
-            start_date=JAN,
-            end_date=JAN_END,
-            lookback_days=30,
-            conversion_type="Lead",
-            value_type="revenue",
-        )
+def test_non_purchase_conversion_type_returns_empty(empty_db):
+    # Non-purchase conversion types now degrade gracefully to an empty result
+    # instead of raising deep in report assembly (which surfaced as an HTTP 500).
+    # The HTTP layer validates and returns a clean 400 for these.
+    result = attribution_run(
+        empty_db,
+        model="last_click",
+        start_date=JAN,
+        end_date=JAN_END,
+        lookback_days=30,
+        conversion_type="Lead",
+        value_type="revenue",
+    )
+    assert result["rows"] == []
 
 
 def test_invalid_date_basis_raises(empty_db):

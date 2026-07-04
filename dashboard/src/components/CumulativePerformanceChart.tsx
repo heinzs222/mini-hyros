@@ -94,7 +94,7 @@ function CumulativePerformanceChart({ data, compareData = [], compareLabel = "" 
                 borderRadius: 10,
                 fontSize: 12,
               }}
-              formatter={(value: number) => [`$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`]}
+              formatter={(value: number, name: string) => [`$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`, name]}
               labelFormatter={(label, payload) => {
                 const cur = payload?.[0]?.payload?.current_date;
                 const cmp = payload?.[0]?.payload?.compare_date;

@@ -16,10 +16,8 @@ import {
   Check,
   AlertCircle,
   CircleDollarSign,
-  Repeat2,
   Users,
   Phone,
-  PhoneCall,
   Mail,
   Hash,
   Info,
@@ -52,14 +50,12 @@ type LeadRow = {
   _lineItems?: number;
 };
 
-type TabKey = "sales" | "subscriptions" | "leads" | "calls" | "phone";
+type TabKey = "sales" | "leads" | "calls";
 
 const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "sales", label: "Sales", icon: <CircleDollarSign size={14} /> },
-  { key: "subscriptions", label: "Subscriptions", icon: <Repeat2 size={14} /> },
   { key: "leads", label: "Leads", icon: <Users size={14} /> },
   { key: "calls", label: "Calls", icon: <Phone size={14} /> },
-  { key: "phone", label: "Phone closing", icon: <PhoneCall size={14} /> },
 ];
 
 const SALE_TYPES = ["purchase", "payment"];
@@ -158,33 +154,42 @@ export default function LeadsView({ startDate, endDate }: Props) {
   const [profile, setProfile] = useState<{ customerKey: string; label: string } | null>(null);
   const filterMenuRef = useRef<HTMLDivElement>(null);
   const filterActive = statusFilter !== "all";
+  // Monotonic request id: a newer load() supersedes any in-flight older one so a
+  // slow older response can never overwrite newer rows (request race guard).
+  const reqIdRef = useRef(0);
 
-  const load = async () => {
+  const load = async (signal?: AbortSignal) => {
+    const myId = ++reqIdRef.current;
+    const isStale = () => signal?.aborted || myId !== reqIdRef.current;
     setLoading(true);
     setError(null);
     try {
       const [data, refunds] = await Promise.allSettled([
-        fetchLeadJourneys({ start_date: startDate, end_date: endDate, limit: 200, include_purchases: true }),
+        fetchLeadJourneys({ start_date: startDate, end_date: endDate, limit: 200, include_purchases: true }, signal),
         fetchRefundSummary(),
       ]);
+      if (isStale()) return;
       if (data.status === "fulfilled") setRows(data.value?.rows || []);
       else throw data.reason;
       if (refunds.status === "fulfilled") setRefundCount(Number(refunds.value?.totals?.refund?.count || 0));
     } catch (e: any) {
+      if (isStale() || e?.name === "AbortError") return;
       const msg = e?.message || "Failed to load leads";
       setError(msg);
       toast.error("Couldn’t load leads", { description: msg });
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   };
 
   useEffect(() => {
-    void load();
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startDate, endDate]);
 
-  useEffect(() => setPage(1), [tab, subFilter, groupOrders, search, statusFilter, sortKey, sortDir, pageSize]);
+  useEffect(() => setPage(1), [tab, subFilter, groupOrders, search, statusFilter, sortKey, sortDir, pageSize, startDate, endDate]);
   useEffect(() => setSubFilter("all"), [tab]);
   useEffect(() => setSelected(new Set()), [tab, subFilter, groupOrders, search, statusFilter, startDate, endDate]);
 
@@ -198,7 +203,7 @@ export default function LeadsView({ startDate, endDate }: Props) {
   }, [showFilterMenu]);
 
   const counts = useMemo(() => {
-    const c: Record<TabKey, number> = { sales: 0, subscriptions: 0, leads: 0, calls: 0, phone: 0 };
+    const c: Record<TabKey, number> = { sales: 0, leads: 0, calls: 0 };
     let recurring = 0;
     for (const r of rows) {
       const b = typeBucket(r.conversion_type);
@@ -419,7 +424,7 @@ export default function LeadsView({ startDate, endDate }: Props) {
         {tab === "sales" ? (
           <div className="flex items-center gap-1 rounded-xl border border-[var(--card-border)] bg-[var(--surface)] p-1">
             <SegPill label="Sales" value={counts.sales} active={subFilter === "all"} onClick={() => setSubFilter("all")} />
-            <SegPill label="Refunds" value={refundCount} muted />
+            <SegPill label="Refunds (all time)" value={refundCount} muted />
             <SegPill label="Recurring sales" value={counts.recurring} active={subFilter === "recurring"} onClick={() => setSubFilter("recurring")} />
           </div>
         ) : (
@@ -488,6 +493,14 @@ export default function LeadsView({ startDate, endDate }: Props) {
           </button>
         </div>
       </div>
+
+      {/* Truncation notice — backend hard-caps at 200 newest rows */}
+      {rows.length === 200 && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-300">
+          <Info size={13} className="flex-shrink-0" />
+          Showing newest 200 — narrow the date range to see more.
+        </div>
+      )}
 
       {/* Table */}
       <div className="hpanel overflow-hidden">

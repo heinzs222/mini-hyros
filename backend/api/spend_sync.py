@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import hmac
 import io
@@ -981,14 +982,88 @@ async def _fetch_meta_insights(access_token: str, ad_account_id: str, start_date
     return rows
 
 
-def _write_meta_spend_rows(db_path: str, ad_account_id: str, start_date: str, end_date: str, rows: list[dict[str, Any]]) -> dict[str, int]:
+async def _fetch_meta_campaign_insights(access_token: str, ad_account_id: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+    """Campaign-level Meta insights for reconciliation.
+
+    Ad-level insights (`level=ad`) omit spend that Meta only reports at the
+    campaign level (e.g. Advantage+ / automated placements that never resolve to
+    a concrete ad_id). Fetching the campaign totals lets us insert the positive
+    per-(date, campaign_id) delta as an adjustment row so that campaign cost is
+    not silently undercounted — mirrors the Google/TikTok reconciliation."""
+    account_id = ad_account_id.replace("act_", "").strip()
+    fields = ",".join(
+        [
+            "date_start",
+            "account_id",
+            "campaign_id",
+            "campaign_name",
+            "clicks",
+            "spend",
+            "impressions",
+        ]
+    )
+
+    url = f"https://graph.facebook.com/v18.0/act_{account_id}/insights"
+    params = {
+        "access_token": access_token,
+        "level": "campaign",
+        "fields": fields,
+        "time_increment": "1",
+        "time_range": json.dumps({"since": start_date, "until": end_date}, separators=(",", ":")),
+        "limit": "500",
+    }
+
+    rows: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=45) as client:
+        next_url: str | None = url
+        next_params: dict[str, Any] | None = params
+        while next_url:
+            resp = await client.get(next_url, params=next_params)
+            resp.raise_for_status()
+            payload = resp.json()
+            data = payload.get("data") or []
+            rows.extend(data)
+            next_url = (payload.get("paging") or {}).get("next")
+            next_params = None
+
+    return rows
+
+
+def _write_meta_spend_rows(
+    db_path: str,
+    ad_account_id: str,
+    start_date: str,
+    end_date: str,
+    rows: list[dict[str, Any]],
+    campaign_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, int]:
     account_id = ad_account_id.replace("act_", "").strip()
     synced_at = _now()
     inserted = 0
+    inserted_ads = 0
+    inserted_campaign_adjustments = 0
+    adjustment_cost = 0.0
     name_rows: dict[tuple[str, str], tuple[str, str]] = {}
+    ad_totals_by_campaign_day: dict[tuple[str, str], dict[str, float]] = defaultdict(
+        lambda: {"cost": 0.0, "clicks": 0.0, "impressions": 0.0}
+    )
 
     _ensure_spend_table(db_path)
     _ensure_ad_names_table(db_path)
+
+    # An empty fetch must never wipe existing rows: skip the delete-and-replace
+    # entirely and preserve whatever is already stored (mirrors the guard in
+    # _import_google_ads_script_rows).
+    if not rows and not (campaign_rows or []):
+        return {
+            "deleted": 0,
+            "inserted": 0,
+            "inserted_ads": 0,
+            "inserted_campaign_adjustments": 0,
+            "adjustment_cost": 0.0,
+            "names_upserted": 0,
+            "preserved": True,
+        }
 
     with connect(db_path) as conn:
         deleted = conn.execute(
@@ -996,7 +1071,7 @@ def _write_meta_spend_rows(db_path: str, ad_account_id: str, start_date: str, en
             DELETE FROM spend
             WHERE platform = 'meta'
               AND date BETWEEN ? AND ?
-              AND (account_id = ? OR account_id = ?)
+              AND (account_id = ? OR account_id = ? OR account_id = '')
             """,
             (start_date, end_date, account_id, f"act_{account_id}"),
         ).rowcount
@@ -1016,6 +1091,12 @@ def _write_meta_spend_rows(db_path: str, ad_account_id: str, start_date: str, en
             clicks = str(r.get("clicks") or "0").strip()
             spend = str(r.get("spend") or "0").strip()
             impressions = str(r.get("impressions") or "0").strip()
+
+            if campaign_id:
+                totals = ad_totals_by_campaign_day[(day, campaign_id)]
+                totals["cost"] += _num(spend, 0.0)
+                totals["clicks"] += _num(clicks, 0.0)
+                totals["impressions"] += _num(impressions, 0.0)
 
             metadata = json.dumps(
                 {
@@ -1051,6 +1132,7 @@ def _write_meta_spend_rows(db_path: str, ad_account_id: str, start_date: str, en
                 ),
             )
             inserted += 1
+            inserted_ads += 1
 
             if campaign_id and campaign_name:
                 name_rows[("campaign", campaign_id)] = (campaign_name, "")
@@ -1058,6 +1140,70 @@ def _write_meta_spend_rows(db_path: str, ad_account_id: str, start_date: str, en
                 name_rows[("adset", adset_id)] = (adset_name, campaign_id)
             if ad_id and ad_name:
                 name_rows[("ad", ad_id)] = (ad_name, adset_id)
+
+        # Reconcile ad-level totals against campaign-level totals: insert only the
+        # positive per-(date, campaign_id) delta as an unattributed adjustment row
+        # so campaign cost that never resolves to an ad_id is still counted.
+        for r in campaign_rows or []:
+            day = str(r.get("date_start") or "").strip()
+            campaign_id = str(r.get("campaign_id") or "").strip()
+            if not day or not campaign_id:
+                continue
+
+            account = str(r.get("account_id") or account_id).replace("act_", "").strip()
+            campaign_name = str(r.get("campaign_name") or "").strip()
+            campaign_cost = _num(r.get("spend"), 0.0)
+            campaign_clicks = _num(r.get("clicks"), 0.0)
+            campaign_impressions = _num(r.get("impressions"), 0.0)
+
+            ad_total = ad_totals_by_campaign_day.get((day, campaign_id), {})
+            cost_delta = round(campaign_cost - float(ad_total.get("cost") or 0.0), 6)
+            clicks_delta = campaign_clicks - float(ad_total.get("clicks") or 0.0)
+            impressions_delta = campaign_impressions - float(ad_total.get("impressions") or 0.0)
+
+            if cost_delta <= 0.000001 and clicks_delta <= 0 and impressions_delta <= 0:
+                continue
+
+            metadata = json.dumps(
+                {
+                    "campaign_name": campaign_name,
+                    "adset_name": "",
+                    "ad_name": "",
+                    "source": "meta_insights_api_campaign_adjustment",
+                    "synced_at": synced_at,
+                    "campaign_total_cost": _fmt_decimal(campaign_cost),
+                    "mapped_ad_cost": _fmt_decimal(float(ad_total.get("cost") or 0.0)),
+                },
+                separators=(",", ":"),
+            )
+            conn.execute(
+                """
+                INSERT INTO spend (
+                    platform, date, account_id, campaign_id,
+                    adset_id, ad_id, creative_id,
+                    clicks, cost, impressions, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "meta",
+                    day,
+                    account,
+                    campaign_id,
+                    "",
+                    "",
+                    "",
+                    str(int(round(max(clicks_delta, 0.0)))),
+                    _fmt_decimal(max(cost_delta, 0.0)),
+                    str(int(round(max(impressions_delta, 0.0)))),
+                    metadata,
+                ),
+            )
+            inserted += 1
+            inserted_campaign_adjustments += 1
+            adjustment_cost += max(cost_delta, 0.0)
+
+            if campaign_name:
+                name_rows.setdefault(("campaign", campaign_id), (campaign_name, ""))
 
         for (entity_type, entity_id), (name, parent_id) in name_rows.items():
             conn.execute(
@@ -1079,6 +1225,9 @@ def _write_meta_spend_rows(db_path: str, ad_account_id: str, start_date: str, en
     return {
         "deleted": int(deleted if deleted is not None and deleted > 0 else 0),
         "inserted": inserted,
+        "inserted_ads": inserted_ads,
+        "inserted_campaign_adjustments": inserted_campaign_adjustments,
+        "adjustment_cost": round(adjustment_cost, 2),
         "names_upserted": len(name_rows),
     }
 
@@ -1098,10 +1247,18 @@ async def _sync_meta_spend(start_date: str, end_date: str) -> dict[str, Any]:
 
     try:
         api_rows = await _fetch_meta_insights(access_token, ad_account_id, start_date, end_date)
-        write_stats = _write_meta_spend_rows(db_path, ad_account_id, start_date, end_date, api_rows)
+        campaign_rows = await _fetch_meta_campaign_insights(access_token, ad_account_id, start_date, end_date)
+        write_stats = await asyncio.to_thread(
+            _write_meta_spend_rows, db_path, ad_account_id, start_date, end_date, api_rows, campaign_rows
+        )
         return {
             "synced": write_stats["inserted"],
-            "fetched": len(api_rows),
+            "fetched": len(api_rows) + len(campaign_rows),
+            "fetched_ads": len(api_rows),
+            "fetched_campaigns": len(campaign_rows),
+            "inserted_ads": write_stats.get("inserted_ads", 0),
+            "inserted_campaign_adjustments": write_stats.get("inserted_campaign_adjustments", 0),
+            "adjustment_cost": write_stats.get("adjustment_cost", 0.0),
             "deleted": write_stats["deleted"],
             "names_upserted": write_stats["names_upserted"],
             "date_range": {"start": start_date, "end": end_date},
@@ -1169,7 +1326,7 @@ async def _fetch_google_insights(
 
     async with httpx.AsyncClient(timeout=45) as client:
         while True:
-            payload: dict[str, Any] = {"query": gaql, "pageSize": 10000}
+            payload: dict[str, Any] = {"query": gaql}
             if next_page_token:
                 payload["pageToken"] = next_page_token
 
@@ -1222,7 +1379,7 @@ async def _fetch_google_campaign_insights(
 
     async with httpx.AsyncClient(timeout=45) as client:
         while True:
-            payload: dict[str, Any] = {"query": gaql, "pageSize": 10000}
+            payload: dict[str, Any] = {"query": gaql}
             if next_page_token:
                 payload["pageToken"] = next_page_token
 
@@ -1256,13 +1413,26 @@ def _write_google_spend_rows(
         lambda: {"cost": 0.0, "clicks": 0.0, "impressions": 0.0}
     )
 
+    # An empty fetch must never wipe existing rows: skip the delete-and-replace
+    # entirely and preserve whatever is already stored (mirrors the guard in
+    # _import_google_ads_script_rows).
+    if not rows and not (campaign_rows or []):
+        return {
+            "deleted": 0,
+            "inserted": 0,
+            "inserted_ads": 0,
+            "inserted_campaign_adjustments": 0,
+            "adjustment_cost": 0.0,
+            "preserved": True,
+        }
+
     with connect(db_path) as conn:
         deleted = conn.execute(
             """
             DELETE FROM spend
             WHERE platform = 'google'
               AND date BETWEEN ? AND ?
-              AND (account_id = ? OR account_id = ?)
+              AND (account_id = ? OR account_id = ? OR account_id = '')
             """,
             (start_date, end_date, clean_customer_id, customer_id.strip()),
         ).rowcount
@@ -1448,7 +1618,9 @@ async def _sync_google_spend(start_date: str, end_date: str) -> dict[str, Any]:
             end_date=end_date,
             login_customer_id=login_customer_id,
         )
-        write_stats = _write_google_spend_rows(db_path, customer_id, start_date, end_date, api_rows, campaign_rows)
+        write_stats = await asyncio.to_thread(
+            _write_google_spend_rows, db_path, customer_id, start_date, end_date, api_rows, campaign_rows
+        )
         return {
             "synced": write_stats["inserted"],
             "fetched": len(api_rows) + len(campaign_rows),
@@ -1494,11 +1666,17 @@ async def _fetch_tiktok_report_level(
     end_date: str,
     data_level: str,
     dimensions: list[str],
+    attribute_metrics: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch one level of TikTok spend report (campaign, adgroup, or ad)."""
+    """Fetch one level of TikTok spend report (campaign, adgroup, or ad).
+
+    ``attribute_metrics`` are TikTok "attribute" metrics (e.g. campaign_id,
+    adgroup_id, ad_name) that the report API returns alongside the numeric
+    metrics; they let ad-level rows carry their own campaign/adgroup ids instead
+    of relying on the ad_names lookup for parent resolution."""
     url = "https://business-api.tiktok.com/open_api/v1.3/report/integrated/get/"
     headers = {"Access-Token": access_token, "Content-Type": "application/json"}
-    metrics = ["spend", "impressions", "clicks"]
+    metrics = ["spend", "impressions", "clicks"] + list(attribute_metrics or [])
     page = 1
     page_size = 1000
     total_page = 1
@@ -1580,6 +1758,13 @@ async def _fetch_tiktok_report(
             client, access_token, advertiser_id, start_date, end_date,
             data_level="AUCTION_AD",
             dimensions=["ad_id", "stat_time_day"],
+            attribute_metrics=[
+                "campaign_id",
+                "campaign_name",
+                "adgroup_id",
+                "adgroup_name",
+                "ad_name",
+            ],
         )
         campaign_rows = await _fetch_tiktok_report_level(
             client, access_token, advertiser_id, start_date, end_date,
@@ -1611,6 +1796,21 @@ def _write_tiktok_spend_rows(
     ad_rows = list(ad_rows if ad_rows is not None else (rows or []))
     campaign_rows = list(campaign_rows or [])
     campaign_report_available = bool(campaign_rows)
+
+    # An empty fetch must never wipe existing rows: skip the delete-and-replace
+    # entirely and preserve whatever is already stored (mirrors the guard in
+    # _import_google_ads_script_rows).
+    if not ad_rows and not campaign_rows:
+        return {
+            "deleted": 0,
+            "inserted": 0,
+            "inserted_ads": 0,
+            "inserted_campaign_adjustments": 0,
+            "skipped_unmapped_ads": 0,
+            "adjustment_cost": 0.0,
+            "preserved": True,
+        }
+
     ad_parent_map = _build_tiktok_ad_parent_map(db_path)
     ad_totals_by_campaign_day: dict[tuple[str, str], dict[str, float]] = defaultdict(
         lambda: {"cost": 0.0, "clicks": 0.0, "impressions": 0.0}
@@ -1622,7 +1822,7 @@ def _write_tiktok_spend_rows(
             DELETE FROM spend
             WHERE platform = 'tiktok'
               AND date BETWEEN ? AND ?
-              AND account_id = ?
+              AND (account_id = ? OR account_id = '')
             """,
             (start_date, end_date, clean_advertiser_id),
         ).rowcount
@@ -1632,6 +1832,9 @@ def _write_tiktok_spend_rows(
             if not day:
                 continue
 
+            # Prefer campaign/adgroup ids returned by the report API (requested as
+            # attribute metrics); only fall back to the ad_names parent map when
+            # the API did not return them.
             ad_id = str(_tiktok_value(r, "ad_id")).strip()
             campaign_id = str(_tiktok_value(r, "campaign_id")).strip()
             adset_id = str(_tiktok_value(r, "adgroup_id") or _tiktok_value(r, "adset_id")).strip()
@@ -1777,7 +1980,8 @@ async def _sync_tiktok_spend(start_date: str, end_date: str) -> dict[str, Any]:
         api_report = await _fetch_tiktok_report(access_token, advertiser_id, start_date, end_date)
         ad_rows = api_report.get("ad_rows") or []
         campaign_rows = api_report.get("campaign_rows") or []
-        write_stats = _write_tiktok_spend_rows(
+        write_stats = await asyncio.to_thread(
+            _write_tiktok_spend_rows,
             db_path,
             advertiser_id,
             start_date,
@@ -1888,4 +2092,4 @@ async def import_google_ads_script_spend(request: Request, payload: GoogleAdsScr
     generated inside the advertiser account and posted into Mini Hyros.
     """
     _authorize_spend_push(request, payload.token)
-    return _import_google_ads_script_rows(payload)
+    return await asyncio.to_thread(_import_google_ads_script_rows, payload)

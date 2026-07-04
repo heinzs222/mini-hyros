@@ -8,9 +8,17 @@ from typing import Any, Literal
 from attributionops.db import query
 from attributionops.tools.ads import ads_get_reported_value, ads_get_spend
 from attributionops.tools.attribution import attribution_run_and_day_totals
+from attributionops.tools.campaign_filter import ensure_campaign_settings_table, not_excluded_sql
 from attributionops.tools.integrations import integrations_status
 from attributionops.tools.tracking import tracking_health_check
-from attributionops.util import round_money, safe_div, to_float, to_int
+from attributionops.util import (
+    local_day_bounds_utc,
+    normalize_campaign_key,
+    round_money,
+    safe_div,
+    to_float,
+    to_int,
+)
 
 
 def _ts_end_exclusive(end_date: str) -> str:
@@ -211,15 +219,17 @@ def _build_platform_comparison(
     end_date: str,
     attrib_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    start_utc, end_excl_utc = local_day_bounds_utc(start_date, end_date)
     spend_rows = query(
         db_path,
-        """
+        f"""
         SELECT
           platform,
           SUM(CAST(clicks AS REAL)) AS clicks,
           SUM(CAST(cost AS REAL)) AS cost
         FROM spend
         WHERE date BETWEEN :start_date AND :end_date
+          AND {not_excluded_sql("spend.platform", "spend.campaign_id")}
         GROUP BY platform;
         """,
         {"start_date": start_date, "end_date": end_date},
@@ -227,16 +237,17 @@ def _build_platform_comparison(
 
     touch_rows = query(
         db_path,
-        """
+        f"""
         SELECT
           platform,
           COUNT(DISTINCT session_id) AS touch_clicks
         FROM touchpoints
-        WHERE ts >= :start_date AND ts < :end_excl
+        WHERE ts >= :start_utc AND ts < :end_excl_utc
           AND COALESCE(platform, '') <> ''
+          AND {not_excluded_sql("touchpoints.platform", "touchpoints.campaign_id")}
         GROUP BY platform;
         """,
-        {"start_date": start_date, "end_excl": _ts_end_exclusive(end_date)},
+        {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
     ).rows
 
     by_platform: dict[str, dict[str, float]] = defaultdict(
@@ -323,16 +334,16 @@ def _build_platform_comparison(
 
 
 def _build_funnel_snapshot(db_path: str, *, start_date: str, end_date: str) -> list[dict[str, Any]]:
-    end_excl = _ts_end_exclusive(end_date)
+    start_utc, end_excl_utc = local_day_bounds_utc(start_date, end_date)
     conversions = query(
         db_path,
         """
         SELECT customer_key, type, value
         FROM conversions
-        WHERE ts >= :start_date AND ts < :end_excl
+        WHERE ts >= :start_utc AND ts < :end_excl_utc
           AND COALESCE(customer_key, '') <> '';
         """,
-        {"start_date": start_date, "end_excl": end_excl},
+        {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
     ).rows
 
     funnel_name_map = _funnel_name_map(db_path)
@@ -347,10 +358,10 @@ def _build_funnel_snapshot(db_path: str, *, start_date: str, end_date: str) -> l
         """
         SELECT landing_page, COUNT(DISTINCT session_id) AS visits
         FROM sessions
-        WHERE ts >= :start_date AND ts < :end_excl
+        WHERE ts >= :start_utc AND ts < :end_excl_utc
         GROUP BY landing_page;
         """,
-        {"start_date": start_date, "end_excl": end_excl},
+        {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
     ).rows
 
     visits_by_funnel: dict[str, int] = defaultdict(int)
@@ -369,11 +380,11 @@ def _build_funnel_snapshot(db_path: str, *, start_date: str, end_date: str) -> l
             SELECT customer_key, landing_page,
                    ROW_NUMBER() OVER (PARTITION BY customer_key ORDER BY ts, rowid) AS rn
             FROM sessions
-            WHERE ts >= :start_date AND ts < :end_excl
+            WHERE ts >= :start_utc AND ts < :end_excl_utc
               AND COALESCE(customer_key, '') <> ''
         ) WHERE rn = 1;
         """,
-        {"start_date": start_date, "end_excl": end_excl},
+        {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
     ).rows
 
     first_funnel_by_customer: dict[str, str] = {}
@@ -432,20 +443,57 @@ def _build_funnel_snapshot(db_path: str, *, start_date: str, end_date: str) -> l
     return rows[:12]
 
 
+def _norm_account_seg(value: Any) -> str:
+    """Canonicalize the account_id segment of a join key (lowercase/strip)."""
+    return str(value or "").strip().lower()
+
+
+def _entity_key(
+    breakdown: str,
+    *,
+    platform: Any,
+    account_id: Any,
+    campaign_id: Any,
+    adset_id: Any,
+    ad_id: Any,
+) -> str:
+    """Build the normalized spend<->attribution JOIN key for a dimension row.
+
+    campaign/adset/ad segments run through ``normalize_campaign_key`` and the
+    account segment is lowercased so that a spend row keyed by numeric/braced ids
+    and a touchpoint keyed by a UTM slug or display name collapse to the SAME
+    token — the two sides must produce identical strings for the same campaign.
+    The human-readable display name is carried separately by the caller.
+    """
+    platform = str(platform or "")
+    account = _norm_account_seg(account_id)
+    campaign = normalize_campaign_key(campaign_id)
+    adset = normalize_campaign_key(adset_id)
+    ad = normalize_campaign_key(ad_id)
+    if breakdown == "ad_account":
+        return f"{platform}|{account}"
+    if breakdown == "campaign":
+        return f"{platform}|{account}|{campaign}"
+    if breakdown == "ad_set":
+        return f"{platform}|{account}|{campaign}|{adset}"
+    if breakdown == "ad":
+        return f"{platform}|{account}|{campaign}|{adset}|{ad}"
+    raise ValueError("invalid breakdown")
+
+
 def _key_from_spend_row(row: dict[str, Any], breakdown: str) -> str:
     if breakdown == "traffic_source":
         return str(row.get("name") or "")
-    if breakdown == "ad_account":
-        return f"{row.get('platform','')}|{row.get('account_id','')}"
-    if breakdown == "campaign":
-        return f"{row.get('platform','')}|{row.get('account_id','')}|{row.get('campaign_id','')}"
-    if breakdown == "ad_set":
-        return f"{row.get('platform','')}|{row.get('account_id','')}|{row.get('campaign_id','')}|{row.get('adset_id','')}"
-    if breakdown == "ad":
-        return f"{row.get('platform','')}|{row.get('account_id','')}|{row.get('campaign_id','')}|{row.get('adset_id','')}|{row.get('ad_id','')}"
     if breakdown == "day":
         return str(row.get("name") or "")
-    raise ValueError("invalid breakdown")
+    return _entity_key(
+        breakdown,
+        platform=row.get("platform", ""),
+        account_id=row.get("account_id", ""),
+        campaign_id=row.get("campaign_id", ""),
+        adset_id=row.get("adset_id", ""),
+        ad_id=row.get("ad_id", ""),
+    )
 
 
 def _key_from_attrib_row(row: dict[str, Any], breakdown: str) -> str:
@@ -459,15 +507,14 @@ def _key_from_attrib_row(row: dict[str, Any], breakdown: str) -> str:
         if platform:
             return _traffic_source_for_platform(platform)
         return "unknown / unknown"
-    if breakdown == "ad_account":
-        return f"{row.get('platform','')}|{row.get('account_id','')}"
-    if breakdown == "campaign":
-        return f"{row.get('platform','')}|{row.get('account_id','')}|{row.get('campaign_id','')}"
-    if breakdown == "ad_set":
-        return f"{row.get('platform','')}|{row.get('account_id','')}|{row.get('campaign_id','')}|{row.get('adset_id','')}"
-    if breakdown == "ad":
-        return f"{row.get('platform','')}|{row.get('account_id','')}|{row.get('campaign_id','')}|{row.get('adset_id','')}|{row.get('ad_id','')}"
-    raise ValueError("invalid breakdown")
+    return _entity_key(
+        breakdown,
+        platform=row.get("platform", ""),
+        account_id=row.get("account_id", ""),
+        campaign_id=row.get("campaign_id", ""),
+        adset_id=row.get("adset_id", ""),
+        ad_id=row.get("ad_id", ""),
+    )
 
 
 def _default_row_name_for_breakdown(row: dict[str, Any], breakdown: str, fallback: str) -> str:
@@ -528,22 +575,26 @@ def _child_count_map(db_path: str, *, start_date: str, end_date: str, active_tab
     if active_tab == "ad":
         return {}
 
+    start_utc, end_excl_utc = local_day_bounds_utc(start_date, end_date)
+
     # Only the DISTINCT entity tuples matter for counting children, so let SQLite
     # do the dedup: this materializes a few hundred distinct rows instead of
-    # pulling every spend + touchpoint row (~19k) into Python.
+    # pulling every spend + touchpoint row (~19k) into Python. Excluded campaigns
+    # are dropped so they neither appear nor inflate parent child-counts.
     spend_raw = query(
         db_path,
-        """
+        f"""
         SELECT DISTINCT platform, account_id, campaign_id, adset_id, ad_id
         FROM spend
-        WHERE date BETWEEN :start_date AND :end_date;
+        WHERE date BETWEEN :start_date AND :end_date
+          AND {not_excluded_sql("spend.platform", "spend.campaign_id")};
         """,
         {"start_date": start_date, "end_date": end_date},
     ).rows
 
     touch_raw = query(
         db_path,
-        """
+        f"""
         SELECT DISTINCT
           platform,
           '' AS account_id,
@@ -551,9 +602,10 @@ def _child_count_map(db_path: str, *, start_date: str, end_date: str, active_tab
           adset_id,
           ad_id
         FROM touchpoints
-        WHERE ts >= :start_date AND ts < :end_excl;
+        WHERE ts >= :start_utc AND ts < :end_excl_utc
+          AND {not_excluded_sql("touchpoints.platform", "touchpoints.campaign_id")};
         """,
-        {"start_date": start_date, "end_excl": _ts_end_exclusive(end_date)},
+        {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
     ).rows
 
     raw_rows = list(spend_raw) + list(touch_raw)
@@ -561,33 +613,41 @@ def _child_count_map(db_path: str, *, start_date: str, end_date: str, active_tab
     children: dict[str, set[str]] = defaultdict(set)
 
     for r in raw_rows:
+        # Normalize the join segments identically to the by_key builders so the
+        # parent keys here line up with the table rows' ids.
         platform = str(r.get("platform") or "")
-        account_id = str(r.get("account_id") or "")
-        campaign_id = str(r.get("campaign_id") or "")
-        adset_id = str(r.get("adset_id") or "")
-        ad_id = str(r.get("ad_id") or "")
+        account = _norm_account_seg(r.get("account_id"))
+        campaign = normalize_campaign_key(r.get("campaign_id"))
+        adset = normalize_campaign_key(r.get("adset_id"))
+        ad = normalize_campaign_key(r.get("ad_id"))
 
         if active_tab == "traffic_source":
             parent = _traffic_source_for_platform(platform)
-            child = f"{platform}|{account_id}"
+            child = f"{platform}|{account}"
             children[parent].add(child)
         elif active_tab == "ad_account":
-            parent = f"{platform}|{account_id}"
-            child = f"{platform}|{account_id}|{campaign_id}"
+            parent = f"{platform}|{account}"
+            child = f"{platform}|{account}|{campaign}"
             children[parent].add(child)
         elif active_tab == "campaign":
-            parent = f"{platform}|{account_id}|{campaign_id}"
-            child = f"{platform}|{account_id}|{campaign_id}|{adset_id}"
+            parent = f"{platform}|{account}|{campaign}"
+            child = f"{platform}|{account}|{campaign}|{adset}"
             children[parent].add(child)
         elif active_tab == "ad_set":
-            parent = f"{platform}|{account_id}|{campaign_id}|{adset_id}"
-            child = f"{platform}|{account_id}|{campaign_id}|{adset_id}|{ad_id}"
+            parent = f"{platform}|{account}|{campaign}|{adset}"
+            child = f"{platform}|{account}|{campaign}|{adset}|{ad}"
             children[parent].add(child)
 
     return {k: len(v) for k, v in children.items()}
 
 
 def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any]:
+    # Ensure the read-time exclusion table exists before any raw SQL references it
+    # (memoized). Compute the timezone-aware, sargable date bounds once and reuse
+    # them for every ts-range filter below (ts >= :start_utc AND ts < :end_excl_utc).
+    ensure_campaign_settings_table(db_path)
+    start_utc, end_excl_utc = local_day_bounds_utc(inputs.start_date, inputs.end_date)
+
     # 1) integrations.status + tracking.health_check
     integrations = integrations_status(db_path)
     health = tracking_health_check(db_path)
@@ -729,13 +789,14 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     if inputs.active_tab in {"ad_account", "campaign", "ad_set", "ad"} and not has_dimension_values:
         touchpoint_rows = query(
             db_path,
-            """
+            f"""
             SELECT platform, campaign_id, adset_id, ad_id, COUNT(*) AS touches
             FROM touchpoints
-            WHERE ts >= :start_date AND ts < :end_excl
+            WHERE ts >= :start_utc AND ts < :end_excl_utc
+              AND {not_excluded_sql("touchpoints.platform", "touchpoints.campaign_id")}
             GROUP BY platform, campaign_id, adset_id, ad_id;
             """,
-            {"start_date": inputs.start_date, "end_excl": _ts_end_exclusive(inputs.end_date)},
+            {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
         ).rows
 
         for r in touchpoint_rows:
@@ -743,6 +804,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             campaign_id = str(r.get("campaign_id") or "").strip()
             adset_id = str(r.get("adset_id") or "").strip()
             ad_id = str(r.get("ad_id") or "").strip()
+            # Normalize join segments (keep raw values for the display name).
+            campaign_n = normalize_campaign_key(campaign_id)
+            adset_n = normalize_campaign_key(adset_id)
+            ad_n = normalize_campaign_key(ad_id)
 
             if inputs.active_tab == "ad_account":
                 if not platform:
@@ -752,17 +817,17 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             elif inputs.active_tab == "campaign":
                 if not campaign_id:
                     continue
-                key = f"{platform}||{campaign_id}"
+                key = f"{platform}||{campaign_n}"
                 name = campaign_id
             elif inputs.active_tab == "ad_set":
                 if not adset_id:
                     continue
-                key = f"{platform}||{campaign_id}|{adset_id}"
+                key = f"{platform}||{campaign_n}|{adset_n}"
                 name = adset_id
             else:  # ad
                 if not ad_id:
                     continue
-                key = f"{platform}||{campaign_id}|{adset_id}|{ad_id}"
+                key = f"{platform}||{campaign_n}|{adset_n}|{ad_n}"
                 name = ad_id
 
             by_key.setdefault(
@@ -798,10 +863,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
               END AS traffic_source,
               COUNT(*) AS sessions
             FROM sessions
-            WHERE ts >= :start_date AND ts < :end_excl
+            WHERE ts >= :start_utc AND ts < :end_excl_utc
             GROUP BY 1;
             """,
-            {"start_date": inputs.start_date, "end_excl": _ts_end_exclusive(inputs.end_date)},
+            {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
         ).rows
         for r in session_counts:
             key = str(r.get("traffic_source") or "")
@@ -899,6 +964,20 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     # Ascending-by-profit view, computed once (stable) and reused for losers below.
     table_rows_asc = sorted(table_rows, key=lambda r: (r["metrics"]["profit"] or 0.0))
 
+    # Tab-independent attributed totals: the summary widgets (attributed_revenue,
+    # attribution_rate, summary ROAS, the summary card) must NOT change when the
+    # user switches breakdown tabs. The per-tab `totals` above only accumulate the
+    # rows that carry the active dimension (others are `continue`d), so accumulate
+    # the summary figures over ALL attribution rows instead. The per-tab `totals`
+    # stay reserved for the visible table's totals row.
+    attributed_total_revenue_all = sum(to_float(r.get("total_revenue")) for r in attrib_rows)
+    attributed_revenue_all = sum(to_float(r.get("revenue")) for r in attrib_rows)
+    attributed_cogs_all = sum(to_float(r.get("cogs")) for r in attrib_rows)
+    attributed_fees_all = sum(to_float(r.get("fees")) for r in attrib_rows)
+    attributed_orders_all = sum(float(str(r.get("orders") or "0") or 0) for r in attrib_rows)
+    reported_all = sum(to_float(r.get("reported_value")) for r in reported_rows)
+    reported_any_all = bool(reported_rows)
+
     totals_metrics = _format_metrics(
         clicks=int(totals["clicks"]),
         impressions=int(totals.get("impressions") or 0),
@@ -925,18 +1004,18 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         clicks=account_clicks,
         impressions=account_impressions,
         cost=account_cost,
-        total_revenue=float(totals["total_revenue"]),
-        revenue=float(totals["revenue"]),
-        cogs=float(totals["cogs"]),
-        fees=float(totals["fees"]),
-        orders=float(totals["_orders"]),
-        reported=float(totals["reported"]) if totals["_reported_any"] else None,
+        total_revenue=attributed_total_revenue_all,
+        revenue=attributed_revenue_all,
+        cogs=attributed_cogs_all,
+        fees=attributed_fees_all,
+        orders=attributed_orders_all,
+        reported=reported_all if reported_any_all else None,
         fixed_cost_allocation=None,
     )
 
     total_cost = account_cost
-    roas = safe_div(float(totals["revenue"]), total_cost)
-    conversions_count = float(totals["_orders"])
+    roas = safe_div(attributed_revenue_all, total_cost)
+    conversions_count = attributed_orders_all
     cpa = safe_div(total_cost, conversions_count) if conversions_count else None
 
     # Total all-orders revenue from DB (regardless of attribution)
@@ -951,9 +1030,9 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
               COALESCE(SUM(cogs),0) AS cogs,
               COALESCE(SUM(fees),0) AS fees
             FROM orders
-            WHERE ts >= :s AND ts < :e_excl
+            WHERE ts >= :start_utc AND ts < :end_excl_utc
             """,
-            {"s": inputs.start_date, "e_excl": _ts_end_exclusive(inputs.end_date)},
+            {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
         ).rows
         _ao = _all_orders[0] if _all_orders else {}
         all_orders_count = int(_ao.get("cnt") or 0)
@@ -996,23 +1075,24 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             SELECT COUNT(DISTINCT customer_key) AS cnt
             FROM orders
             WHERE COALESCE(customer_key, '') != ''
-              AND substr(ts, 1, 10) BETWEEN :s AND :e
+              AND ts >= :start_utc AND ts < :end_excl_utc
             """,
-            {"s": inputs.start_date, "e": inputs.end_date},
+            {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
         ).rows
         customers_in_window = int((_cw[0] if _cw else {}).get("cnt") or 0)
         returning_customers = max(customers_in_window - new_customers, 0)
 
+        # Count each distinct lead once, falling back to session_id then the (now
+        # UNIQUE) conversion_id so keyless leads are counted and repeats collapse.
         _ld = query(
             db_path,
             """
-            SELECT COUNT(DISTINCT customer_key) AS cnt
+            SELECT COUNT(DISTINCT COALESCE(NULLIF(customer_key, ''), NULLIF(session_id, ''), conversion_id)) AS cnt
             FROM conversions
-            WHERE COALESCE(customer_key, '') != ''
-              AND substr(ts, 1, 10) BETWEEN :s AND :e
+            WHERE ts >= :start_utc AND ts < :end_excl_utc
               AND LOWER(type) IN ('lead', 'formsubmission', 'form_submission', 'signup', 'optin', 'opt_in')
             """,
-            {"s": inputs.start_date, "e": inputs.end_date},
+            {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
         ).rows
         leads_count = int((_ld[0] if _ld else {}).get("cnt") or 0)
     except Exception:
@@ -1026,8 +1106,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     cost_per_lead = safe_div(total_cost, float(leads_count)) if leads_count else None
 
     total_clicks = account_clicks
-    attributed_orders = round(float(totals["_orders"]), 2)
-    attributed_revenue = float(totals["revenue"])
+    # Tab-independent: use the all-attribution-rows totals so attributed_revenue,
+    # attribution_rate and unattributed_* don't shift when switching breakdown tabs.
+    attributed_orders = round(attributed_orders_all, 2)
+    attributed_revenue = attributed_revenue_all
     unattributed_orders = round(max(float(all_orders_count) - attributed_orders, 0.0), 2)
     unattributed_revenue = round_money(max(all_orders_revenue - attributed_revenue, 0.0))
     attribution_rate = safe_div(attributed_orders, float(all_orders_count))
@@ -1106,10 +1188,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             SELECT substr(ts, 1, 10) AS day, COUNT(*) AS orders,
                    COALESCE(SUM(net), 0) AS revenue, COALESCE(SUM(gross), 0) AS gross
             FROM orders
-            WHERE substr(ts, 1, 10) BETWEEN :s AND :e
+            WHERE ts >= :start_utc AND ts < :end_excl_utc
             GROUP BY day
             """,
-            {"s": inputs.start_date, "e": inputs.end_date},
+            {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
         ).rows
         tracked_day_map = {str(r["day"]): r for r in _td}
 

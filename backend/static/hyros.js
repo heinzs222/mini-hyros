@@ -35,13 +35,55 @@
   var SESSION_TTL_MIN  = 30;
 
   // ── Cookie helpers ──────────────────────────────────────────────────────────
+  // Registrable ("parent") domain detection, cached after first probe.
+  //   undefined = not yet computed
+  //   ""        = host-only (no Domain attribute)
+  //   ".<reg>"  = registrable domain, ready to append as ;domain=.<reg>
+  var _cookieDomain;
+
+  function computeCookieDomain() {
+    var host = window.location.hostname || "";
+    // IPs and single-label hosts (e.g. "localhost") can't take a Domain attr.
+    if (!host || host.indexOf(".") === -1 || /^[0-9.]+$/.test(host)) return "";
+    var parts = host.split(".");
+    // Walk up the labels from the narrowest candidate toward the full hostname,
+    // writing a throwaway probe cookie until one sticks — the GA approach. The
+    // highest level that accepts a cookie is the registrable domain. This also
+    // handles multi-part public suffixes (e.g. co.uk) without a suffix list,
+    // because the browser refuses to set a cookie on a public suffix.
+    for (var i = parts.length - 1; i >= 0; i--) {
+      var candidate = parts.slice(i).join(".");
+      var probe = "_hyros_tld_test";
+      document.cookie = probe + "=1;path=/;domain=." + candidate;
+      if (document.cookie.indexOf(probe + "=1") > -1) {
+        // Clean the probe cookie back off.
+        document.cookie = probe + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=." + candidate;
+        return "." + candidate;
+      }
+    }
+    return "";
+  }
+
+  function getCookieDomain() {
+    if (_cookieDomain === undefined) {
+      try {
+        _cookieDomain = computeCookieDomain();
+      } catch (e) {
+        _cookieDomain = ""; // fall back to host-only if detection throws
+      }
+    }
+    return _cookieDomain;
+  }
+
   function setCookie(name, value, days) {
     var d = new Date();
     d.setTime(d.getTime() + days * 86400000);
     var secure = window.location.protocol === "https:" ? ";Secure" : "";
+    var domain = getCookieDomain();
+    var domainAttr = domain ? ";domain=" + domain : "";
     document.cookie = name + "=" + encodeURIComponent(value) +
       ";expires=" + d.toUTCString() +
-      ";path=/;SameSite=Lax" + secure;
+      ";path=/;SameSite=Lax" + domainAttr + secure;
   }
 
   function getCookie(name) {
@@ -189,16 +231,42 @@
   var lastParams = getStoredParams("last");
   var firstParams = getStoredParams("first");
 
+  // Real tracking signals (a click id, any utm_*, or a campaign/ad id).
+  // detected_platform is DERIVED from these, so it is not itself a signal.
+  var TRACKING_KEYS = ["utm_source","utm_medium","utm_campaign","utm_content","utm_term",
+                       "gclid","fbclid","ttclid","wbraid","gbraid",
+                       "ad_id","adset_id","campaign_id","creative_id",
+                       "fbc_id","ttc_id","gc_id","h_ad_id","g_special_campaign"];
+
+  function hasTrackingParams(p) {
+    if (!p) return false;
+    for (var i = 0; i < TRACKING_KEYS.length; i++) {
+      if (p[TRACKING_KEYS[i]]) return true;
+    }
+    return false;
+  }
+
   function mergedParams() {
-    var last = getStoredParams("last");
+    // Treat each touch atomically. If the CURRENT URL carries ANY tracking
+    // parameter, this is a fresh touch — use ONLY the current param set so a new
+    // Google click (gclid) never inherits a stale Meta fbc_id / campaign_id from
+    // the previous touch (which would make the backend misclassify the platform).
+    // The stored _last cookie is already overwritten with this same atomic set by
+    // persistParams() at load. Only when the current URL has NO tracking params at
+    // all do we fall back to the stored last-touch set as a whole.
     var current = getAllTrackingParams();
+    var source = current;
+    if (!hasTrackingParams(current)) {
+      var last = getStoredParams("last");
+      if (hasTrackingParams(last)) source = last;
+    }
     var merged = {};
     var keys = ["utm_source","utm_medium","utm_campaign","utm_content","utm_term",
                 "gclid","fbclid","ttclid","wbraid","gbraid",
                 "ad_id","adset_id","campaign_id","creative_id",
                 "fbc_id","ttc_id","gc_id","h_ad_id","g_special_campaign","detected_platform"];
     for (var i = 0; i < keys.length; i++) {
-      merged[keys[i]] = current[keys[i]] || last[keys[i]] || "";
+      merged[keys[i]] = source[keys[i]] || "";
     }
     return merged;
   }
@@ -842,14 +910,32 @@
       });
       return;
     }
-    if (purchaseLike && markOnce("purchase|" + dedupeKey)) {
-      window.hyros.conversion({
-        type: "Purchase",
-        value: purchase.value || 0,
-        order_id: purchase.order_id || ("order-ty-" + Date.now()),
-        email: email,
-        currency: purchase.currency || "USD",
-      });
+    if (purchaseLike) {
+      if (purchase.order_id) {
+        // Real order id (from dataLayer / URL / Shopify) — safe to record revenue.
+        if (markOnce("purchase|" + dedupeKey)) {
+          window.hyros.conversion({
+            type: "Purchase",
+            value: purchase.value || 0,
+            order_id: purchase.order_id,
+            email: email,
+            currency: purchase.currency || "USD",
+          });
+        }
+      } else {
+        // No real order id: do NOT fabricate a Purchase. A synthetic
+        // "order-ty-"+Date.now() id creates phantom/duplicate revenue and drops
+        // genuine repeat purchases (same path, same value). Fire a non-revenue
+        // signal instead and let the server-side payment webhook (Stripe /
+        // Shopify) be the source of truth for revenue.
+        if (markOnce("thankyouview|" + dedupeKey)) {
+          window.hyros.event("ThankYouPageView", {
+            page: window.location.pathname,
+            email: email,
+            value: purchase.value || 0,
+          });
+        }
+      }
     }
   }
 
