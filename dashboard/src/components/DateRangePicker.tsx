@@ -20,10 +20,38 @@ function addDays(iso: string, n: number): string {
   d.setDate(d.getDate() + n);
   return toIso(d);
 }
-function addMonths(iso: string, n: number): string {
+function daysInMonth(year: number, month: number): number {
+  // month is 0-indexed; day 0 of the next month is the last day of this month.
+  return new Date(year, month + 1, 0).getDate();
+}
+/**
+ * Month navigation for the calendar chevrons and view seed: snap to the 1st
+ * BEFORE shifting months so day-of-month can never overflow into the wrong
+ * month (Jan 31 + 1mo must land in Feb, not spill to Mar 3). Always returns
+ * the 1st of the target month.
+ */
+function addMonthsFirst(iso: string, n: number): string {
   const d = fromIso(iso);
+  d.setDate(1);
   d.setMonth(d.getMonth() + n);
   return toIso(d);
+}
+/**
+ * Month arithmetic that preserves the day-of-month where possible but clamps
+ * to the last valid day of the target month. Used by presets that subtract
+ * whole months (Last 3/6 Month, Last Year) so e.g. Jul 31 − 1mo → Jun 30.
+ */
+function addMonthsClamped(iso: string, n: number): string {
+  const d = fromIso(iso);
+  const origDay = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + n);
+  d.setDate(Math.min(origDay, daysInMonth(d.getFullYear(), d.getMonth())));
+  return toIso(d);
+}
+function firstOfMonthIso(iso: string): string {
+  const d = fromIso(iso || todayIso());
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`;
 }
 function todayIso(): string {
   return toIso(new Date());
@@ -63,9 +91,9 @@ function buildPresets(): Preset[] {
     { label: "Last 7 Days", range: () => ({ start: addDays(t, -7), end: addDays(t, -1) }) },
     { label: "Last 14 Days", range: () => ({ start: addDays(t, -14), end: addDays(t, -1) }) },
     { label: "Last 30 Days", range: () => ({ start: addDays(t, -30), end: addDays(t, -1) }) },
-    { label: "Last 3 Month", range: () => ({ start: addMonths(t, -3), end: t }) },
-    { label: "Last 6 Month", range: () => ({ start: addMonths(t, -6), end: t }) },
-    { label: "Last Year", range: () => ({ start: addMonths(t, -12), end: t }) },
+    { label: "Last 3 Month", range: () => ({ start: addMonthsClamped(t, -3), end: t }) },
+    { label: "Last 6 Month", range: () => ({ start: addMonthsClamped(t, -6), end: t }) },
+    { label: "Last Year", range: () => ({ start: addMonthsClamped(t, -12), end: t }) },
     { label: "All Time", range: () => ({ start: "2015-01-01", end: t }) },
     { label: "Year to Date", range: () => ({ start: firstOfYear, end: t }) },
   ];
@@ -130,17 +158,29 @@ export default function DateRangePicker({
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Range>(value);
   const [anchor, setAnchor] = useState<string | null>(null);
-  const [viewIso, setViewIso] = useState(`${value.end || todayIso()}`);
+  const [viewIso, setViewIso] = useState(firstOfMonthIso(value.end || todayIso()));
   const ref = useRef<HTMLDivElement>(null);
+  // Tracks the previous `open` value so the reset below fires only on the
+  // closed→open transition, not on every re-render while the popover is open.
+  const prevOpenRef = useRef(false);
 
-  const presets = useMemo(() => buildPresets(), []);
+  // Recompute presets when the popover opens so "Today"/"Yesterday" etc. stay
+  // correct across a midnight boundary within a long-lived session.
+  const presets = useMemo(() => buildPresets(), [open]);
 
   useEffect(() => {
-    if (!open) return;
-    setDraft(value);
+    const justOpened = open && !prevOpenRef.current;
+    prevOpenRef.current = open;
+    if (!justOpened) return;
+    // Seed the draft only on open, keyed on the PRIMITIVE start/end strings —
+    // not the object identity. Consumers pass fresh {start,end} literals every
+    // render (and the page re-renders every 30s / on websocket events); keying
+    // on identity would wipe an in-progress selection. Re-renders while open no
+    // longer reset the draft/anchor.
+    setDraft({ start: value.start, end: value.end });
     setAnchor(null);
-    setViewIso(value.end || todayIso());
-  }, [open, value]);
+    setViewIso(firstOfMonthIso(value.end || todayIso()));
+  }, [open, value.start, value.end]);
 
   useEffect(() => {
     if (!open) return;
@@ -184,7 +224,7 @@ export default function DateRangePicker({
     const r = p.range();
     setDraft(r);
     setAnchor(null);
-    setViewIso(r.end);
+    setViewIso(firstOfMonthIso(r.end));
     commitRange(r);
   };
 
@@ -314,7 +354,7 @@ export default function DateRangePicker({
               <div className="mb-3 flex items-center justify-between">
                 <button
                   type="button"
-                  onClick={() => setViewIso(addMonths(viewIso, -1))}
+                  onClick={() => setViewIso(addMonthsFirst(viewIso, -1))}
                   className="rounded-md p-1.5 text-ink-dim hover:bg-white/10 hover:text-ink"
                 >
                   <ChevronLeft size={16} />
@@ -345,7 +385,7 @@ export default function DateRangePicker({
                 </div>
                 <button
                   type="button"
-                  onClick={() => setViewIso(addMonths(viewIso, 1))}
+                  onClick={() => setViewIso(addMonthsFirst(viewIso, 1))}
                   className="rounded-md p-1.5 text-ink-dim hover:bg-white/10 hover:text-ink"
                 >
                   <ChevronRight size={16} />

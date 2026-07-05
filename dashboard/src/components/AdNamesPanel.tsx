@@ -107,7 +107,7 @@ export default function AdNamesPanel() {
       if (errs.length) {
         toast.update(toastId, { type: "error", title: "Ad name sync had issues", description: errs.slice(0, 4).join("\n"), duration: 12000 });
       } else {
-        toast.update(toastId, { type: "success", title: "Ad names synced", description: `Imported ${result?.imported ?? result?.count ?? "the latest"} mappings.`, duration: 4500 });
+        toast.update(toastId, { type: "success", title: "Ad names synced", description: `Imported ${result?.synced ?? "the latest"} mappings.`, duration: 4500 });
       }
     } catch (err: any) {
       setSyncResult({ errors: [err.message] });

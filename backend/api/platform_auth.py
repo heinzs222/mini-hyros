@@ -12,6 +12,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,7 @@ from attributionops.db import connect, sql_rows
 
 router = APIRouter()
 UTC = timezone.utc
+logger = logging.getLogger(__name__)
 
 TIKTOK_TOKEN_URL = "https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/"
 TIKTOK_REFRESH_URL = "https://business-api.tiktok.com/open_api/v1.3/oauth2/refresh_token/"
@@ -133,14 +135,18 @@ async def get_or_refresh_tiktok_token(db_path: str) -> str:
         advertiser_id = str(r.get("advertiser_id") or os.environ.get("TIKTOK_ADVERTISER_ID", ""))
         expires_at_str = str(r.get("expires_at") or "")
 
-        # Check if token is expired or expiring within the next hour
+        # Check if token is expired or expiring within the next hour. When the
+        # stored expiry is missing or unparseable but we hold a refresh_token,
+        # refresh proactively rather than risk using a possibly-stale token.
         should_refresh = False
         if expires_at_str:
             try:
                 expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
                 should_refresh = expires_at <= datetime.now(UTC) + timedelta(hours=1)
             except Exception:
-                pass
+                should_refresh = bool(refresh_token)
+        else:
+            should_refresh = bool(refresh_token)
 
         if should_refresh and refresh_token:
             app_id = os.environ.get("TIKTOK_APP_ID", "").strip()
@@ -161,8 +167,15 @@ async def get_or_refresh_tiktok_token(db_path: str) -> str:
                     if new_access:
                         _save_tiktok_token(db_path, new_access, new_refresh, advertiser_id, expires_at)
                         return new_access
-            except Exception:
-                pass  # Fall through to return current token
+                else:
+                    logger.warning(
+                        "TikTok token refresh returned error code %s: %s",
+                        data.get("code"),
+                        data.get("message"),
+                    )
+            except Exception as exc:
+                # Fall through to return current token, but do not swallow silently.
+                logger.warning("TikTok token refresh failed: %s", exc)
 
         return access_token
 

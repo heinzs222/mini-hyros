@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from attributionops.db import query
+from attributionops.tools.campaign_filter import excluded_campaign_keys, is_excluded
 from attributionops.util import parse_json, to_float, to_int
 
 
@@ -51,6 +52,11 @@ def ads_get_spend(
         params,
     ).rows
 
+    # Read-time exclusion: campaigns flagged tracked=0 are dropped before any
+    # aggregation, so excluded campaigns disappear from spend totals AND every
+    # breakdown this serves (day/platform/campaign/etc.).
+    excluded = excluded_campaign_keys(db_path)
+
     agg: dict[tuple[str, ...], dict[str, object]] = {}
 
     for r in rows:
@@ -62,6 +68,9 @@ def ads_get_spend(
         ad_id = str(r.get("ad_id") or "")
         creative_id = str(r.get("creative_id") or "")
         md = parse_json(r.get("metadata"))
+
+        if is_excluded(excluded, p, campaign_id):
+            continue
 
         if breakdown == "day":
             key = (d,)
@@ -150,6 +159,10 @@ def ads_get_reported_value(
         params,
     ).rows
 
+    # Same read-time exclusion as ads_get_spend so excluded campaigns drop out of
+    # every reported-value breakdown too.
+    excluded = excluded_campaign_keys(db_path)
+
     agg: dict[tuple[str, ...], dict[str, object]] = {}
     for r in rows:
         p = str(r.get("platform") or "")
@@ -159,6 +172,9 @@ def ads_get_reported_value(
         adset_id = str(r.get("adset_id") or "")
         ad_id = str(r.get("ad_id") or "")
         reported_value = to_float(r.get("reported_value"))
+
+        if is_excluded(excluded, p, campaign_id):
+            continue
 
         if breakdown == "day":
             key = (d,)

@@ -16,6 +16,14 @@ RUN mkdir -p /app/data/live && \
     python /app/scripts/init_empty_db.py \
     --sqlite-path /app/data/live/attributionops.sqlite
 
+# Ensure the persistent-disk mount point exists even when no disk is attached
+# (e.g. local runs / Render free tier). On paid Render, the disk mounts here and
+# shadows this dir; render.yaml overrides ATTRIBUTIONOPS_DB_PATH to
+# /var/data/attributionops.sqlite so the DB lives on the persistent disk.
+RUN mkdir -p /var/data
+
+# Default DB path for local/standalone runs. render.yaml overrides this to
+# /var/data/attributionops.sqlite (the persistent disk) when deployed on Render.
 ENV ATTRIBUTIONOPS_DB_PATH=/app/data/live/attributionops.sqlite
 ENV PYTHONUNBUFFERED=1
 ENV TRACKING_DOMAIN=""

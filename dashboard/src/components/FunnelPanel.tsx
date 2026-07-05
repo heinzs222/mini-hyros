@@ -3,7 +3,12 @@ import { useEffect, useState } from "react";
 import { fetchFunnelReport, fetchFunnelBySource } from "@/lib/api";
 import { Filter } from "lucide-react";
 
-export default function FunnelPanel() {
+type FunnelPanelProps = {
+  startDate?: string;
+  endDate?: string;
+};
+
+export default function FunnelPanel({ startDate = "", endDate = "" }: FunnelPanelProps) {
   const [funnel, setFunnel] = useState<any>(null);
   const [bySource, setBySource] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -14,7 +19,7 @@ export default function FunnelPanel() {
       setLoading(true);
       try {
         const [f, s] = await Promise.all([
-          fetchFunnelReport("", "", controller.signal),
+          fetchFunnelReport(startDate, endDate, controller.signal),
           fetchFunnelBySource("platform", controller.signal),
         ]);
         setFunnel(f);
@@ -26,7 +31,7 @@ export default function FunnelPanel() {
     }
     load();
     return () => controller.abort();
-  }, []);
+  }, [startDate, endDate]);
 
   if (loading) return <div className="text-center py-12 text-gray-500 text-sm">Loading funnel data...</div>;
 

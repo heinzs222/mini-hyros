@@ -16,6 +16,7 @@ from fastapi import APIRouter, Query
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import sql_rows as db_query
+from attributionops.util import local_day_bounds_utc
 
 router = APIRouter()
 
@@ -73,7 +74,7 @@ def _build_funnel(db_path: str, where_clause: str = "", params: list = None) -> 
 
 
 @router.get("/report")
-async def funnel_report(
+def funnel_report(
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
 ):
@@ -100,12 +101,18 @@ async def funnel_report(
 
 
 @router.get("/by-source")
-async def funnel_by_source(
+def funnel_by_source(
     breakdown: str = Query(default="platform", description="platform, utm_source, campaign_id"),
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
 ):
-    """Funnel broken down by traffic source."""
+    """Funnel broken down by traffic source.
+
+    Set-based: three grouped queries total (visits, conversions, revenue) rather
+    than the previous N+1-per-source pattern with unbounded ``customer_key IN(...)``
+    lists (which 500'd past SQLite's variable limit). The same timezone-aware date
+    range is applied to conversions and orders, not just to visits.
+    """
     db_path = _db()
 
     breakdown = breakdown or "platform"
@@ -121,87 +128,89 @@ async def funnel_by_source(
         source_col = "platform"
         breakdown = "platform"
 
-    date_filter = ""
-    params = []
+    # Half-open UTC instant bounds from the inclusive local-day range. Either
+    # side may be absent → open-ended on that side (preserves all-time default).
+    start_utc = end_excl_utc = None
     if start_date:
-        date_filter += " AND ts >= ?"
-        params.append(start_date)
+        start_utc, _ = local_day_bounds_utc(start_date, start_date)
     if end_date:
-        date_filter += " AND ts <= ?"
-        params.append(end_date + "T23:59:59Z")
+        _, end_excl_utc = local_day_bounds_utc(end_date, end_date)
 
-    sources = db_query(
+    def _range(col: str) -> tuple[str, list]:
+        clause = ""
+        vals: list = []
+        if start_utc:
+            clause += f" AND {col} >= ?"
+            vals.append(start_utc)
+        if end_excl_utc:
+            clause += f" AND {col} < ?"
+            vals.append(end_excl_utc)
+        return clause, vals
+
+    src_clause, src_params = _range("ts")
+
+    # 1) Visits per source (all sessions/touchpoints, not just identified ones).
+    visit_rows = db_query(
         db_path,
-        f"SELECT DISTINCT {source_col} as source FROM {source_table} WHERE 1=1 {date_filter}",
-        params,
+        f"SELECT COALESCE({source_col}, '') AS source, COUNT(DISTINCT session_id) AS visits "
+        f"FROM {source_table} WHERE 1=1 {src_clause} "
+        f"GROUP BY COALESCE({source_col}, '')",
+        src_params,
+    )
+    visits_by_source = {str(r.get("source") or ""): int(r.get("visits") or 0) for r in visit_rows}
+
+    # Distinct (source, customer_key) map, reused by the conversion + revenue joins.
+    src_cust_cte = (
+        f"WITH src_cust AS ("
+        f" SELECT DISTINCT COALESCE({source_col}, '') AS source, customer_key"
+        f" FROM {source_table}"
+        f" WHERE COALESCE(customer_key, '') != '' {src_clause}"
+        f")"
     )
 
+    # 2) Distinct converting customers per (source, conversion type), date-filtered.
+    conv_clause, conv_params = _range("cv.ts")
+    conv_rows = db_query(
+        db_path,
+        f"""
+        {src_cust_cte}
+        SELECT sc.source AS source, cv.type AS type, COUNT(DISTINCT cv.customer_key) AS cnt
+        FROM src_cust sc
+        JOIN conversions cv ON cv.customer_key = sc.customer_key
+        WHERE 1=1 {conv_clause}
+        GROUP BY sc.source, cv.type
+        """,
+        src_params + conv_params,
+    )
+    conv_map: dict[str, dict[str, int]] = {}
+    for r in conv_rows:
+        conv_map.setdefault(str(r.get("source") or ""), {})[str(r.get("type") or "")] = int(r.get("cnt") or 0)
+
+    # 3) Revenue per source (orders of that source's customers), date-filtered.
+    rev_clause, rev_params = _range("o.ts")
+    rev_rows = db_query(
+        db_path,
+        f"""
+        {src_cust_cte}
+        SELECT sc.source AS source, SUM(CAST(o.gross AS REAL)) AS rev
+        FROM src_cust sc
+        JOIN orders o ON o.customer_key = sc.customer_key
+        WHERE 1=1 {rev_clause}
+        GROUP BY sc.source
+        """,
+        src_params + rev_params,
+    )
+    rev_by_source = {str(r.get("source") or ""): float(r.get("rev") or 0) for r in rev_rows}
+
     results = []
-    for src in sources:
-        raw_source = str(src.get("source") or "")
-        source_name = raw_source or "direct"
-
-        if source_table == "sessions":
-            sess = db_query(
-                db_path,
-                f"SELECT COUNT(DISTINCT session_id) as cnt FROM sessions WHERE {source_col} = ? {date_filter}",
-                [raw_source] + params,
-            )
-            visit_count = int(sess[0]["cnt"]) if sess else 0
-
-            cust_keys = db_query(
-                db_path,
-                f"SELECT DISTINCT customer_key FROM sessions WHERE {source_col} = ? AND customer_key != '' {date_filter}",
-                [raw_source] + params,
-            )
-        else:
-            sess = db_query(
-                db_path,
-                f"SELECT COUNT(DISTINCT session_id) as cnt FROM touchpoints WHERE {source_col} = ? {date_filter}",
-                [raw_source] + params,
-            )
-            visit_count = int(sess[0]["cnt"]) if sess else 0
-
-            cust_keys = db_query(
-                db_path,
-                f"SELECT DISTINCT customer_key FROM touchpoints WHERE {source_col} = ? AND customer_key != '' {date_filter}",
-                [raw_source] + params,
-            )
-
-        ck_set = {c["customer_key"] for c in cust_keys if c.get("customer_key")}
-
-        if not ck_set:
-            results.append({
-                "source": source_name,
-                "visits": visit_count,
-                "leads": 0, "bookings": 0, "opportunities": 0, "purchases": 0,
-                "lead_rate": 0, "booking_rate": 0, "purchase_rate": 0,
-                "revenue": 0,
-            })
-            continue
-
-        ck_placeholders = ",".join(["?"] * len(ck_set))
-        ck_list = list(ck_set)
-
-        # Count conversions by type for these customers
-        convs = db_query(db_path,
-            f"SELECT type, COUNT(DISTINCT customer_key) as cnt FROM conversions WHERE customer_key IN ({ck_placeholders}) GROUP BY type",
-            ck_list)
-
-        conv_map = {}
-        for c in convs:
-            conv_map[c["type"]] = int(c["cnt"])
-
-        leads = conv_map.get("Lead", 0) + conv_map.get("lead", 0)
-        bookings = conv_map.get("Booking", 0) + conv_map.get("booking", 0)
-        opps = conv_map.get("Opportunity", 0) + conv_map.get("opportunity", 0)
-        purchases = conv_map.get("Purchase", 0) + conv_map.get("purchase", 0)
-
-        # Revenue
-        rev = db_query(db_path,
-            f"SELECT SUM(CAST(gross AS REAL)) as rev FROM orders WHERE customer_key IN ({ck_placeholders})",
-            ck_list)
-        revenue = float(rev[0]["rev"] or 0) if rev else 0
+    for source_key, visit_count in visits_by_source.items():
+        source_name = source_key or "direct"
+        types = conv_map.get(source_key, {})
+        leads = types.get("Lead", 0) + types.get("lead", 0)
+        bookings = types.get("Booking", 0) + types.get("booking", 0)
+        opps = types.get("Opportunity", 0) + types.get("opportunity", 0)
+        purchases = types.get("Purchase", 0) + types.get("purchase", 0)
+        revenue = rev_by_source.get(source_key, 0)
 
         results.append({
             "source": source_name,

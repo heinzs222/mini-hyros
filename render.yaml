@@ -4,10 +4,20 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     repo: https://github.com/YOUR_USERNAME/hyros
+    # NOTE: Render persistent disks require a PAID instance type. The `disk:`
+    # block below is ignored while `plan: free` — upgrade `plan` to a paid tier
+    # (e.g. `starter`) for the disk to be provisioned. Until then, data still
+    # resets on redeploy/spin-down because there is no attached disk.
     plan: free
+    # Persistent SQLite storage so data survives redeploys and spin-downs
+    # (the DB path env var below points here).
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: ATTRIBUTIONOPS_DB_PATH
-        value: /app/data/dummy/attributionops_demo.sqlite
+        value: /var/data/attributionops.sqlite
       - key: TRACKING_DOMAIN
         sync: false
       - key: SITE_TOKEN

@@ -47,9 +47,16 @@ function main() {
   // campaign-total rows across two network calls) — the backend reconciles
   // ad-level vs campaign-level cost per (date, campaign_id) within a single
   // request, so both must always arrive together.
+  //
+  // Every batch is self-replacing: it sends replace=true scoped to only the
+  // dates it actually contains (its own min/max). Sending the whole run's
+  // start/end with replace on the first batch alone would delete the entire
+  // range and then only re-insert batch-0's dates, wiping later dates that
+  // arrive in subsequent batches.
   var batches = chunkRowsByDate(rows, BATCH_SIZE);
   for (var i = 0; i < batches.length; i++) {
-    postRows(accountId, start, end, batches[i], i === 0);
+    var range = batchDateRange(batches[i]);
+    postRows(accountId, range.start, range.end, batches[i], true);
   }
 
   Logger.log("Mini Hyros: pushed " + rows.length + " Google Ads spend rows for " + start + " to " + end + ".");
@@ -123,6 +130,20 @@ function chunkRowsByDate(rows, targetBatchSize) {
   }
   if (current.length) batches.push(current);
   return batches;
+}
+
+function batchDateRange(rows) {
+  // Return the min/max yyyy-MM-dd date within a single batch. Dates are
+  // zero-padded ISO strings, so lexicographic comparison equals date order.
+  var min = null;
+  var max = null;
+  for (var i = 0; i < rows.length; i++) {
+    var d = rows[i].date || "";
+    if (!d) continue;
+    if (min === null || d < min) min = d;
+    if (max === null || d > max) max = d;
+  }
+  return { start: min || "", end: max || "" };
 }
 
 function parseDateString(value) {

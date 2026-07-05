@@ -49,9 +49,16 @@ export function profitColor(value: number | null | undefined): string {
   return "text-gray-400";
 }
 
+/**
+ * Returns the YYYY-MM-DD calendar date `n` days before today, in the browser's
+ * local timezone. `daysAgo(0)` is today, `daysAgo(1)` is yesterday, etc.
+ * Reporting-timezone day boundaries are resolved server-side; this only needs
+ * to yield a stable local calendar date for default range seeds.
+ */
 export function daysAgo(n: number): string {
+  const days = Number.isFinite(n) ? Math.trunc(n) : 0;
   const d = new Date();
-  d.setDate(d.getDate() - n);
+  d.setDate(d.getDate() - days);
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");

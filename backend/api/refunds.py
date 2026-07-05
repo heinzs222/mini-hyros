@@ -9,18 +9,21 @@ Endpoints:
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Request, Query
+import anyio
+from fastapi import APIRouter, HTTPException, Request, Query
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows as db_query
 
 router = APIRouter()
+logger = logging.getLogger("refunds")
 UTC = timezone.utc
 
 
@@ -68,31 +71,55 @@ async def record_refund(request: Request):
         return {"ok": False, "error": "order_id is required"}
 
     _ensure_refunds_table(db_path)
-    refund_id = _sha256(f"refund|{order_id}|{now}")
+    # Stable, content-derived id (never the receive time) so a retry/redelivery is
+    # idempotent. Callers may pass an explicit source refund id.
+    refund_id = str(payload.get("refund_id") or "") or _sha256(
+        f"refund|{order_id}|{amount}|{refund_type}"
+    )
 
-    # Get customer_key from original order
-    orders = db_query(db_path, "SELECT customer_key, gross, net, refunds, chargebacks FROM orders WHERE order_id = ?", [order_id])
+    # Get customer_key + amounts from the original order.
+    orders = db_query(
+        db_path,
+        "SELECT customer_key, gross, net, refunds, chargebacks FROM orders WHERE order_id = ?",
+        [order_id],
+    )
     customer_key = orders[0]["customer_key"] if orders else ""
 
-    with connect(db_path) as conn:
-        # Log the refund
-        conn.execute(
-            "INSERT OR IGNORE INTO refund_log (id, ts, order_id, customer_key, type, amount, reason, source) VALUES (?,?,?,?,?,?,?,?)",
-            (refund_id, now, order_id, customer_key, refund_type, str(amount), reason, source),
-        )
+    # Clamp so refunds + chargebacks can never exceed the order gross.
+    if orders:
+        try:
+            gross = float(orders[0].get("gross") or 0)
+            prior = float(orders[0].get("refunds") or 0) + float(orders[0].get("chargebacks") or 0)
+            allowable = max(0.0, gross - prior)
+            amount = min(amount, allowable)
+        except (TypeError, ValueError):
+            pass
 
-        # Update the original order
-        if refund_type == "chargeback":
-            conn.execute(
-                "UPDATE orders SET chargebacks = CAST(CAST(chargebacks AS REAL) + ? AS TEXT), net = CAST(CAST(net AS REAL) - ? AS TEXT) WHERE order_id = ?",
-                (amount, amount, order_id),
+    def _apply() -> bool:
+        with connect(db_path) as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO refund_log (id, ts, order_id, customer_key, type, amount, reason, source) VALUES (?,?,?,?,?,?,?,?)",
+                (refund_id, now, order_id, customer_key, refund_type, str(amount), reason, source),
             )
-        else:
-            conn.execute(
-                "UPDATE orders SET refunds = CAST(CAST(refunds AS REAL) + ? AS TEXT), net = CAST(CAST(net AS REAL) - ? AS TEXT) WHERE order_id = ?",
-                (amount, amount, order_id),
-            )
-        conn.commit()
+            # Only adjust the order when this refund was newly recorded, so
+            # replays don't double-decrement net.
+            if not cur.rowcount or cur.rowcount < 1:
+                conn.commit()
+                return False
+            if refund_type == "chargeback":
+                conn.execute(
+                    "UPDATE orders SET chargebacks = CAST(CAST(chargebacks AS REAL) + ? AS TEXT), net = CAST(CAST(net AS REAL) - ? AS TEXT) WHERE order_id = ?",
+                    (amount, amount, order_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE orders SET refunds = CAST(CAST(refunds AS REAL) + ? AS TEXT), net = CAST(CAST(net AS REAL) - ? AS TEXT) WHERE order_id = ?",
+                    (amount, amount, order_id),
+                )
+            conn.commit()
+            return True
+
+    applied = await anyio.to_thread.run_sync(_apply)
 
     # Broadcast
     from main import manager
@@ -106,11 +133,11 @@ async def record_refund(request: Request):
         "ts": now,
     }))
 
-    return {"ok": True, "refund_id": refund_id, "order_id": order_id, "amount": amount}
+    return {"ok": True, "refund_id": refund_id, "order_id": order_id, "amount": amount, "applied": applied}
 
 
 @router.get("/summary")
-async def refund_summary(
+def refund_summary(
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
 ):
@@ -152,16 +179,26 @@ async def refund_summary(
         total_cb = float(os_data.get("total_chargebacks", 0) or 0)
         total_orders = int(os_data.get("total_orders", 0) or 0)
 
-        # By source attribution
+        # By-source attribution: credit each refund to exactly ONE touchpoint
+        # (the customer's last touch) instead of fanning out over every
+        # touchpoint the customer ever had (which multiplied the refund amount
+        # by the touchpoint count).
         by_source = db_query(db_path, f"""
-            SELECT t.platform as source,
-                   COUNT(DISTINCT r.order_id) as refund_count,
-                   SUM(CAST(r.amount AS REAL)) as refund_amount
-            FROM refund_log r
-            LEFT JOIN orders o ON r.order_id = o.order_id
-            LEFT JOIN touchpoints t ON o.customer_key = t.customer_key
-            WHERE t.platform != '' {where}
-            GROUP BY t.platform
+            SELECT source,
+                   COUNT(*) as refund_count,
+                   SUM(amount) as refund_amount
+            FROM (
+                SELECT r.order_id,
+                       CAST(r.amount AS REAL) as amount,
+                       (SELECT t.platform FROM touchpoints t
+                          WHERE t.customer_key = o.customer_key AND t.platform != ''
+                          ORDER BY t.ts DESC LIMIT 1) as source
+                FROM refund_log r
+                LEFT JOIN orders o ON r.order_id = o.order_id
+                WHERE 1=1 {where}
+            )
+            WHERE source IS NOT NULL AND source != ''
+            GROUP BY source
         """, params)
 
         return {
@@ -174,12 +211,12 @@ async def refund_summary(
             "by_source": by_source,
         }
     except Exception:
-        return {"totals": {}, "refund_rate": 0, "chargeback_rate": 0, "total_orders": 0,
-                "total_revenue": 0, "net_after_refunds": 0, "by_source": []}
+        logger.exception("refund_summary failed")
+        raise HTTPException(status_code=500, detail="refund summary failed")
 
 
 @router.get("/list")
-async def refund_list(
+def refund_list(
     limit: int = Query(default=50),
     order_id: str = Query(default=""),
 ):
@@ -198,6 +235,7 @@ async def refund_list(
     try:
         rows = db_query(db_path, sql, params)
     except Exception:
-        rows = []
+        logger.exception("refund_list failed")
+        raise HTTPException(status_code=500, detail="refund list failed")
 
     return {"rows": rows, "count": len(rows)}

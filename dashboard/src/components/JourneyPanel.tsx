@@ -379,7 +379,7 @@ export default function JourneyPanel({ startDate = "", endDate = "" }: JourneyPa
         ) : (
           <div className="space-y-3">
             {paths.map((p: any, i: number) => {
-              const steps = String(p.path || "").split(" â†’ ");
+              const steps = String(p.path || "").split(" → ");
               return (
                 <div key={i} className="flex items-center gap-3 p-3 rounded-lg bg-white/[0.02] border border-[var(--card-border)]">
                   <div className="w-6 h-6 rounded-full bg-brand-600/20 text-brand-400 flex items-center justify-center text-[10px] font-bold flex-shrink-0">

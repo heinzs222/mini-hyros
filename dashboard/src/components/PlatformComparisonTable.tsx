@@ -32,6 +32,30 @@ const PLATFORM_STYLES: Record<string, string> = {
 
 function PlatformComparisonTable({ rows, compareRows = [], compareLabel = "" }: Props) {
   const compareByPlatform = new Map(compareRows.map((r) => [r.platform, r]));
+  const currentByPlatform = new Map(rows.map((r) => [r.platform, r]));
+  // Union of platforms across both periods so compare-only platforms still render
+  // (with zeroed current values) instead of being dropped.
+  const mergedRows: PlatformRow[] = Array.from(
+    new Set([...currentByPlatform.keys(), ...compareByPlatform.keys()]),
+  ).map((platform) => {
+    const cur = currentByPlatform.get(platform);
+    if (cur) return cur;
+    const cmp = compareByPlatform.get(platform)!;
+    return {
+      platform,
+      label: cmp.label,
+      clicks: 0,
+      clicks_share: 0,
+      orders: 0,
+      cost: 0,
+      revenue: 0,
+      profit: 0,
+      roas: null,
+      cpa: null,
+      cpc: null,
+      cvr: null,
+    };
+  });
 
   const deltaClass = (delta: number | null | undefined) => {
     if (delta == null) return "text-gray-500";
@@ -75,7 +99,7 @@ function PlatformComparisonTable({ rows, compareRows = [], compareLabel = "" }: 
         )}
       </div>
 
-      {rows.length === 0 ? (
+      {mergedRows.length === 0 ? (
         <div className="px-4 py-10 text-center text-sm text-gray-600">
           No platform data yet. Traffic will appear after the first tracked sessions.
         </div>
@@ -95,7 +119,7 @@ function PlatformComparisonTable({ rows, compareRows = [], compareLabel = "" }: 
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
+              {mergedRows.map((r) => {
                 const cmp = compareByPlatform.get(r.platform);
                 const revenueDelta = moneyDelta(r.revenue, cmp?.revenue);
                 const roasDelta = ratioDelta(r.roas, cmp?.roas);

@@ -9,12 +9,14 @@ Endpoints:
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Request, Query
+import anyio
+from fastapi import APIRouter, Request, Query, HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
@@ -89,29 +91,34 @@ async def track_email_sms(request: Request):
 
     event_id = _sha256(f"es|{customer_key}|{channel}|{event_type}|{sequence_name}|{step_number}|{now}")
 
-    _ensure_email_sms_table(db_path)
-
-    with connect(db_path) as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO email_sms_events (id, ts, customer_key, channel, event_type, sequence_name, step_number, subject_line, link_url, source) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (event_id, now, customer_key, channel, event_type, sequence_name, step_number, subject_line, link_url, source),
-        )
-
-        # If it's a click, also insert as a touchpoint for attribution
-        if event_type in ("clicked", "click"):
-            session_id = _sha256(f"es_session|{customer_key}|{now}")
+    # This handler must stay async (it awaits request.json() and schedules a
+    # broadcast on the loop), so the blocking SQLite writes are offloaded to a
+    # worker thread rather than stalling the event loop.
+    def _persist() -> None:
+        _ensure_email_sms_table(db_path)
+        with connect(db_path) as conn:
             conn.execute(
-                """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (now, channel, "", sequence_name, "", "", "", "", "", "", customer_key, session_id),
-            )
-            conn.execute(
-                """INSERT INTO sessions (session_id, ts, utm_source, utm_medium, utm_campaign, utm_content, utm_term, referrer, landing_page, device, gclid, fbclid, ttclid, customer_key)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (session_id, now, source or "email", channel, sequence_name, subject_line, "", "", link_url, "", "", "", "", customer_key),
+                "INSERT OR IGNORE INTO email_sms_events (id, ts, customer_key, channel, event_type, sequence_name, step_number, subject_line, link_url, source) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (event_id, now, customer_key, channel, event_type, sequence_name, step_number, subject_line, link_url, source),
             )
 
-        conn.commit()
+            # If it's a click, also insert as a touchpoint for attribution
+            if event_type in ("clicked", "click"):
+                session_id = _sha256(f"es_session|{customer_key}|{now}")
+                conn.execute(
+                    """INSERT INTO touchpoints (ts, channel, platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid, customer_key, session_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (now, channel, "", sequence_name, "", "", "", "", "", "", customer_key, session_id),
+                )
+                conn.execute(
+                    """INSERT INTO sessions (session_id, ts, utm_source, utm_medium, utm_campaign, utm_content, utm_term, referrer, landing_page, device, gclid, fbclid, ttclid, customer_key)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (session_id, now, source or "email", channel, sequence_name, subject_line, "", "", link_url, "", "", "", "", customer_key),
+                )
+
+            conn.commit()
+
+    await anyio.to_thread.run_sync(_persist)
 
     # Broadcast
     from main import manager
@@ -129,7 +136,7 @@ async def track_email_sms(request: Request):
 
 
 @router.get("/attribution")
-async def email_sms_attribution(
+def email_sms_attribution(
     channel: str = Query(default="", description="email, sms, or empty for both"),
 ):
     """Attribution by email/SMS sequence — which sequences drove the most revenue."""
@@ -185,11 +192,12 @@ async def email_sms_attribution(
 
         return {"rows": rows}
     except Exception:
-        return {"rows": []}
+        logging.exception("email_sms_attribution failed")
+        raise HTTPException(500, "Failed to compute email/SMS attribution")
 
 
 @router.get("/summary")
-async def email_sms_summary():
+def email_sms_summary():
     """Overall email/SMS performance."""
     db_path = _db()
     _ensure_email_sms_table(db_path)
@@ -209,4 +217,5 @@ async def email_sms_summary():
 
         return {"channels": stats}
     except Exception:
-        return {"channels": []}
+        logging.exception("email_sms_summary failed")
+        raise HTTPException(500, "Failed to compute email/SMS summary")

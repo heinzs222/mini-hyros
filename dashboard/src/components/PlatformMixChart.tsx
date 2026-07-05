@@ -30,18 +30,23 @@ interface Props {
 }
 
 function buildRows(rows: PlatformRow[], compareRows: PlatformRow[]) {
+  const currentByPlatform = new Map(rows.map((r) => [r.platform, r]));
   const compareByPlatform = new Map(compareRows.map((r) => [r.platform, r]));
+  // Union of platforms across both periods so compare-only platforms still render
+  // (with zeroed current values) instead of being silently dropped.
+  const platforms = Array.from(new Set([...currentByPlatform.keys(), ...compareByPlatform.keys()]));
 
-  return rows.map((row) => {
-    const cmp = compareByPlatform.get(row.platform);
+  return platforms.map((platform) => {
+    const row = currentByPlatform.get(platform);
+    const cmp = compareByPlatform.get(platform);
     return {
-      platform: row.label,
-      revenue: row.revenue,
-      cost: row.cost,
-      profit: row.profit,
+      platform: row?.label ?? cmp?.label ?? platform,
+      revenue: row?.revenue ?? 0,
+      cost: row?.cost ?? 0,
+      profit: row?.profit ?? 0,
       compare_revenue: cmp?.revenue ?? null,
       compare_profit: cmp?.profit ?? null,
-      revenue_share: row.revenue_share,
+      revenue_share: row?.revenue_share ?? 0,
     };
   });
 }

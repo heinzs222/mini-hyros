@@ -3,7 +3,7 @@ function defaultApiBase(): string {
   if (typeof window !== "undefined") {
     const host = window.location.hostname;
     if (host !== "localhost" && host !== "127.0.0.1") {
-      return "https://mini-hyros.onrender.com";
+      return "https://mini-hyros-api.onrender.com";
     }
   }
   return "http://localhost:8000";
@@ -34,6 +34,20 @@ export function setAuthToken(token: string) {
 export function clearAuthToken() {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+/**
+ * Error thrown for non-OK HTTP responses. Carries the numeric HTTP `status`
+ * so callers can distinguish a real 401/403 (redirect to login) from a
+ * network error / timeout (backend cold start — retry, do NOT redirect).
+ */
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
 }
 
 export async function apiFetch(input: string, init: RequestInit = {}, signal?: AbortSignal) {
@@ -80,7 +94,7 @@ export async function loginWithPassword(username: string, password: string) {
 
 export async function fetchAuthMe() {
   const res = await apiFetch(`${API_BASE}/api/auth/me`);
-  if (!res.ok) throw new Error(`Auth status failed: ${res.status}`);
+  if (!res.ok) throw new ApiError(`Auth status failed: ${res.status}`, res.status);
   return res.json();
 }
 
@@ -109,7 +123,7 @@ export async function fetchReport(params: {
   if (params.conversion_type) sp.set("conversion_type", params.conversion_type);
   if (params.use_click_date) sp.set("use_click_date", "true");
   const res = await apiFetch(`${API_BASE}/api/report?${sp.toString()}`, {}, signal);
-  if (!res.ok) throw new Error(`Report fetch failed: ${res.status}`);
+  if (!res.ok) throw new ApiError(`Report fetch failed: ${res.status}`, res.status);
   return res.json();
 }
 
@@ -461,35 +475,75 @@ export interface ManagedWebSocket {
   close: () => void;
 }
 
-export function createWebSocket(onMessage: (data: any) => void): ManagedWebSocket | null {
+/** Connection lifecycle surfaced to consumers via the optional status callback. */
+export type WebSocketStatus = "connecting" | "open" | "reconnecting" | "disconnected";
+
+/** Auth-rejection close code: the server refuses the token — do NOT reconnect. */
+const WS_AUTH_CLOSE_CODE = 4401;
+const WS_RECONNECT_INITIAL_MS = 3000;
+const WS_RECONNECT_MAX_MS = 60000;
+
+export function createWebSocket(
+  onMessage: (data: any) => void,
+  onStatusChange?: (status: WebSocketStatus) => void,
+): ManagedWebSocket | null {
   if (typeof window === "undefined") return null;
 
   // Shared state across reconnect attempts so an intentional close stops
-  // the auto-reconnect loop and any pending reconnect timeout.
-  const state = { manualClose: false, reconnectTimer: null as ReturnType<typeof setTimeout> | null };
+  // the auto-reconnect loop and any pending reconnect timeout. `delay` grows
+  // exponentially and resets to the initial value on a successful open.
+  const state = {
+    manualClose: false,
+    reconnectTimer: null as ReturnType<typeof setTimeout> | null,
+    delay: WS_RECONNECT_INITIAL_MS,
+  };
   let currentSocket: WebSocket;
+
+  const setStatus = (status: WebSocketStatus) => {
+    try {
+      onStatusChange?.(status);
+    } catch {}
+  };
 
   const connect = (): WebSocket => {
     const token = readAuthToken();
     const wsBase = API_BASE.replace("http", "ws") + "/ws";
     const wsUrl = token ? `${wsBase}?token=${encodeURIComponent(token)}` : wsBase;
     const ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      // A successful connection resets the backoff window.
+      state.delay = WS_RECONNECT_INITIAL_MS;
+      setStatus("open");
+    };
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         onMessage(data);
       } catch {}
     };
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (state.manualClose) return;
+      // Auth rejection (bad/expired token): stop reconnecting entirely and
+      // surface a disconnected state instead of hammering the server.
+      if (event.code === WS_AUTH_CLOSE_CODE) {
+        setStatus("disconnected");
+        return;
+      }
+      // Exponential backoff (start 3s, double to a 60s cap) with jitter so
+      // reconnects from many tabs don't stampede the backend at once.
+      const base = Math.min(state.delay, WS_RECONNECT_MAX_MS);
+      const wait = base + Math.random() * base * 0.25;
+      state.delay = Math.min(base * 2, WS_RECONNECT_MAX_MS);
+      setStatus("reconnecting");
       state.reconnectTimer = setTimeout(() => {
         if (state.manualClose) return;
         currentSocket = connect();
-      }, 3000);
+      }, wait);
     };
     return ws;
   };
 
+  setStatus("connecting");
   currentSocket = connect();
 
   return {
@@ -507,4 +561,46 @@ export function createWebSocket(onMessage: (data: any) => void): ManagedWebSocke
       } catch {}
     },
   };
+}
+
+// ── Campaign Settings ─────────────────────────────────────────────────────────
+export interface CampaignSetting {
+  platform: string;
+  campaign_id: string;
+  name: string;
+  tracked: boolean;
+  lifetime_spend: number;
+  last_seen: string;
+}
+
+export interface CampaignTrackingItem {
+  platform: string;
+  campaign_id: string;
+  tracked: boolean;
+}
+
+export async function fetchCampaigns(signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/campaigns`, {}, signal);
+  if (!res.ok) throw new ApiError(`Campaigns fetch failed: ${res.status}`, res.status);
+  return res.json();
+}
+
+export async function setCampaignTracking(platform: string, campaign_id: string, tracked: boolean) {
+  const res = await apiFetch(`${API_BASE}/api/campaigns/tracking`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ platform, campaign_id, tracked }),
+  });
+  if (!res.ok) throw new ApiError(`Campaign tracking update failed: ${res.status}`, res.status);
+  return res.json();
+}
+
+export async function setCampaignTrackingBatch(items: CampaignTrackingItem[]) {
+  const res = await apiFetch(`${API_BASE}/api/campaigns/tracking/batch`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) throw new ApiError(`Campaign tracking batch update failed: ${res.status}`, res.status);
+  return res.json();
 }

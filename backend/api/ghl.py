@@ -14,7 +14,9 @@ Webhook URL:  POST /api/webhooks/ghl
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -29,7 +31,20 @@ from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows as db_query
 
 router = APIRouter()
+logger = logging.getLogger("ghl")
 UTC = timezone.utc
+
+
+def _mask_pii(value: str) -> str:
+    """Mask an email/phone for debug output (keep first char + domain hint)."""
+    s = str(value or "")
+    if "@" in s:
+        local, _, domain = s.partition("@")
+        return (local[:1] + "***@" + domain) if local else ("***@" + domain)
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) >= 4:
+        return "***" + digits[-4:]
+    return "***" if s else ""
 
 
 def _ensure_webhook_log_table(db_path: str) -> None:
@@ -580,6 +595,22 @@ def _infer_event_type(payload: dict) -> str:
 async def ghl_webhook(request: Request):
     """Master GHL webhook endpoint. Handles all event types from GoHighLevel."""
     body = await request.body()
+
+    # Optional shared-secret verification. When GHL_WEBHOOK_SECRET is set, require
+    # a matching ?key= query param or x-ghl-secret / x-wh-secret header.
+    secret = os.environ.get("GHL_WEBHOOK_SECRET", "")
+    if secret:
+        provided = (
+            request.query_params.get("key")
+            or request.headers.get("x-ghl-secret")
+            or request.headers.get("x-wh-secret")
+            or ""
+        )
+        if not hmac.compare_digest(str(provided), secret):
+            raise HTTPException(status_code=401, detail="Invalid GHL webhook secret")
+    else:
+        logger.warning("GHL_WEBHOOK_SECRET not set — accepting GHL webhook without verification")
+
     payload = json.loads(body) if body else {}
 
     # GHL sends event type in different fields depending on version
@@ -654,7 +685,9 @@ async def ghl_webhook(request: Request):
             payload.get("page_name") or
             "GHL Form"
         )
-        conv_id = _sha256(f"ghl_form|{contact_id}|{now}")
+        # Stable dedup key (no receive-time) shared with the GHL API sync, so a
+        # webhook retry / the sync covering the same contact don't double-count.
+        conv_id = _sha256(f"ghl_lead|{contact_id}")
         session_id = identity["session_id"] or _sha256(f"ghl_session|{contact_id}|{now}")
 
         _backfill_customer_key(db_path, customer_key, visitor_id=visitor_id, session_id=session_id)
@@ -701,10 +734,11 @@ async def ghl_webhook(request: Request):
 
     # ── Appointment / booking (Booking conversion) ───────────────────────
     if event_type in GHL_BOOKING_EVENTS:
+        _cal = payload.get("calendar")
         calendar_name = str(
             payload.get("calendar_name") or
             payload.get("calendarName") or
-            payload.get("calendar", {}).get("name", "") or
+            (_cal.get("name", "") if isinstance(_cal, dict) else (_cal or "")) or
             "GHL Booking"
         )
         appointment_time = str(
@@ -836,13 +870,23 @@ async def ghl_webhook(request: Request):
         if value <= 0:
             return {"ok": True, "skipped": True, "reason": "zero_value"}
 
+        # Only accept an EXPLICIT payment/invoice/transaction id as the dedup key.
+        # payload["id"] is usually the CONTACT id in GHL workflow webhooks, which
+        # would collapse every repeat purchase from a contact into one order — so
+        # it is NOT used. When no explicit id exists, key on stable payment content
+        # (contact + amount + payment date), never the receive time.
+        _payment_date = str(
+            payload.get("payment_date") or payload.get("paymentDate") or
+            payload.get("date") or payload.get("createdAt") or ""
+        )
         payment_id = str(
             payload.get("payment_id") or
             payload.get("paymentId") or
             payload.get("invoice_id") or
             payload.get("invoiceId") or
-            payload.get("id") or
-            _sha256(f"ghl_pay|{contact_id}|{now}")
+            payload.get("transaction_id") or
+            payload.get("transactionId") or
+            _sha256(f"ghl_pay|{contact_id}|{value}|{_payment_date}")
         )
         order_id = _sha256(f"ghl_pay|{payment_id}")
         session_id = identity["session_id"] or _sha256(f"ghl_psession|{contact_id}|{now}")
@@ -943,13 +987,43 @@ async def ghl_webhook(request: Request):
     return result
 
 
+def _redact_webhook_row(row: dict) -> dict:
+    """Mask emails/phones inside the stored raw payload before returning it."""
+    out = dict(row)
+    raw = out.get("payload")
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return out
+    if isinstance(data, dict):
+        for k in list(data.keys()):
+            lk = k.lower()
+            if "email" in lk or "phone" in lk:
+                data[k] = _mask_pii(str(data[k]))
+        out["payload"] = json.dumps(data)
+    return out
+
+
 @router.get("/ghl-debug")
-async def ghl_debug():
-    """View recent GHL webhook payloads for debugging."""
+async def ghl_debug(request: Request):
+    """View recent GHL webhook payloads for debugging (auth-gated, PII redacted)."""
+    # This route lives under the auth-exempt /api/webhooks prefix, so enforce the
+    # dashboard auth token inside the handler.
+    try:
+        from api.auth import is_auth_enabled, validate_token, extract_request_token
+        if is_auth_enabled() and not validate_token(extract_request_token(request)):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    except HTTPException:
+        raise
+    except Exception:
+        # If auth module can't be imported, fail closed only when auth is enabled.
+        if os.environ.get("AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes"):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
     db_path = _db()
     _ensure_webhook_log_table(db_path)
     try:
         rows = db_query(db_path, "SELECT * FROM webhook_log WHERE source = 'ghl' ORDER BY ts DESC LIMIT 20")
-        return {"rows": rows, "count": len(rows)}
+        return {"rows": [_redact_webhook_row(r) for r in rows], "count": len(rows)}
     except Exception as e:
         return {"rows": [], "error": str(e)}

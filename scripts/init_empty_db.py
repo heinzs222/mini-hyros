@@ -75,10 +75,13 @@ def init_db(db_path: str) -> None:
         conn.execute("CREATE INDEX idx_orders_session_id ON orders(session_id);")
         conn.execute("CREATE INDEX idx_orders_visitor_id ON orders(visitor_id);")
         conn.execute("CREATE INDEX idx_orders_ts ON orders(ts);")
-        conn.execute("CREATE INDEX idx_orders_order_id ON orders(order_id);")
+        # UNIQUE so the INSERT OR IGNORE idempotency the ingestion layer relies on
+        # actually collapses duplicate webhook/sync deliveries (was a silent no-op).
+        conn.execute("CREATE UNIQUE INDEX uq_orders_order_id ON orders(order_id);")
         conn.execute("CREATE INDEX idx_conversions_customer_key ON conversions(customer_key);")
         conn.execute("CREATE INDEX idx_conversions_ts ON conversions(ts);")
         conn.execute("CREATE INDEX idx_conversions_order_id ON conversions(order_id);")
+        conn.execute("CREATE UNIQUE INDEX uq_conversions_conversion_id ON conversions(conversion_id);")
         conn.execute("CREATE INDEX idx_spend_date ON spend(date);")
         conn.execute("CREATE INDEX idx_spend_platform_date ON spend(platform, date);")
 
@@ -108,6 +111,16 @@ def init_db(db_path: str) -> None:
             views_75 TEXT, views_100 TEXT, avg_watch_time_sec TEXT,
             thumb_stop_rate TEXT, hook_rate TEXT, hold_rate TEXT,
             ctr TEXT, cost TEXT, cost_per_view TEXT
+        );""")
+
+        # Per-campaign tracked/excluded flag (absence of a row == tracked).
+        conn.execute("""CREATE TABLE IF NOT EXISTS campaign_settings (
+            platform    TEXT NOT NULL,
+            campaign_id TEXT NOT NULL,
+            tracked     INTEGER NOT NULL DEFAULT 1,
+            note        TEXT DEFAULT '',
+            updated_at  TEXT,
+            PRIMARY KEY (platform, campaign_id)
         );""")
 
         conn.commit()

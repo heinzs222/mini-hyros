@@ -62,11 +62,11 @@ interface Props {
   showCompareBanner?: boolean;
 }
 
-function deltaColor(delta: number | null | undefined): string {
-  if (delta == null) return "text-gray-500";
-  if (delta > 0) return "text-emerald-400";
-  if (delta < 0) return "text-red-400";
-  return "text-gray-500";
+function deltaColor(delta: number | null | undefined, goodWhenUp = true): string {
+  if (delta == null || delta === 0) return "text-gray-500";
+  // For cost-like metrics (goodWhenUp=false) a higher value is bad, so invert.
+  const good = goodWhenUp ? delta > 0 : delta < 0;
+  return good ? "text-emerald-400" : "text-red-400";
 }
 
 function moneyDelta(current: number | null | undefined, previous: number | null | undefined): string | undefined {
@@ -219,7 +219,7 @@ function SummaryCards({ totals, compareTotals, compareLabel, showCompareBanner =
           value={formatMoney(totals.cost)}
           sub={`CPC: ${formatMoney(totals.cpc)} | CPA: ${formatMoney(totals.cpa ?? totals.cac)}`}
           delta={moneyDelta(totals.cost, compareTotals?.cost)}
-          deltaClass={deltaColor(Number(totals.cost ?? 0) - Number(compareTotals?.cost ?? 0))}
+          deltaClass={deltaColor(Number(totals.cost ?? 0) - Number(compareTotals?.cost ?? 0), false)}
           icon={<DollarSign size={14} />}
         />
         <Card

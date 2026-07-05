@@ -8,7 +8,13 @@ from datetime import timedelta
 from typing import Any
 
 from attributionops.db import query
-from attributionops.util import exp_decay_weight, parse_iso_ts, to_float
+from attributionops.tools.campaign_filter import excluded_campaign_keys, is_excluded
+from attributionops.util import (
+    exp_decay_weight,
+    normalize_campaign_key,
+    to_float,
+    try_parse_iso_ts,
+)
 
 
 @dataclass(frozen=True)
@@ -25,16 +31,45 @@ class AttributedTouch:
 def _build_account_map(spend_rows: list[dict[str, Any]]) -> dict[tuple[str, str, str, str], str]:
     mapping: dict[tuple[str, str, str, str], str] = {}
     for r in spend_rows:
+        # Normalize the campaign/adset/ad segments so spend's numeric/braced ids
+        # and touchpoints' slug/display variants resolve to the same account.
         key = (
             str(r.get("platform") or ""),
-            str(r.get("campaign_id") or ""),
-            str(r.get("adset_id") or ""),
-            str(r.get("ad_id") or ""),
+            normalize_campaign_key(r.get("campaign_id")),
+            normalize_campaign_key(r.get("adset_id")),
+            normalize_campaign_key(r.get("ad_id")),
         )
         acct = str(r.get("account_id") or "")
         if key not in mapping and acct:
             mapping[key] = acct
     return mapping
+
+
+def _build_excluded(db_path: str) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """Return (raw, normalized) excluded-campaign key sets.
+
+    ``campaign_settings`` stores the campaign_id exactly as it appears in the
+    spend feed (typically the numeric platform id). Touchpoints, however, carry
+    slug/braced/display variants, so we also keep a normalized set and check both
+    to catch excluded campaigns regardless of which representation a touchpoint
+    stored.
+    """
+    raw = excluded_campaign_keys(db_path)
+    norm = {(p, normalize_campaign_key(c)) for (p, c) in raw}
+    return raw, norm
+
+
+def _campaign_excluded(
+    excluded_raw: set[tuple[str, str]],
+    excluded_norm: set[tuple[str, str]],
+    platform: str | None,
+    campaign_id: str | None,
+) -> bool:
+    if not excluded_raw:
+        return False
+    if is_excluded(excluded_raw, platform, campaign_id):
+        return True
+    return (str(platform or "").lower(), normalize_campaign_key(campaign_id)) in excluded_norm
 
 
 def _weights_for_model(model: str, touchpoints: list[dict[str, Any]], order_ts, *, half_life_days: float = 7.0) -> list[float]:
@@ -54,7 +89,11 @@ def _weights_for_model(model: str, touchpoints: list[dict[str, Any]], order_ts, 
     if model in ("time_decay", "timedecay"):
         weights = []
         for tp in touchpoints:
-            tp_ts = tp.get("_ts") or parse_iso_ts(str(tp["ts"]))
+            tp_ts = tp.get("_ts") or try_parse_iso_ts(str(tp.get("ts") or ""))
+            if tp_ts is None:
+                # Unparseable ts: treat as zero-delay rather than crash.
+                weights.append(exp_decay_weight(0.0, half_life_days=half_life_days))
+                continue
             delta_days = (order_ts - tp_ts).total_seconds() / 86400.0
             weights.append(exp_decay_weight(delta_days, half_life_days=half_life_days))
         s = sum(weights) or 1.0
@@ -67,7 +106,10 @@ def _weights_for_model(model: str, touchpoints: list[dict[str, Any]], order_ts, 
             each = 0.2 / middle
             for i in range(1, n - 1):
                 weights[i] = each
-        return weights
+        # Normalize so the weights always sum to 1.0 (the raw form sums to 0.8
+        # for n==2, silently dropping 20% of every 2-touch order's value).
+        s = sum(weights) or 1.0
+        return [w / s for w in weights]
 
     raise ValueError("model must be one of: last_click, first_click, linear, time_decay, data_driven_proxy")
 
@@ -159,6 +201,8 @@ def _load_orders_and_touchpoints(
     start_d: date,
     lookback_days: int,
     orders_end_d: date,
+    excluded_raw: set[tuple[str, str]] | None = None,
+    excluded_norm: set[tuple[str, str]] | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     dict[str, list[dict[str, Any]]],
@@ -280,10 +324,23 @@ def _load_orders_and_touchpoints(
         {"win_start": win_start, "end_excl": orders_end_excl},
     ).rows
 
+    excluded_raw = excluded_raw or set()
+    excluded_norm = excluded_norm or set()
+
     tps_by_identity: dict[str, list[dict[str, Any]]] = defaultdict(list)
     tps_by_exact_ts: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    skipped_bad_ts = 0
     for tp in touchpoints:
-        tp["_ts"] = parse_iso_ts(str(tp["ts"]))  # parse exactly once
+        parsed = try_parse_iso_ts(str(tp.get("ts") or ""))
+        if parsed is None:
+            # One unparseable touchpoint ts must never crash the whole report.
+            skipped_bad_ts += 1
+            continue
+        # Read-time exclusion: touchpoints for a tracked=0 campaign are dropped so
+        # that campaign's revenue becomes unattributed rather than attributed.
+        if _campaign_excluded(excluded_raw, excluded_norm, tp.get("platform"), tp.get("campaign_id")):
+            continue
+        tp["_ts"] = parsed  # parse exactly once
         tps_by_exact_ts[str(tp.get("ts") or "")].append(tp)
         for key in _identity_keys(tp):
             tps_by_identity[key].append(tp)
@@ -304,12 +361,21 @@ def _attributed(
     *,
     model: str,
     lookback: timedelta,
+    excluded_raw: set[tuple[str, str]] | None = None,
+    excluded_norm: set[tuple[str, str]] | None = None,
 ) -> tuple[list[tuple[dict[str, Any], datetime, list[dict[str, Any]], list[float]]], int]:
     """Single pass: for each attributable order return (order, order_ts, window_tps, weights)."""
+    excluded_raw = excluded_raw or set()
+    excluded_norm = excluded_norm or set()
     contributions: list[tuple[dict[str, Any], datetime, list[dict[str, Any]], list[float]]] = []
     unattributed = 0
     for o in orders:
-        order_ts = parse_iso_ts(str(o["ts"]))
+        order_ts = try_parse_iso_ts(str(o.get("ts") or ""))
+        if order_ts is None:
+            # Unparseable order ts: cannot window it — leave unattributed instead
+            # of crashing the whole report.
+            unattributed += 1
+            continue
         window_start = order_ts - lookback
         window_tps: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -332,41 +398,55 @@ def _attributed(
             for tp in tps_by_identity[key][lo:hi]:
                 add_touch(tp)
 
-        # Legacy rows did not store session_id on orders. Pixel purchases write
-        # a touchpoint with the exact same timestamp; use that to recover the
-        # browser session, then include earlier source touches from that session.
+        # Legacy rows did not store session_id on orders. Pixel purchases write a
+        # touchpoint with the exact same timestamp as the order. Accept such a
+        # touch when the order shares an identity with it, OR when the order is
+        # fully anonymous (no session/visitor/customer at all) — the legacy pixel
+        # case where the exact-timestamp pairing is the only available signal.
+        # When we recover a touch this way, only expand within its SESSION window
+        # (a single browsing session), never a stranger's customer/visitor history.
         if not window_tps:
+            order_identities = set(_identity_keys(o))
             exact_timestamps = [str(o.get("ts") or "")]
-            conversion_ts = str(o.get("_conversion_ts") or "")
-            if conversion_ts and conversion_ts not in exact_timestamps:
-                exact_timestamps.append(conversion_ts)
+            conversion_ts_raw = str(o.get("_conversion_ts") or "")
+            if conversion_ts_raw and conversion_ts_raw not in exact_timestamps:
+                exact_timestamps.append(conversion_ts_raw)
             for exact_ts in exact_timestamps:
                 for exact_tp in tps_by_exact_ts.get(exact_ts, []):
+                    tp_identities = set(_identity_keys(exact_tp))
+                    # If the order has its own identity, require overlap (prevents
+                    # grabbing an unrelated visitor's same-second touch).
+                    if order_identities and not order_identities.intersection(tp_identities):
+                        continue
                     add_touch(exact_tp)
-                    for key in _identity_keys(exact_tp):
-                        dts = dts_by_identity.get(key)
-                        if not dts:
-                            continue
+                    # Recover earlier touches in the SAME session only.
+                    sess = str(exact_tp.get("session_id") or "").strip()
+                    skey = f"session:{sess}" if sess else ""
+                    dts = dts_by_identity.get(skey) if skey else None
+                    if dts:
                         lo = bisect_left(dts, window_start)
                         hi = bisect_right(dts, order_ts)
-                        for tp in tps_by_identity[key][lo:hi]:
+                        for tp in tps_by_identity[skey][lo:hi]:
                             add_touch(tp)
 
         if not window_tps and str(o.get("_conversion_ts") or ""):
-            conversion_ts = parse_iso_ts(str(o.get("_conversion_ts") or ""))
-            conversion_window_start = conversion_ts - lookback
-            for key in _identity_keys(o):
-                dts = dts_by_identity.get(key)
-                if not dts:
-                    continue
-                lo = bisect_left(dts, conversion_window_start)
-                hi = bisect_right(dts, conversion_ts)
-                for tp in tps_by_identity[key][lo:hi]:
-                    add_touch(tp)
+            conversion_ts = try_parse_iso_ts(str(o.get("_conversion_ts") or ""))
+            if conversion_ts is not None:
+                conversion_window_start = conversion_ts - lookback
+                for key in _identity_keys(o):
+                    dts = dts_by_identity.get(key)
+                    if not dts:
+                        continue
+                    lo = bisect_left(dts, conversion_window_start)
+                    hi = bisect_right(dts, conversion_ts)
+                    for tp in tps_by_identity[key][lo:hi]:
+                        add_touch(tp)
 
         if not window_tps:
             pseudo = _touch_from_order(o, order_ts)
-            if pseudo is not None:
+            if pseudo is not None and not _campaign_excluded(
+                excluded_raw, excluded_norm, pseudo.get("platform"), pseudo.get("campaign_id")
+            ):
                 add_touch(pseudo)
 
         if not window_tps:
@@ -403,7 +483,17 @@ def _aggregate_dim_rows(
             creative_id = str(tp.get("creative_id") or "")
             channel = str(tp.get("channel") or "")
 
-            account_id = account_map.get((platform, campaign_id, adset_id, ad_id), "")
+            # Normalize the join segments the same way _build_account_map did so
+            # slug/braced/numeric campaign-id variants resolve to their account.
+            account_id = account_map.get(
+                (
+                    platform,
+                    normalize_campaign_key(campaign_id),
+                    normalize_campaign_key(adset_id),
+                    normalize_campaign_key(ad_id),
+                ),
+                "",
+            )
 
             if date_basis == "click":
                 tp_d = tp["_ts"].date()
@@ -520,10 +610,25 @@ def attribution_run(
     value_type: str,
     date_basis: str = "conversion",
 ) -> dict[str, object]:
-    if conversion_type.lower() != "purchase":
-        raise ValueError("dummy dataset only supports conversion_type=Purchase")
-
     date_basis = _normalize_basis(date_basis)
+    if conversion_type.lower() != "purchase":
+        # Non-purchase conversions are unsupported here; return empty rows rather
+        # than raising (a raise would 500 the whole report endpoint).
+        return {
+            "model": model,
+            "start_date": start_date,
+            "end_date": end_date,
+            "lookback_days": lookback_days,
+            "date_basis": date_basis,
+            "conversion_type": conversion_type,
+            "value_type": value_type,
+            "rows": [],
+            "unattributed_orders": 0,
+            "notes": [
+                f"conversion_type={conversion_type!r} is not supported; only 'purchase' is attributed. Returning empty rows.",
+            ],
+        }
+
     start_d = date.fromisoformat(start_date)
     end_d = date.fromisoformat(end_date)
     orders_end_d = end_d if date_basis == "conversion" else (end_d + timedelta(days=lookback_days))
@@ -533,12 +638,15 @@ def attribution_run(
         "SELECT DISTINCT platform, account_id, campaign_id, adset_id, ad_id FROM spend;",
     ).rows
     account_map = _build_account_map(spend_rows)
+    excluded_raw, excluded_norm = _build_excluded(db_path)
 
     orders, tps_by_identity, dts_by_identity, tps_by_exact_ts = _load_orders_and_touchpoints(
-        db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d
+        db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d,
+        excluded_raw=excluded_raw, excluded_norm=excluded_norm,
     )
     contributions, unattributed_orders = _attributed(
-        orders, tps_by_identity, dts_by_identity, tps_by_exact_ts, model=model, lookback=timedelta(days=lookback_days)
+        orders, tps_by_identity, dts_by_identity, tps_by_exact_ts, model=model,
+        lookback=timedelta(days=lookback_days), excluded_raw=excluded_raw, excluded_norm=excluded_norm,
     )
     out_rows = _aggregate_dim_rows(
         contributions, account_map=account_map, value_type=value_type,
@@ -577,12 +685,15 @@ def attribution_day_totals(
     start_d = date.fromisoformat(start_date)
     end_d = date.fromisoformat(end_date)
     orders_end_d = end_d if date_basis == "conversion" else (end_d + timedelta(days=lookback_days))
+    excluded_raw, excluded_norm = _build_excluded(db_path)
 
     orders, tps_by_identity, dts_by_identity, tps_by_exact_ts = _load_orders_and_touchpoints(
-        db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d
+        db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d,
+        excluded_raw=excluded_raw, excluded_norm=excluded_norm,
     )
     contributions, unattributed_orders = _attributed(
-        orders, tps_by_identity, dts_by_identity, tps_by_exact_ts, model=model, lookback=timedelta(days=lookback_days)
+        orders, tps_by_identity, dts_by_identity, tps_by_exact_ts, model=model,
+        lookback=timedelta(days=lookback_days), excluded_raw=excluded_raw, excluded_norm=excluded_norm,
     )
     rows_out = _aggregate_day_rows(contributions, date_basis=date_basis, start_d=start_d, end_d=end_d)
 
@@ -616,10 +727,24 @@ def attribution_run_and_day_totals(
     separately, but loads orders/touchpoints and runs the windowing pass only
     once — used by the report builder, which needs both.
     """
-    if conversion_type.lower() != "purchase":
-        raise ValueError("dummy dataset only supports conversion_type=Purchase")
-
     date_basis = _normalize_basis(date_basis)
+    if conversion_type.lower() != "purchase":
+        # Return empty (but well-shaped) rows instead of raising so the report
+        # endpoint can render an empty/400 state rather than 500.
+        base = {
+            "model": model,
+            "start_date": start_date,
+            "end_date": end_date,
+            "lookback_days": lookback_days,
+            "date_basis": date_basis,
+            "conversion_type": conversion_type,
+            "unattributed_orders": 0,
+        }
+        return {
+            "run": {**base, "value_type": value_type, "rows": []},
+            "day_totals": {**base, "rows": []},
+        }
+
     start_d = date.fromisoformat(start_date)
     end_d = date.fromisoformat(end_date)
     orders_end_d = end_d if date_basis == "conversion" else (end_d + timedelta(days=lookback_days))
@@ -629,12 +754,15 @@ def attribution_run_and_day_totals(
         "SELECT DISTINCT platform, account_id, campaign_id, adset_id, ad_id FROM spend;",
     ).rows
     account_map = _build_account_map(spend_rows)
+    excluded_raw, excluded_norm = _build_excluded(db_path)
 
     orders, tps_by_identity, dts_by_identity, tps_by_exact_ts = _load_orders_and_touchpoints(
-        db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d
+        db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d,
+        excluded_raw=excluded_raw, excluded_norm=excluded_norm,
     )
     contributions, unattributed_orders = _attributed(
-        orders, tps_by_identity, dts_by_identity, tps_by_exact_ts, model=model, lookback=timedelta(days=lookback_days)
+        orders, tps_by_identity, dts_by_identity, tps_by_exact_ts, model=model,
+        lookback=timedelta(days=lookback_days), excluded_raw=excluded_raw, excluded_norm=excluded_norm,
     )
 
     run_rows = _aggregate_dim_rows(
