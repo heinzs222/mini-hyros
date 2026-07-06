@@ -20,6 +20,10 @@ import pytest
 # to America/Toronto (see attributionops.util.report_timezone).
 os.environ.setdefault("REPORT_TIMEZONE", "UTC")
 
+# Disable the short-lived report cache in tests so each request recomputes
+# against the test's freshly-seeded DB (no cross-test or within-test staleness).
+os.environ.setdefault("REPORT_CACHE_TTL", "0")
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
