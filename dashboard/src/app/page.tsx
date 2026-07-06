@@ -126,6 +126,16 @@ function isAbortError(err: any): boolean {
   return err?.name === "AbortError" || message.includes("aborted");
 }
 
+// The browser used to auto-fire a full 4-platform sync (spend + ad names +
+// Stripe + GHL leads) on load and every 10 minutes. On a modest backend that
+// saturates the single worker and starves the report request, so the dashboard
+// spins forever / "loads sometimes" and the ad-name/lead syncs time out. Syncing
+// is now MANUAL by default (the "Sync" button); set NEXT_PUBLIC_AUTO_SYNC=1 to
+// restore the automatic background sync only if your backend can spare the CPU.
+const AUTO_SYNC =
+  process.env.NEXT_PUBLIC_AUTO_SYNC === "1" ||
+  process.env.NEXT_PUBLIC_AUTO_SYNC === "true";
+
 async function withSyncDeadline<T>(label: string, timeoutMs: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -238,7 +248,7 @@ export default function DashboardPage() {
   // (non-null) object afterward, so the boolean stays stable.
   const reportReady = report !== null;
 
-  const loadReport = useCallback(async () => {
+  const loadReport = useCallback(async (opts?: { fresh?: boolean }) => {
     // Dashboard and the attribution report consume the full report; feature
     // panels such as Journey/Spend/Ad Names load their own data.
     const needsFullReport = section === "dashboard" || (section === "reports" && mainTab === "attribution");
@@ -260,6 +270,9 @@ export default function DashboardPage() {
         model,
         active_tab: activeTab,
         use_click_date: useClickDate,
+        // Bypass the backend's short report cache when the user just pulled fresh
+        // data (manual Sync / CSV import) so the new numbers show immediately.
+        no_cache: opts?.fresh === true,
       };
 
       setLoading(true);
@@ -530,6 +543,10 @@ export default function DashboardPage() {
   // the selected window from a ref so the interval isn't torn down on range
   // changes.
   useEffect(() => {
+    // Off by default — automatic heavy sync from the browser is what starves the
+    // report request. Data still refreshes from the read-only report auto-refresh
+    // below, and the user can pull fresh platform data on demand via "Sync".
+    if (!AUTO_SYNC) return;
     if (!authChecked || !reportReady) return;
 
     const runBackgroundSync = () => {
@@ -565,7 +582,7 @@ export default function DashboardPage() {
       void loadReport();
     };
 
-    refreshTimerRef.current = setInterval(tick, 30_000);
+    refreshTimerRef.current = setInterval(tick, 60_000);
 
     const onVisibilityChange = () => {
       if (typeof document !== "undefined" && !document.hidden) {
@@ -669,7 +686,8 @@ export default function DashboardPage() {
     const syncPromise = syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true });
     await loadReport();
     await syncPromise;
-    await loadReport();
+    // Force-fresh after the sync wrote new data so the cache doesn't serve stale numbers.
+    await loadReport({ fresh: true });
   }, [loadReport, syncSpendData, windowEnd, windowStart]);
 
   if (!authChecked) {
@@ -825,9 +843,9 @@ export default function DashboardPage() {
                 {mainTab === "journey" && <JourneyPanel startDate={windowStart} endDate={windowEnd} />}
                 {mainTab === "cohort" && <CohortPanel />}
                 {mainTab === "capi" && <CapiPanel />}
-                {mainTab === "spend" && <SpendImportPanel startDate={windowStart} endDate={windowEnd} onImported={loadReport} />}
+                {mainTab === "spend" && <SpendImportPanel startDate={windowStart} endDate={windowEnd} onImported={() => loadReport({ fresh: true })} />}
                 {mainTab === "names" && <AdNamesPanel />}
-                {mainTab === "tracking" && <CampaignTrackingPanel onChange={loadReport} />}
+                {mainTab === "tracking" && <CampaignTrackingPanel onChange={() => loadReport({ fresh: true })} />}
               </div>
             )}
             {mainTab === "attribution" && (
@@ -857,7 +875,7 @@ export default function DashboardPage() {
                 onToggleAutoRefresh={() => setAutoRefresh((v) => !v)}
                 syncing={syncingSpend}
                 onSync={handleManualSync}
-                onReload={loadReport}
+                onReload={() => loadReport({ fresh: true })}
               />
             )}
           </div>

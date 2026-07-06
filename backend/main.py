@@ -7,6 +7,8 @@ import logging
 import os
 import subprocess
 import sys
+import threading
+import time
 import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -237,6 +239,41 @@ async def _report_slot():
         yield
 
 
+# ── Short-TTL report cache ───────────────────────────────────────────────────
+# Report assembly is the heaviest per-request work. The dashboard auto-refreshes
+# and multiple open tabs all request the same (start,end,model,tab,...) window,
+# so without a cache the backend rebuilds an identical report over and over,
+# which on a modest instance is exactly what makes the dashboard "load sometimes".
+# A small time-bounded cache serves those repeats instantly; it self-heals within
+# REPORT_CACHE_TTL seconds after new data is synced. Set REPORT_CACHE_TTL=0 to
+# disable.
+_REPORT_CACHE_TTL = float(os.environ.get("REPORT_CACHE_TTL", "45") or 0)
+_report_cache: dict[tuple, tuple[float, Any]] = {}
+_report_cache_lock = threading.Lock()
+
+
+def _report_cache_get(key: tuple):
+    if _REPORT_CACHE_TTL <= 0:
+        return None
+    with _report_cache_lock:
+        hit = _report_cache.get(key)
+        if hit and (time.time() - hit[0]) < _REPORT_CACHE_TTL:
+            return hit[1]
+    return None
+
+
+def _report_cache_put(key: tuple, value: Any) -> None:
+    if _REPORT_CACHE_TTL <= 0:
+        return
+    now = time.time()
+    with _report_cache_lock:
+        _report_cache[key] = (now, value)
+        # Prune expired entries so the cache can't grow unbounded.
+        if len(_report_cache) > 64:
+            for k in [k for k, v in _report_cache.items() if (now - v[0]) >= _REPORT_CACHE_TTL]:
+                _report_cache.pop(k, None)
+
+
 def _default_dates() -> tuple[str, str]:
     # Compute "today" in the reporting timezone, not the server's UTC clock, so
     # the default window matches what the operator sees on their dashboard.
@@ -298,6 +335,7 @@ def get_report(
     active_tab: str = Query(default="traffic_source"),
     conversion_type: str = Query(default="Purchase"),
     use_click_date: bool = Query(default=False),
+    no_cache: bool = Query(default=False),
     _slot: None = Depends(_report_slot),
 ):
     _validate_conversion_type(conversion_type)
@@ -306,6 +344,16 @@ def get_report(
         start_date = s
     if not end_date:
         end_date = e
+
+    cache_key = (
+        _db(), start_date, end_date, model, lookback_days, active_tab,
+        str(conversion_type or "").lower(), bool(use_click_date),
+    )
+    if not no_cache:
+        cached = _report_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
     inputs = ReportInputs(
         report_name="Mini Hyros Report",
         start_date=start_date,
@@ -356,6 +404,7 @@ def get_report(
             row["creative_type"] = creative.get("creative_type", "")
             row["video_id"] = creative.get("video_id", "")
 
+    _report_cache_put(cache_key, report)
     return report
 
 

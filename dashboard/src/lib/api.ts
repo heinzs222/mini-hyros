@@ -113,6 +113,7 @@ export async function fetchReport(params: {
   active_tab?: string;
   conversion_type?: string;
   use_click_date?: boolean;
+  no_cache?: boolean;
 }, signal?: AbortSignal) {
   const sp = new URLSearchParams();
   if (params.start_date) sp.set("start_date", params.start_date);
@@ -122,6 +123,7 @@ export async function fetchReport(params: {
   if (params.active_tab) sp.set("active_tab", params.active_tab);
   if (params.conversion_type) sp.set("conversion_type", params.conversion_type);
   if (params.use_click_date) sp.set("use_click_date", "true");
+  if (params.no_cache) sp.set("no_cache", "true");
   const res = await apiFetch(`${API_BASE}/api/report?${sp.toString()}`, {}, signal);
   if (!res.ok) throw new ApiError(`Report fetch failed: ${res.status}`, res.status);
   return res.json();
