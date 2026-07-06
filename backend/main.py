@@ -30,7 +30,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 from attributionops.config import default_db_path
 from attributionops.report import ReportInputs, build_hyros_like_report
 from attributionops.schema import ensure_schema
-from attributionops.util import report_timezone, local_day_bounds_utc
+from attributionops.util import report_timezone, local_day_bounds_utc, normalize_campaign_key
 from attributionops.tools.ads import ads_get_spend, ads_get_reported_value, ads_list_platforms
 from attributionops.tools.attribution import attribution_run, attribution_day_totals
 from attributionops.tools.campaign_filter import ensure_campaign_settings_table, not_excluded_sql
@@ -376,6 +376,17 @@ def get_report(
     }
     entity_type = entity_type_map.get(active_tab, "")
     name_map = get_name_map(_db(), entity_type=entity_type) if entity_type else {}
+    # The row id's campaign/adset/ad segment is normalized (normalize_campaign_key)
+    # for cross-source joins, but ad_names is keyed by the RAW entity_id — so build
+    # a normalized index too, otherwise friendly names fail to resolve for any
+    # non-numeric id (e.g. name-as-id from CSV imports).
+    norm_name_map: dict[str, str] = {}
+    for k, v in name_map.items():
+        if "|" in k:
+            p, _, eid = k.partition("|")
+            norm_name_map.setdefault(f"{p}|{normalize_campaign_key(eid)}", v)
+        else:
+            norm_name_map.setdefault(normalize_campaign_key(k), v)
     table_rows = report.get("table", {}).get("rows", [])
     if name_map:
         for row in table_rows:
@@ -385,7 +396,10 @@ def get_report(
             platform = parts[0].strip().lower() if parts else ""
             entity_id = parts[-1].strip() if parts else row_name
             lookup_key = f"{platform}|{entity_id}" if platform and entity_id else entity_id
-            resolved_name = name_map.get(lookup_key) or name_map.get(entity_id)
+            resolved_name = (
+                name_map.get(lookup_key) or name_map.get(entity_id)
+                or norm_name_map.get(lookup_key) or norm_name_map.get(entity_id)
+            )
             if resolved_name:
                 row["name"] = resolved_name
                 row["raw_id"] = entity_id

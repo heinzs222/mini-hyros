@@ -11,7 +11,10 @@ from attributionops.db import query
 from attributionops.tools.campaign_filter import excluded_campaign_keys, is_excluded
 from attributionops.util import (
     exp_decay_weight,
+    local_day_bounds_utc,
+    local_day_start_utc,
     normalize_campaign_key,
+    report_timezone,
     to_float,
     try_parse_iso_ts,
 )
@@ -209,10 +212,16 @@ def _load_orders_and_touchpoints(
     dict[str, list[datetime]],
     dict[str, list[dict[str, Any]]],
 ]:
-    # Orders within [start_d, orders_end_d] (inclusive). Sargable range on ts:
-    # ts is ISO-8601, so lexical comparison against date strings is correct and
-    # index-usable (`ts >= 'YYYY-MM-DD'`, `ts < next-day`).
-    orders_end_excl = (orders_end_d + timedelta(days=1)).isoformat()
+    # Orders within [start_d, orders_end_d] (inclusive), bounded by the same
+    # reporting-timezone day boundaries the blended report queries use
+    # (report.py via local_day_bounds_utc). Windowing by RAW UTC day here instead
+    # would drop evening orders whose UTC timestamp rolls onto the next day for a
+    # UTC-offset store — so the dashboard would count a sale but attribution would
+    # not, yielding $0 attributed revenue on single-day views. Comparisons stay
+    # sargable: the bounds are ISO-8601 instants (`ts >= '...T04:00:00Z'`).
+    start_utc, orders_end_excl = local_day_bounds_utc(
+        start_d.isoformat(), orders_end_d.isoformat()
+    )
     order_cols = _table_columns(db_path, "orders")
     optional_order_cols = [
         "session_id",
@@ -251,7 +260,7 @@ def _load_orders_and_touchpoints(
         FROM orders
         WHERE ts >= :start AND ts < :end_excl
         """,
-        {"start": start_d.isoformat(), "end_excl": orders_end_excl},
+        {"start": start_utc, "end_excl": orders_end_excl},
     ).rows
 
     conversion_cols = _table_columns(db_path, "conversions")
@@ -273,7 +282,7 @@ def _load_orders_and_touchpoints(
               AND ts < :end_excl
             ORDER BY ts DESC
             """,
-            {"start": start_d.isoformat(), "end_excl": orders_end_excl},
+            {"start": start_utc, "end_excl": orders_end_excl},
         ).rows
         conversions_by_order: dict[str, dict[str, Any]] = {}
         for conv in conversions:
@@ -295,7 +304,7 @@ def _load_orders_and_touchpoints(
     # anonymous at checkout time but still carry the same session/visitor id as
     # prior ad clicks. This mirrors HYROS-style stitching more closely than
     # requiring customer_key on every order.
-    win_start = (start_d - timedelta(days=lookback_days)).isoformat()
+    win_start = local_day_start_utc(start_d - timedelta(days=lookback_days))
     touchpoint_cols = _table_columns(db_path, "touchpoints")
     touchpoint_visitor_expr = (
         "COALESCE(NULLIF(t.visitor_id, ''), s.visitor_id, '') AS visitor_id"
@@ -496,7 +505,9 @@ def _aggregate_dim_rows(
             )
 
             if date_basis == "click":
-                tp_d = tp["_ts"].date()
+                # Compare the click's LOCAL-zone day against the (local) report
+                # window so click-date attribution aligns with the order window.
+                tp_d = tp["_ts"].astimezone(report_timezone()).date()
                 if tp_d < start_d or tp_d > end_d:
                     continue
 
@@ -561,18 +572,21 @@ def _aggregate_day_rows(
         lambda: {"orders": 0.0, "total_revenue": 0.0, "revenue": 0.0, "cogs": 0.0, "fees": 0.0}
     )
 
+    tz = report_timezone()
     for o, order_ts, window_tps, weights in contributions:
         gross = to_float(o.get("gross"))
         net = to_float(o.get("net"))
         cogs = to_float(o.get("cogs"))
         fees = to_float(o.get("fees"))
 
-        order_day = order_ts.date()
+        # Bucket by LOCAL-zone day so the daily series aligns with the report's
+        # (local) day boundaries rather than raw UTC days.
+        order_day = order_ts.astimezone(tz).date()
         for tp, w in zip(window_tps, weights, strict=True):
             if date_basis == "conversion":
                 d = order_day
             else:
-                d = tp["_ts"].date()
+                d = tp["_ts"].astimezone(tz).date()
             if d < start_d or d > end_d:
                 continue
             key = d.isoformat()

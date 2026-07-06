@@ -236,15 +236,6 @@ export default function ReportsView(props: Props) {
             />
             <ModelSelect value={model} onChange={onModelChange} />
             <button
-              onClick={onToggleAutoRefresh}
-              title={autoRefresh ? "Live refresh on" : "Live refresh off"}
-              className={`flex h-[34px] items-center gap-1.5 rounded-lg px-2.5 text-[13px] font-medium transition-colors ${
-                autoRefresh ? "bg-emerald-500/15 text-emerald-300" : "bg-white/5 text-ink-dim hover:text-ink"
-              }`}
-            >
-              <RefreshCw size={13} /> {autoRefresh ? "Live" : "Off"}
-            </button>
-            <button
               onClick={onSync}
               disabled={syncing}
               title="Sync all platforms"
