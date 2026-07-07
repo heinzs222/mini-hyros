@@ -423,6 +423,18 @@ export default function DashboardPage() {
         for (const item of result.value?.errors || []) {
           errors.push(`${scope}: ${item}`);
         }
+        // The spend sync reports per-platform failures inside `platforms`, not a
+        // top-level `errors` array — surface them so a failing TikTok/Meta/Google
+        // sync (e.g. an expired token) is visible instead of silently producing
+        // no spend rows for that platform.
+        const platforms = result.value?.platforms;
+        if (platforms && typeof platforms === "object") {
+          for (const [name, info] of Object.entries<any>(platforms)) {
+            if (info && typeof info === "object" && info.error) {
+              errors.push(`${scope} (${name}): ${info.error}`);
+            }
+          }
+        }
       };
       addSyncErrors("Spend", spendResult);
       addSyncErrors("Names", namesResult);
@@ -753,20 +765,6 @@ export default function DashboardPage() {
                     <option value="click">Click Date</option>
                   </select>
                 </>
-              )}
-
-              {section !== "leads" && section !== "settings" && (
-                <button
-                  onClick={() => setAutoRefresh((v) => !v)}
-                  className={`flex h-[34px] items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium transition-colors ${
-                    autoRefresh
-                      ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/20"
-                      : "bg-white/5 text-ink-dim hover:bg-white/10"
-                  }`}
-                  title={autoRefresh ? "Disable live refresh" : "Enable live refresh"}
-                >
-                  <RefreshCw size={13} /> {autoRefresh ? "Live On" : "Live Off"}
-                </button>
               )}
 
               {section !== "leads" && section !== "settings" && (

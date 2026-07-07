@@ -23,6 +23,7 @@ import {
   Check,
 } from "lucide-react";
 import { memo, useState, useCallback, useEffect, useMemo, useRef } from "react";
+import PlatformBadge, { isKnownPlatform } from "./PlatformBadge";
 
 const BACKEND = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -186,17 +187,9 @@ const TABS = [
   { key: "ad", label: "Ad", icon: <ImageIcon size={14} /> },
 ];
 
-const LEVEL_COLORS: Record<string, string> = {
-  traffic_source: "border-l-brand-500",
-  ad_account: "border-l-purple-500",
-  campaign: "border-l-blue-500",
-  ad_set: "border-l-cyan-500",
-  ad: "border-l-emerald-500",
-};
-
 const LEVEL_LABELS: Record<string, string> = {
   campaign: "Campaign",
-  ad_set: "Ad Set",
+  ad_set: "Ad set",
   ad: "Ad",
 };
 
@@ -225,20 +218,21 @@ function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; curr
   if (current == null || previous == null) return null;
 
   const delta = Number(current) - Number(previous);
-  const sign = delta > 0 ? "+" : delta < 0 ? "-" : "";
-  const color = delta > 0 ? "text-emerald-400" : delta < 0 ? "text-rose-400" : "text-ink-faint";
+  const sign = delta > 0 ? "+" : delta < 0 ? "−" : "";
+  const color = delta > 0 ? "text-emerald-400/90" : delta < 0 ? "text-rose-400/90" : "text-ink-faint";
+  const cls = `mt-0.5 text-[10px] font-medium tabular ${color}`;
 
   if (col.type === "money") {
-    return <div className={`text-[10px] ${color}`}>{`${sign}${formatMoney(Math.abs(delta))}`}</div>;
+    return <div className={cls}>{`${sign}${formatMoney(Math.abs(delta))}`}</div>;
   }
   if (col.type === "number") {
-    return <div className={`text-[10px] ${color}`}>{`${sign}${formatNumber(Math.abs(delta))}`}</div>;
+    return <div className={cls}>{`${sign}${formatNumber(Math.abs(delta))}`}</div>;
   }
   if (col.type === "ratio") {
-    return <div className={`text-[10px] ${color}`}>{`${sign}${Math.abs(delta).toFixed(2)}x`}</div>;
+    return <div className={cls}>{`${sign}${Math.abs(delta).toFixed(2)}x`}</div>;
   }
   if (col.type === "percent") {
-    return <div className={`text-[10px] ${color}`}>{`${sign}${Math.abs(delta).toFixed(2)} pp`}</div>;
+    return <div className={cls}>{`${sign}${Math.abs(delta).toFixed(2)} pp`}</div>;
   }
   return null;
 }
@@ -483,39 +477,40 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
     const isExpanded = Boolean(expanded[rowKey]);
     const isLoading = Boolean(loadingChildren[rowKey]);
     const children = childRows[rowKey] || [];
-    const levelColor = LEVEL_COLORS[row.level] || "";
     const levelLabel = LEVEL_LABELS[row.level] || "";
     const compareRow = depth === 0 ? compareById.get(row.id) : undefined;
+    const nameTitle = row.raw_id && row.raw_id !== row.name ? `${row.name} (ID: ${row.raw_id})` : row.name;
+    const pillCls = "shrink-0 rounded px-1.5 py-[1px] text-[10px] font-medium leading-none text-ink-faint bg-white/[0.05]";
 
     return (
       <React.Fragment key={rowKey}>
         <tr
-          className={`border-b border-[var(--card-border)]/70 hover:bg-white/[0.025] transition-colors ${
+          className={`group border-b border-[var(--card-border)]/70 transition-colors hover:bg-[var(--surface-2)] ${
             row.children_available ? "cursor-pointer" : ""
-          } ${depth > 0 ? "bg-white/[0.015]" : ""}`}
+          }`}
           onClick={() => {
             if (depth === 0) toggleExpand(row);
             else if (parentKey) toggleExpandChild(parentKey, row);
           }}
         >
-          <td className={`px-4 ${cellPad} sticky left-0 bg-[var(--surface)] z-10 ${depth > 0 ? `border-l-2 ${levelColor}` : ""}`}>
-            <div className="flex items-center gap-1.5" style={{ paddingLeft: depth * 20 }}>
+          <td className={`px-4 ${cellPad} sticky left-0 z-10 bg-[var(--surface)] group-hover:bg-[var(--surface-2)]`}>
+            <div className="flex items-center gap-2" style={{ paddingLeft: depth * 18 }}>
               {row.children_available ? (
                 isLoading ? (
-                  <Loader2 size={13} className="text-brand-500 animate-spin flex-shrink-0" />
+                  <Loader2 size={14} className="text-brand-400 animate-spin shrink-0" />
                 ) : isExpanded ? (
-                  <ChevronDown size={13} className="text-brand-400 flex-shrink-0" />
+                  <ChevronDown size={14} className="text-ink-dim shrink-0" />
                 ) : (
-                  <ChevronRight size={13} className="text-ink-faint flex-shrink-0" />
+                  <ChevronRight size={14} className="text-ink-faint shrink-0" />
                 )
               ) : (
-                <span className="w-3" />
+                <span className="w-3.5 shrink-0" />
               )}
               {/* Thumbnail for ad-level rows */}
               {row.level === "ad" && row.thumbnail_url && (
                 <button
                   onClick={(e) => openLightbox(e, row)}
-                  className="flex-shrink-0 w-8 h-8 rounded overflow-hidden border border-[var(--card-border)] relative group hover:border-brand-500 transition-colors"
+                  className="shrink-0 w-8 h-8 rounded-md overflow-hidden border border-[var(--card-border)] relative group/thumb hover:border-brand-500 transition-colors"
                   title="Preview creative"
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -537,32 +532,48 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
                       } catch {}
                     }}
                   />
-                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/thumb:opacity-100 flex items-center justify-center transition-opacity">
                     {row.creative_type === "video" ? <Play size={10} className="text-white" /> : <ImageIcon size={10} className="text-white" />}
                   </div>
                 </button>
               )}
               {row.level === "ad" && !row.thumbnail_url && (
-                <span className="flex-shrink-0 w-8 h-8 rounded border border-dashed border-[var(--card-border)] flex items-center justify-center">
-                  <ImageIcon size={10} className="text-ink-faint" />
+                <span className="shrink-0 w-8 h-8 rounded-md border border-dashed border-[var(--card-border)] flex items-center justify-center">
+                  <ImageIcon size={11} className="text-ink-faint" />
                 </span>
               )}
-              {depth === 0 && (() => {
-                const plat = platformFromRow(row);
-                const pm = plat ? PLATFORM_META[plat] : null;
-                return pm ? <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${pm.dot}`} title={pm.label} /> : null;
-              })()}
-              <span className="text-ink truncate max-w-[220px]" title={row.raw_id ? `${row.name} (ID: ${row.raw_id})` : row.name}>
-                {row.name}
-              </span>
+              {depth === 0 && activeTab === "traffic_source" ? (
+                // Traffic-source tab: the row IS the platform — show logo + the
+                // canonical platform name ("Google Ads" / "Meta Ads" / "TikTok Ads").
+                (() => {
+                  const plat = platformFromRow(row);
+                  return (
+                    <PlatformBadge
+                      platform={plat}
+                      label={isKnownPlatform(plat) ? undefined : row.name}
+                      rawName={nameTitle}
+                      size={18}
+                    />
+                  );
+                })()
+              ) : (
+                // Entity rows (campaign / ad set / ad, at any depth): show the
+                // platform logo as an indicator + the entity's own name.
+                <>
+                  <PlatformBadge platform={platformFromRow(row)} showLabel={false} size={depth === 0 ? 16 : 15} rawName={row.name} />
+                  <span className="truncate max-w-[240px] text-[13px] text-ink" title={nameTitle}>
+                    {row.name}
+                  </span>
+                </>
+              )}
               {row.raw_id && row.raw_id !== row.name && (
-                <span className="text-[9px] text-ink-faint ml-1 px-1 py-0.5 rounded bg-white/5 font-mono" title={row.raw_id}>ID</span>
+                <span className={`${pillCls} font-mono`} title={row.raw_id}>ID</span>
               )}
               {depth > 0 && levelLabel && (
-                <span className="text-[9px] text-ink-faint ml-1 px-1 py-0.5 rounded bg-white/5">{levelLabel}</span>
+                <span className={pillCls}>{levelLabel}</span>
               )}
               {row.children_count != null && row.children_count > 0 && (
-                <span className="text-[10px] text-ink-faint ml-1">({row.children_count})</span>
+                <span className="shrink-0 text-[11px] text-ink-faint tabular">({row.children_count})</span>
               )}
             </div>
           </td>
@@ -578,8 +589,8 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
         {/* Render children inline as sibling tr elements */}
         {isExpanded && children.length > 0 && children.map((child) => renderRow(child, depth + 1, row.id))}
         {isExpanded && children.length === 0 && !isLoading && (
-          <tr key={`${rowKey}-empty`} className="border-b border-[var(--card-border)]">
-            <td colSpan={shownCols.length + 1} className="px-4 py-2 text-ink-faint text-[11px]" style={{ paddingLeft: (depth + 1) * 20 + 16 }}>
+          <tr key={`${rowKey}-empty`} className="border-b border-[var(--card-border)]/70">
+            <td colSpan={shownCols.length + 1} className="px-4 py-2 text-ink-faint text-[11px]" style={{ paddingLeft: (depth + 1) * 18 + 32 }}>
               No child items found
             </td>
           </tr>
@@ -589,10 +600,10 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
   };
 
   const TotalsRow = () => (
-    <tr className="border-b border-[var(--card-border)] bg-white/[0.03] font-semibold">
-      <td className={`px-4 ${cellPad} text-ink-bright sticky left-0 bg-[var(--surface)] z-10`}>{totalsLabel}</td>
+    <tr className="border-b border-white/10 bg-white/[0.02]">
+      <td className={`px-4 ${cellPad} text-[13px] font-semibold text-ink-bright sticky left-0 bg-[var(--surface)] z-10`}>{totalsLabel}</td>
       {shownCols.map((col) => (
-        <td key={col.key} className={`text-right px-3 ${cellPad} whitespace-nowrap tabular text-ink-bright`}>
+        <td key={col.key} className={`text-right px-3 ${cellPad} whitespace-nowrap tabular font-semibold text-ink-bright`}>
           <CellValue col={col} metrics={visibleTotals} />
         </td>
       ))}
@@ -714,11 +725,11 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
                 <button
                   key={p}
                   onClick={() => onPlatformFilterChange(platformFilter === p ? "all" : p)}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors whitespace-nowrap ${
+                  className={`flex items-center gap-1.5 pl-1.5 pr-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors whitespace-nowrap ${
                     platformFilter === p ? "bg-white/10 text-ink-bright" : "text-ink-dim hover:text-ink"
                   }`}
                 >
-                  <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${meta.dot}`} />
+                  <PlatformBadge platform={p} showLabel={false} size={14} rawName={meta.label} />
                   {meta.label}
                 </button>
               );
@@ -855,11 +866,11 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
       )}
 
       {/* Table */}
-      <div className="overflow-x-auto">
+      <div className="overflow-auto max-h-[70vh]">
         <table className="w-full text-[13px]">
           <thead>
-            <tr className="border-b border-[var(--card-border)]">
-              <th className="text-left px-4 py-2.5 text-ink-dim font-medium sticky left-0 bg-[var(--surface)] z-10 min-w-[220px]">
+            <tr>
+              <th className="text-left px-4 py-2.5 text-[11px] text-ink-dim font-medium sticky left-0 top-0 z-30 bg-[var(--surface)] border-b border-[var(--card-border)] min-w-[240px]">
                 {dimensionCol?.label || "Name"}
               </th>
               {shownCols.map((col) => {
@@ -867,7 +878,7 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
                 return (
                   <th
                     key={col.key}
-                    className={`text-right px-3 py-2.5 font-medium cursor-pointer whitespace-nowrap select-none ${active ? "text-ink-bright" : "text-ink-dim hover:text-ink"}`}
+                    className={`group sticky top-0 z-20 bg-[var(--surface)] border-b border-[var(--card-border)] text-right px-3 py-2.5 text-[11px] font-medium cursor-pointer whitespace-nowrap select-none ${active ? "text-ink-bright" : "text-ink-dim hover:text-ink"}`}
                     onClick={() => handleSort(col.key)}
                   >
                     <div className="flex items-center justify-end gap-1">
@@ -875,7 +886,7 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
                       {active ? (
                         sortDir === "desc" ? <ChevronDown size={12} className="text-brand-400" /> : <ChevronUp size={12} className="text-brand-400" />
                       ) : (
-                        <ChevronDown size={12} className="text-ink-faint/40" />
+                        <ChevronDown size={12} className="text-ink-faint opacity-0 group-hover:opacity-60 transition-opacity" />
                       )}
                     </div>
                   </th>
