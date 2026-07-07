@@ -29,6 +29,7 @@ import {
   Info,
   Check,
   Filter as FilterIcon,
+  AlertTriangle,
 } from "lucide-react";
 
 interface Range {
@@ -442,6 +443,34 @@ export default function ReportsView(props: Props) {
               />
             </div>
           ) : (
+            <>
+              {(() => {
+                const s = report.summary_totals || {};
+                const total = Number(s.all_orders_count ?? s.tracked_orders ?? 0);
+                const attributed = Number(s.attributed_orders ?? 0);
+                const unattrOrders = Math.max(Number(s.unattributed_orders ?? (total - attributed)), 0);
+                const unattrRev = Number(s.unattributed_revenue ?? 0);
+                if (total <= 0 || unattrOrders <= 0) return null;
+                const pct = total > 0 ? Math.round((attributed / total) * 100) : 0;
+                const money = (v: number) =>
+                  `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+                return (
+                  <div className="mb-3 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[13px] leading-relaxed text-amber-200">
+                    <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" />
+                    <div>
+                      <span className="font-semibold">
+                        Reporting gap — {pct}% of orders matched to a source.
+                      </span>{" "}
+                      {unattrOrders} of {total} order{total === 1 ? "" : "s"}
+                      {unattrRev > 0 ? ` (${money(unattrRev)})` : ""} in this range aren’t
+                      attributed to any ad source. That usually means the tracking pixel didn’t
+                      capture a click for those sales, or a platform’s spend/clicks haven’t synced
+                      yet — press <span className="font-semibold">Sync</span>, and confirm the
+                      tracking script is firing on both your funnel and checkout pages.
+                    </div>
+                  </div>
+                );
+              })()}
             <AttributionTable
               columns={report.table.columns}
               rows={report.table.rows}
@@ -462,6 +491,7 @@ export default function ReportsView(props: Props) {
               searchValue={search}
               hiddenColumnKeys={Array.from(hiddenCols)}
             />
+            </>
           )}
         </div>
       </div>
