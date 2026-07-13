@@ -21,6 +21,7 @@ import sqlite3
 import threading
 
 from ..db import sql_rows
+from ..schema import ensure_campaign_settings
 
 _lock = threading.Lock()
 _ensured: set[str] = set()
@@ -33,18 +34,7 @@ def ensure_campaign_settings_table(db_path: str) -> None:
     try:
         with sqlite3.connect(db_path) as conn:
             conn.execute("PRAGMA busy_timeout=5000;")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS campaign_settings (
-                    platform    TEXT NOT NULL,
-                    campaign_id TEXT NOT NULL,
-                    tracked     INTEGER NOT NULL DEFAULT 1,
-                    note        TEXT DEFAULT '',
-                    updated_at  TEXT,
-                    PRIMARY KEY (platform, campaign_id)
-                );
-                """
-            )
+            ensure_campaign_settings(conn)
             conn.commit()
     except sqlite3.Error:
         return

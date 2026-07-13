@@ -34,6 +34,15 @@ ORDER_SEMANTIC_COLUMNS: dict[str, str] = {
 }
 
 
+# These account-specific exclusions mirror the campaigns omitted by the source
+# Hyros account. INSERT OR IGNORE preserves any later choice made in Vigil.
+DEFAULT_CAMPAIGN_SETTINGS: tuple[tuple[str, str, int, str], ...] = (
+    ("google", "21892266666", 0, "Default Hyros parity exclusion"),
+    ("google", "23351447961", 0, "Default Hyros parity exclusion"),
+    ("meta", "120237922106660149", 0, "Default Hyros parity exclusion"),
+)
+
+
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
@@ -101,6 +110,37 @@ def ensure_campaign_settings(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO campaign_settings
+            (platform, campaign_id, tracked, note, updated_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """,
+        DEFAULT_CAMPAIGN_SETTINGS,
+    )
+
+
+def ensure_refund_log(conn: sqlite3.Connection) -> None:
+    """Create the timestamped refund ledger used by historical reports."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS refund_log (
+            id TEXT PRIMARY KEY,
+            ts TEXT,
+            order_id TEXT,
+            customer_key TEXT,
+            type TEXT,
+            amount TEXT,
+            reason TEXT,
+            source TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_refund_log_order_id_ts "
+        "ON refund_log(order_id, ts)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_refund_log_ts ON refund_log(ts)")
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -127,6 +167,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
             "idx_conversions_conversion_id_legacy",
         )
     ensure_campaign_settings(conn)
+    ensure_refund_log(conn)
 
 
 def ensure_schema(db_path: str) -> None:

@@ -22,8 +22,17 @@ from attributionops.db import sql_rows
 
 def _charge(charge_id, *, amount=10000, paid=True, refunded=False,
             amount_refunded=0, email="buyer@example.com", created=1735689600,
-            currency="usd", subscription=None):
+            currency="usd", subscription=None, refunds=None):
     """Build a minimal Stripe charge object as the code expects to parse it."""
+    if refunds is None and amount_refunded:
+        refunds = [
+            {
+                "id": f"re_{charge_id}",
+                "amount": amount_refunded,
+                "created": created + 3600,
+                "status": "succeeded",
+            }
+        ]
     return {
         "id": charge_id,
         "amount": amount,
@@ -34,6 +43,7 @@ def _charge(charge_id, *, amount=10000, paid=True, refunded=False,
         "created": created,
         "subscription": subscription,
         "billing_details": {"email": email} if email else {},
+        "refunds": {"object": "list", "data": refunds or [], "has_more": False},
     }
 
 
@@ -101,12 +111,26 @@ def test_sync_includes_refunded_filters_unpaid_and_zero(client, api_db, monkeypa
     # unpaid and zero-amount charges are excluded.
     assert body["fetched"] == 2
     assert body["synced"] == 2
+    assert body["refund_events"] == 1
     orders = sql_rows(api_db, "SELECT * FROM orders")
     assert len(orders) == 2
     refunded = sql_rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ["stripe|ch_refunded"])[0]
     assert float(refunded["gross"]) == 20.0
     assert float(refunded["refunds"]) == 20.0
     assert float(refunded["net"]) == 0.0
+    refund_events = sql_rows(
+        api_db,
+        "SELECT id, ts, order_id, amount, source FROM refund_log",
+    )
+    assert refund_events == [
+        {
+            "id": "re_ch_refunded",
+            "ts": "2025-01-01T01:00:00Z",
+            "order_id": "stripe|ch_refunded",
+            "amount": "20.0",
+            "source": "stripe_sync",
+        }
+    ]
 
 
 def test_sync_applies_configured_recurring_amount_rule(client, api_db, monkeypatch):
@@ -134,6 +158,40 @@ def test_sync_applies_configured_recurring_amount_rule(client, api_db, monkeypat
         "stripe|ch_plan_first": 0,
         "stripe|ch_plan_repeat": 1,
     }
+
+
+def test_sync_does_not_downgrade_existing_recurring_order(
+    client, api_db, monkeypatch
+):
+    monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
+    recurring_charge = _charge("ch_recurring", amount=5000)
+    recurring_charge["invoice"] = {
+        "billing_reason": "subscription_cycle",
+        "subscription": "sub_123",
+    }
+    incomplete_charge = _charge("ch_recurring", amount=5000)
+
+    responses = iter(
+        [
+            Response(200, json=_charges_page([recurring_charge])),
+            Response(200, json=_charges_page([incomplete_charge])),
+        ]
+    )
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith="https://api.stripe.com/v1/charges").mock(
+            side_effect=lambda request: next(responses)
+        )
+        first = client.post("/api/stripe/sync").json()
+        second = client.post("/api/stripe/sync").json()
+
+    assert first["recurring"] == 1
+    assert second["recurring"] == 1
+    row = sql_rows(
+        api_db,
+        "SELECT is_recurring FROM orders WHERE order_id = ?",
+        ["stripe|ch_recurring"],
+    )[0]
+    assert row["is_recurring"] == 1
 
 
 def test_sync_dedupes_on_second_run(client, api_db, monkeypatch):

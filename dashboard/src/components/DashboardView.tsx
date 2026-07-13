@@ -147,7 +147,9 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
     const revenue = trackedRevenue(sum);
     const orders = trackedOrders(sum);
     const roas = sum.blended_roas ?? sum.roas ?? (cost > 0 ? revenue / cost : null);
-    const aov = sum.blended_aov ?? (orders > 0 ? revenue / orders : null);
+    // Hyros' AOV widget uses source-linked, deduplicated sales. Raw Stripe AOV
+    // is a different metric and must not be presented as a parity value.
+    const aov = sum.source_aov ?? null;
     const clicks = num(sum.clicks);
 
     // New customers = net-new (first-time) buyers, distinct from Sales (order count).
@@ -164,9 +166,7 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
     const cRevenue = csum ? trackedRevenue(csum) : null;
     const cOrders = csum ? trackedOrders(csum) : null;
     const cRoas = csum ? (csum.blended_roas ?? csum.roas ?? (cCost ? cRevenue! / cCost : null)) : null;
-    const cAov = csum
-      ? (csum.blended_aov ?? (cOrders ? cRevenue! / cOrders : null))
-      : null;
+    const cAov = csum ? (csum.source_aov ?? null) : null;
     const cClicks = csum ? num(csum.clicks) : null;
     const cNewCustomers = csum ? (csum.new_customers != null ? num(csum.new_customers) : cOrders) : null;
     const cLeadsFunnel = (compareReport?.funnels?.rows || []).reduce((a: number, r: any) => a + num(r.leads), 0);
@@ -209,7 +209,7 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
         newCustomers: num((r as any).new_customers ?? 0),
         clicks: num(r.clicks),
         roas: num((r as any).blended_roas ?? r.roas ?? 0),
-        aov: num((r as any).blended_aov ?? (ord > 0 ? Math.round((rev / ord) * 100) / 100 : 0)),
+        aov: (r as any).source_aov == null ? null : num((r as any).source_aov),
         cpa: ord > 0 ? Math.round((num(r.cost) / ord) * 100) / 100 : 0,
       };
     });

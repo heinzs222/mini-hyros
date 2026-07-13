@@ -71,6 +71,18 @@ describe("SummaryCards", () => {
     expect(screen.getByText("CVR (Attr.)")).toBeInTheDocument();
   });
 
+  it("uses only source-linked AOV for Hyros parity", () => {
+    const { rerender } = render(
+      <SummaryCards totals={makeTotals({ source_aov: 351.52, blended_aov: 999.99 })} />,
+    );
+    expect(screen.getByText(/AOV: \$351\.52/)).toBeInTheDocument();
+    expect(screen.queryByText(/AOV: \$999\.99/)).not.toBeInTheDocument();
+
+    rerender(<SummaryCards totals={makeTotals({ source_aov: null, blended_aov: 999.99 })} />);
+    expect(screen.getByText(/AOV: —/)).toBeInTheDocument();
+    expect(screen.queryByText(/AOV: \$999\.99/)).not.toBeInTheDocument();
+  });
+
   it("falls back to tracked labels when there is no attribution", () => {
     const totals = makeTotals({
       attributed_orders: 0,

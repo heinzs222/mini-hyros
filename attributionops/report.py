@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from typing import Any, Literal
 
 from attributionops.db import query
+from attributionops.refund_ledger import apply_refunds_as_of
 from attributionops.tools.ads import ads_get_reported_value, ads_get_spend
 from attributionops.tools.attribution import attribution_run_and_day_totals
 from attributionops.tools.campaign_filter import ensure_campaign_settings_table, not_excluded_sql
@@ -1065,7 +1066,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     try:
         order_rows = query(
             db_path,
-            """SELECT order_id, ts, gross, net, refunds, cogs, fees, customer_key,
+            """SELECT order_id, ts, gross, net, refunds, chargebacks, cogs, fees, customer_key,
                       processor,
                       processor_customer_id, payment_fingerprint,
                       COALESCE(NULLIF(sale_group_id, ''), order_id) AS sale_group_id,
@@ -1074,6 +1075,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
                WHERE ts >= :start_utc AND ts < :end_excl_utc""",
             {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
         ).rows
+        order_rows = apply_refunds_as_of(db_path, order_rows, end_excl_utc)
         all_orders_count = len(order_rows)
         all_orders_gross_revenue = sum(
             to_float(row.get("gross")) or to_float(row.get("net")) for row in order_rows
@@ -1087,7 +1089,11 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         # non-recurring rows. Any refunded amount excludes that sale from this
         # widget, while the General Overview still includes it in Sales and
         # subtracts the refund from revenue.
-        customer_order_rows = [row for row in order_rows if to_float(row.get("refunds")) <= 0]
+        customer_order_rows = [
+            row
+            for row in order_rows
+            if to_float(row.get("refunds")) + to_float(row.get("chargebacks")) <= 0
+        ]
         total_customers = len(customer_order_rows)
         # Hyros reports recurrence independently of its non-refunded customer
         # denominator. A refunded recurring charge remains classified recurring,
@@ -1196,6 +1202,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     attributed_revenue = attributed_revenue_all
     attributed_sale_groups = int(_attr["run"].get("sale_groups") or 0)
     attributed_aov = safe_div(attributed_revenue, float(attributed_sale_groups))
+    source_attributed_orders = to_int(_attr["run"].get("source_attributed_orders"))
+    source_attributed_revenue = to_float(_attr["run"].get("source_attributed_revenue"))
+    source_unique_sales = to_int(_attr["run"].get("source_unique_sales"))
+    source_aov = safe_div(source_attributed_revenue, float(source_unique_sales))
     unattributed_orders = round(max(float(all_orders_count) - attributed_orders, 0.0), 2)
     unattributed_revenue = round_money(max(all_orders_revenue - attributed_revenue, 0.0))
     attribution_rate = safe_div(attributed_orders, float(all_orders_count))
@@ -1237,6 +1247,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         "attributed_sale_groups": attributed_sale_groups,
         "attributed_revenue": round_money(attributed_revenue),
         "attributed_aov": round_money(attributed_aov) if attributed_aov is not None else None,
+        "source_attributed_orders": source_attributed_orders,
+        "source_attributed_revenue": round_money(source_attributed_revenue),
+        "source_unique_sales": source_unique_sales,
+        "source_aov": round_money(source_aov) if source_aov is not None else None,
         "unattributed_orders": unattributed_orders,
         "unattributed_revenue": unattributed_revenue,
         "attribution_rate": round(attribution_rate * 100.0, 2) if attribution_rate is not None else None,
@@ -1301,7 +1315,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             group_id = _order_group_id(row)
             if group_id:
                 grouped_by_day[day].add(group_id)
-            if to_float(row.get("refunds")) <= 0 and not to_int(row.get("is_recurring")):
+            if (
+                to_float(row.get("refunds")) + to_float(row.get("chargebacks")) <= 0
+                and not to_int(row.get("is_recurring"))
+            ):
                 nonrecurring_by_day[day] += 1
 
             identity = _order_identity(row)
@@ -1344,6 +1361,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         net_new_customers_day = int(net_new_cust_day_map.get(day, 0))
         attributed_sale_groups_day = to_int(a.get("sale_groups"))
         attributed_aov_day = safe_div(revenue, float(attributed_sale_groups_day))
+        source_attributed_orders_day = to_int(a.get("source_attributed_orders"))
+        source_attributed_revenue_day = to_float(a.get("source_attributed_revenue"))
+        source_unique_sales_day = to_int(a.get("source_unique_sales"))
+        source_aov_day = safe_div(source_attributed_revenue_day, float(source_unique_sales_day))
         profit = revenue - cost - cogs - fees
         roas = safe_div(revenue, cost)
         blended_roas_day = safe_div(tracked_revenue, cost)
@@ -1363,6 +1384,10 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
                 "net_new_customers": net_new_customers_day,
                 "attributed_sale_groups": attributed_sale_groups_day,
                 "attributed_aov": round_money(attributed_aov_day) if attributed_aov_day is not None else None,
+                "source_attributed_orders": source_attributed_orders_day,
+                "source_attributed_revenue": round_money(source_attributed_revenue_day),
+                "source_unique_sales": source_unique_sales_day,
+                "source_aov": round_money(source_aov_day) if source_aov_day is not None else None,
                 "roas": round(roas, 2) if roas is not None else None,
                 "blended_roas": round(blended_roas_day, 2) if blended_roas_day is not None else None,
                 "cvr": round(cvr * 100.0, 2) if cvr is not None else None,

@@ -53,6 +53,10 @@ type SummaryTotals = {
   blended_aov?: number | null;
   grouped_aov?: number | null;
   attributed_aov?: number | null;
+  source_attributed_orders?: number;
+  source_attributed_revenue?: number;
+  source_unique_sales?: number;
+  source_aov?: number | null;
   blended_profit?: number | null;
   blended_cpa?: number | null;
 };
@@ -167,8 +171,9 @@ function SummaryCards({ totals, compareTotals, compareLabel, showCompareBanner =
   const compareClicks = Number(compareTotals?.clicks ?? 0);
   const blendedRoas = totals.blended_roas ?? (cost > 0 ? Math.round((currentTrackedRevenue / cost) * 100) / 100 : null);
   const blendedCvr = totals.blended_cvr ?? (clicks > 0 ? Math.round((currentTrackedOrders / clicks) * 100000) / 1000 : null);
-  const blendedAov = totals.blended_aov
-    ?? (currentTrackedOrders > 0 ? Math.round((currentTrackedRevenue / currentTrackedOrders) * 100) / 100 : null);
+  // Source AOV is the only value comparable to Hyros' source-filtered widget.
+  // Leave it unavailable when historical source links cannot be reconstructed.
+  const sourceAov = totals.source_aov ?? null;
   const blendedProfit = totals.blended_profit ?? Math.round((currentTrackedRevenue - cost) * 100) / 100;
   const blendedCpa = totals.blended_cpa ?? (currentTrackedOrders > 0 ? Math.round((cost / currentTrackedOrders) * 100) / 100 : null);
   const mer = totals.mer ?? (cost > 0 ? Math.round((currentTrackedRevenue / cost) * 100) / 100 : null);
@@ -280,7 +285,7 @@ function SummaryCards({ totals, compareTotals, compareLabel, showCompareBanner =
         <Card
           label="Orders"
           value={formatNumber(currentTrackedOrders)}
-          sub={`Attr: ${formatNumber(currentAttributedOrders)} | AOV: ${formatMoney(blendedAov)} | CPA: ${formatMoney(blendedCpa)}`}
+          sub={`Attr: ${formatNumber(currentAttributedOrders)} | AOV: ${formatMoney(sourceAov)} | CPA: ${formatMoney(blendedCpa)}`}
           delta={numberDelta(currentTrackedOrders, compareTrackedOrders)}
           deltaClass={deltaColor(compareTrackedOrders == null ? null : currentTrackedOrders - compareTrackedOrders)}
           icon={<ShoppingCart size={14} />}

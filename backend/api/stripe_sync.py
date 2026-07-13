@@ -22,7 +22,7 @@ from fastapi import APIRouter, Query
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows
-from attributionops.schema import ensure_order_semantics
+from attributionops.schema import ensure_order_semantics, ensure_refund_log
 from attributionops.util import local_day_bounds_utc, parse_iso_ts
 
 router = APIRouter()
@@ -30,6 +30,7 @@ UTC = timezone.utc
 
 STRIPE_CHARGES_URL = "https://api.stripe.com/v1/charges"
 STRIPE_PAYMENT_INTENTS_URL = "https://api.stripe.com/v1/payment_intents"
+STRIPE_REFUNDS_URL = "https://api.stripe.com/v1/refunds"
 
 # Fee estimate used only when the real balance_transaction fee is unavailable.
 _FEE_RATE = 0.029
@@ -136,6 +137,7 @@ def _ensure_orders_table(db_path: str) -> None:
         if touchpoint_cols and "visitor_id" not in touchpoint_cols:
             conn.execute("ALTER TABLE touchpoints ADD COLUMN visitor_id TEXT DEFAULT ''")
         ensure_order_semantics(conn)
+        ensure_refund_log(conn)
         conn.commit()
 
 
@@ -268,9 +270,69 @@ async def _fetch_stripe_charges(
                 break
             starting_after = charges[-1]["id"]
 
+        # ``amount_refunded`` is a lifetime scalar on the charge. Historical
+        # reports also need each refund's creation time so a refund issued after
+        # the selected window does not rewrite revenue inside that old window.
+        for charge in all_charges:
+            if int(charge.get("amount_refunded", 0) or 0) <= 0:
+                continue
+            charge["_mini_hyros_refunds"] = await _fetch_charge_refunds(
+                client, headers, charge
+            )
+
     # Return all successful charges — INCLUDING refunded/fully-refunded ones, so
     # their refund amount is recorded and net revenue is reduced correctly.
     return [c for c in all_charges if c.get("paid") and c.get("amount", 0) > 0]
+
+
+def _embedded_refunds(charge: dict[str, Any]) -> list[dict[str, Any]]:
+    refunds = charge.get("refunds")
+    if isinstance(refunds, dict):
+        return [item for item in refunds.get("data", []) if isinstance(item, dict)]
+    if isinstance(refunds, list):
+        return [item for item in refunds if isinstance(item, dict)]
+    return []
+
+
+async def _fetch_charge_refunds(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    charge: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return the complete refund list for one refunded charge."""
+    embedded = _embedded_refunds(charge)
+    refunds_obj = charge.get("refunds")
+    if isinstance(refunds_obj, dict) and not refunds_obj.get("has_more", False):
+        return embedded
+
+    charge_id = str(charge.get("id") or "").strip()
+    if not charge_id:
+        return embedded
+
+    by_id = {
+        str(item.get("id") or ""): item
+        for item in embedded
+        if str(item.get("id") or "")
+    }
+    starting_after: str | None = None
+    while True:
+        params: dict[str, Any] = {"charge": charge_id, "limit": 100}
+        if starting_after:
+            params["starting_after"] = starting_after
+        response = await client.get(STRIPE_REFUNDS_URL, headers=headers, params=params)
+        response.raise_for_status()
+        payload = response.json()
+        page = [item for item in payload.get("data", []) if isinstance(item, dict)]
+        for item in page:
+            refund_id = str(item.get("id") or "")
+            if refund_id:
+                by_id[refund_id] = item
+        if not payload.get("has_more") or not page:
+            break
+        starting_after = str(page[-1].get("id") or "") or None
+        if not starting_after:
+            break
+    return list(by_id.values())
 
 
 def _extract_email_from_charge(charge: dict) -> str:
@@ -658,6 +720,7 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
     inserted = 0
     updated = 0
     recurring = 0
+    refund_events = 0
     now = _now()
 
     with connect(db_path) as conn:
@@ -722,6 +785,16 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
                     allow_amount_fallback=_configured_recurring_amount(amount_cents, currency),
                 )
             )
+            existing_recurring = conn.execute(
+                "SELECT is_recurring FROM orders WHERE order_id = ?", (order_id,)
+            ).fetchone()
+            # Stripe can return a less-complete charge expansion on a later
+            # sync. Once a sale has been identified as recurring, do not let a
+            # missing invoice/metadata field downgrade that classification.
+            is_recurring = bool(
+                is_recurring
+                or (existing_recurring and int(existing_recurring[0] or 0) == 1)
+            )
             sale_group_id = _sale_group_id(
                 conn,
                 order_id=order_id,
@@ -731,6 +804,51 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
                 fingerprint=fingerprint,
             )
             recurring += int(is_recurring)
+
+            refund_objects = charge.get("_mini_hyros_refunds")
+            if not isinstance(refund_objects, list):
+                refund_objects = _embedded_refunds(charge)
+            for refund in refund_objects:
+                refund_id = str(refund.get("id") or "").strip()
+                refund_amount_cents = int(refund.get("amount", 0) or 0)
+                refund_created = int(refund.get("created", 0) or 0)
+                refund_status = str(refund.get("status") or "").strip().lower()
+                if (
+                    not refund_id
+                    or refund_amount_cents <= 0
+                    or refund_created <= 0
+                    or refund_status not in {"", "succeeded"}
+                ):
+                    continue
+                refund_ts = datetime.fromtimestamp(refund_created, tz=UTC).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                existed = conn.execute(
+                    "SELECT 1 FROM refund_log WHERE id = ?", (refund_id,)
+                ).fetchone()
+                conn.execute(
+                    """INSERT INTO refund_log
+                       (id, ts, order_id, customer_key, type, amount, reason, source)
+                       VALUES (?, ?, ?, ?, 'refund', ?, ?, 'stripe_sync')
+                       ON CONFLICT(id) DO UPDATE SET
+                           ts = excluded.ts,
+                           order_id = excluded.order_id,
+                           customer_key = excluded.customer_key,
+                           type = excluded.type,
+                           amount = excluded.amount,
+                           reason = excluded.reason,
+                           source = excluded.source""",
+                    (
+                        refund_id,
+                        refund_ts,
+                        order_id,
+                        customer_key,
+                        str(round(refund_amount_cents / 100, 2)),
+                        str(refund.get("reason") or ""),
+                    ),
+                )
+                if not existed:
+                    refund_events += 1
 
             cur = conn.execute(
                 """INSERT OR IGNORE INTO orders
@@ -794,7 +912,12 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
 
         conn.commit()
 
-    return {"inserted": inserted, "updated": updated, "recurring": recurring}
+    return {
+        "inserted": inserted,
+        "updated": updated,
+        "recurring": recurring,
+        "refund_events": refund_events,
+    }
 
 
 @router.post("/sync")
@@ -828,6 +951,7 @@ async def stripe_sync(
         history_fetched = 0
         history_synced = 0
         history_updated = 0
+        history_refund_events = 0
         history_days = _history_backfill_days()
         if history_days:
             history_start = (start_day - timedelta(days=history_days)).isoformat()
@@ -839,6 +963,7 @@ async def stripe_sync(
                 history_fetched += len(history_charges)
                 history_synced += history_stats["inserted"]
                 history_updated += history_stats["updated"]
+                history_refund_events += history_stats["refund_events"]
                 _record_stripe_coverage(db_path, range_start, range_end)
 
         charges = await _fetch_stripe_charges(api_key, start_date, end_date)
@@ -848,10 +973,12 @@ async def stripe_sync(
             "synced": stats["inserted"],
             "updated": stats["updated"],
             "recurring": stats["recurring"],
+            "refund_events": stats["refund_events"],
             "fetched": len(charges),
             "history_fetched": history_fetched,
             "history_synced": history_synced,
             "history_updated": history_updated,
+            "history_refund_events": history_refund_events,
             "history_ranges": [
                 {"start_date": range_start, "end_date": range_end}
                 for range_start, range_end in history_ranges

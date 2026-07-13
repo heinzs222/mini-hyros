@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Any
 
 from attributionops.db import query
+from attributionops.refund_ledger import apply_refunds_as_of
 from attributionops.tools.campaign_filter import excluded_campaign_keys, is_excluded
 from attributionops.util import (
     exp_decay_weight,
@@ -204,6 +205,7 @@ def _load_orders_and_touchpoints(
     start_d: date,
     lookback_days: int,
     orders_end_d: date,
+    refund_as_of_d: date,
     excluded_raw: set[tuple[str, str]] | None = None,
     excluded_norm: set[tuple[str, str]] | None = None,
 ) -> tuple[
@@ -264,6 +266,10 @@ def _load_orders_and_touchpoints(
         """,
         {"start": start_utc, "end_excl": orders_end_excl},
     ).rows
+    _, refund_end_excl = local_day_bounds_utc(
+        refund_as_of_d.isoformat(), refund_as_of_d.isoformat()
+    )
+    orders = apply_refunds_as_of(db_path, orders, refund_end_excl)
 
     conversion_cols = _table_columns(db_path, "conversions")
     if orders and conversion_cols:
@@ -569,6 +575,7 @@ def _aggregate_day_rows(
     date_basis: str,
     start_d: date,
     end_d: date,
+    source_days: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     by_day: dict[str, dict[str, float]] = defaultdict(
         lambda: {"orders": 0.0, "total_revenue": 0.0, "revenue": 0.0, "cogs": 0.0, "fees": 0.0}
@@ -603,9 +610,11 @@ def _aggregate_day_rows(
             if w > 0 and sale_group_id:
                 sale_groups_by_day[key].add(sale_group_id)
 
+    source_days = source_days or {}
     rows_out = []
-    for d in sorted(by_day.keys()):
+    for d in sorted(set(by_day.keys()) | set(source_days.keys())):
         row = by_day[d]
+        source = source_days.get(d, {})
         rows_out.append(
             {
                 "date": d,
@@ -615,9 +624,82 @@ def _aggregate_day_rows(
                 "cogs": float(f"{row['cogs']:.2f}"),
                 "fees": float(f"{row['fees']:.2f}"),
                 "sale_groups": len(sale_groups_by_day.get(d, set())),
+                "source_attributed_orders": int(source.get("source_attributed_orders") or 0),
+                "source_attributed_revenue": float(
+                    f"{to_float(source.get('source_attributed_revenue')):.2f}"
+                ),
+                "source_unique_sales": int(source.get("source_unique_sales") or 0),
+                "source_aov": source.get("source_aov"),
             }
         )
     return rows_out
+
+
+def _source_attributed_stats(
+    contributions: list[tuple[dict[str, Any], datetime, list[dict[str, Any]], list[float]]],
+    *,
+    start_d: date,
+    end_d: date,
+) -> dict[str, Any]:
+    """Count source-linked orders and sale groups without fractional weights.
+
+    Hyros's AOV widget uses net revenue from source-linked sales divided by the
+    distinct sale groups, rather than all Stripe orders. The KPI is always
+    bucketed by conversion date so one order cannot be counted in multiple
+    click-date windows. Weighted attribution remains unchanged elsewhere.
+    """
+    tz = report_timezone()
+    seen_orders: set[str] = set()
+    sale_groups: set[str] = set()
+    total_revenue = 0.0
+    daily: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"orders": 0, "revenue": 0.0, "sale_groups": set()}
+    )
+
+    for index, (order, order_ts, _touchpoints, weights) in enumerate(contributions):
+        if not any(weight > 0 for weight in weights):
+            continue
+
+        bucket_day = order_ts.astimezone(tz).date()
+        if bucket_day < start_d or bucket_day > end_d:
+            continue
+
+        order_id = str(order.get("order_id") or "").strip()
+        order_key = order_id or f"{order_ts.isoformat()}:{index}"
+        if order_key in seen_orders:
+            continue
+        seen_orders.add(order_key)
+
+        revenue = to_float(order.get("net"))
+        sale_group = str(order.get("sale_group_id") or order_id or order_key).strip()
+        total_revenue += revenue
+        sale_groups.add(sale_group)
+
+        bucket = daily[bucket_day.isoformat()]
+        bucket["orders"] += 1
+        bucket["revenue"] += revenue
+        bucket["sale_groups"].add(sale_group)
+
+    days: dict[str, dict[str, Any]] = {}
+    for day, bucket in daily.items():
+        unique_sales = len(bucket["sale_groups"])
+        revenue = float(f"{to_float(bucket['revenue']):.2f}")
+        days[day] = {
+            "source_attributed_orders": int(bucket["orders"]),
+            "source_attributed_revenue": revenue,
+            "source_unique_sales": unique_sales,
+            "source_aov": float(f"{(revenue / unique_sales):.2f}") if unique_sales else None,
+        }
+
+    unique_sales = len(sale_groups)
+    rounded_revenue = float(f"{total_revenue:.2f}")
+    return {
+        "source_attributed_orders": len(seen_orders),
+        "source_attributed_revenue": rounded_revenue,
+        "source_unique_sales": unique_sales,
+        "source_aov": float(f"{(rounded_revenue / unique_sales):.2f}") if unique_sales else None,
+        "days": days,
+    }
 
 
 def _attributed_sale_group_count(
@@ -668,6 +750,10 @@ def attribution_run(
             "conversion_type": conversion_type,
             "value_type": value_type,
             "rows": [],
+            "source_attributed_orders": 0,
+            "source_attributed_revenue": 0.0,
+            "source_unique_sales": 0,
+            "source_aov": None,
             "unattributed_orders": 0,
             "notes": [
                 f"conversion_type={conversion_type!r} is not supported; only 'purchase' is attributed. Returning empty rows.",
@@ -687,6 +773,7 @@ def attribution_run(
 
     orders, tps_by_identity, dts_by_identity, tps_by_exact_ts = _load_orders_and_touchpoints(
         db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d,
+        refund_as_of_d=end_d,
         excluded_raw=excluded_raw, excluded_norm=excluded_norm,
     )
     contributions, unattributed_orders = _attributed(
@@ -700,6 +787,7 @@ def attribution_run(
     sale_groups = _attributed_sale_group_count(
         contributions, date_basis=date_basis, start_d=start_d, end_d=end_d
     )
+    source_stats = _source_attributed_stats(contributions, start_d=start_d, end_d=end_d)
 
     return {
         "model": model,
@@ -711,6 +799,10 @@ def attribution_run(
         "value_type": value_type,
         "rows": out_rows,
         "sale_groups": sale_groups,
+        "source_attributed_orders": source_stats["source_attributed_orders"],
+        "source_attributed_revenue": source_stats["source_attributed_revenue"],
+        "source_unique_sales": source_stats["source_unique_sales"],
+        "source_aov": source_stats["source_aov"],
         "unattributed_orders": int(unattributed_orders),
         "notes": [
             "Local attribution computed from touchpoints+orders by customer_key, session_id, visitor_id, then direct order source.",
@@ -731,6 +823,26 @@ def attribution_day_totals(
 ) -> dict[str, object]:
     # Convenience for report charting: aggregates attributed order components by attribution date.
     date_basis = _normalize_basis(date_basis)
+    if conversion_type.lower() != "purchase":
+        return {
+            "model": model,
+            "start_date": start_date,
+            "end_date": end_date,
+            "lookback_days": lookback_days,
+            "date_basis": date_basis,
+            "conversion_type": conversion_type,
+            "rows": [],
+            "sale_groups": 0,
+            "source_attributed_orders": 0,
+            "source_attributed_revenue": 0.0,
+            "source_unique_sales": 0,
+            "source_aov": None,
+            "unattributed_orders": 0,
+            "notes": [
+                f"conversion_type={conversion_type!r} is not supported; only 'purchase' is attributed. Returning empty rows.",
+            ],
+        }
+
     start_d = date.fromisoformat(start_date)
     end_d = date.fromisoformat(end_date)
     orders_end_d = end_d if date_basis == "conversion" else (end_d + timedelta(days=lookback_days))
@@ -738,13 +850,21 @@ def attribution_day_totals(
 
     orders, tps_by_identity, dts_by_identity, tps_by_exact_ts = _load_orders_and_touchpoints(
         db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d,
+        refund_as_of_d=end_d,
         excluded_raw=excluded_raw, excluded_norm=excluded_norm,
     )
     contributions, unattributed_orders = _attributed(
         orders, tps_by_identity, dts_by_identity, tps_by_exact_ts, model=model,
         lookback=timedelta(days=lookback_days), excluded_raw=excluded_raw, excluded_norm=excluded_norm,
     )
-    rows_out = _aggregate_day_rows(contributions, date_basis=date_basis, start_d=start_d, end_d=end_d)
+    source_stats = _source_attributed_stats(contributions, start_d=start_d, end_d=end_d)
+    rows_out = _aggregate_day_rows(
+        contributions,
+        date_basis=date_basis,
+        start_d=start_d,
+        end_d=end_d,
+        source_days=source_stats["days"] if date_basis == "conversion" else None,
+    )
     sale_groups = _attributed_sale_group_count(
         contributions, date_basis=date_basis, start_d=start_d, end_d=end_d
     )
@@ -758,6 +878,10 @@ def attribution_day_totals(
         "conversion_type": conversion_type,
         "rows": rows_out,
         "sale_groups": sale_groups,
+        "source_attributed_orders": source_stats["source_attributed_orders"],
+        "source_attributed_revenue": source_stats["source_attributed_revenue"],
+        "source_unique_sales": source_stats["source_unique_sales"],
+        "source_aov": source_stats["source_aov"],
         "unattributed_orders": int(unattributed_orders),
         "notes": ["Local helper for charting: attributed totals grouped by attribution date."],
     }
@@ -791,6 +915,10 @@ def attribution_run_and_day_totals(
             "lookback_days": lookback_days,
             "date_basis": date_basis,
             "conversion_type": conversion_type,
+            "source_attributed_orders": 0,
+            "source_attributed_revenue": 0.0,
+            "source_unique_sales": 0,
+            "source_aov": None,
             "unattributed_orders": 0,
         }
         return {
@@ -811,6 +939,7 @@ def attribution_run_and_day_totals(
 
     orders, tps_by_identity, dts_by_identity, tps_by_exact_ts = _load_orders_and_touchpoints(
         db_path, start_d=start_d, lookback_days=lookback_days, orders_end_d=orders_end_d,
+        refund_as_of_d=end_d,
         excluded_raw=excluded_raw, excluded_norm=excluded_norm,
     )
     contributions, unattributed_orders = _attributed(
@@ -822,7 +951,14 @@ def attribution_run_and_day_totals(
         contributions, account_map=account_map, value_type=value_type,
         date_basis=date_basis, start_d=start_d, end_d=end_d,
     )
-    day_rows = _aggregate_day_rows(contributions, date_basis=date_basis, start_d=start_d, end_d=end_d)
+    source_stats = _source_attributed_stats(contributions, start_d=start_d, end_d=end_d)
+    day_rows = _aggregate_day_rows(
+        contributions,
+        date_basis=date_basis,
+        start_d=start_d,
+        end_d=end_d,
+        source_days=source_stats["days"] if date_basis == "conversion" else None,
+    )
     sale_groups = _attributed_sale_group_count(
         contributions, date_basis=date_basis, start_d=start_d, end_d=end_d
     )
@@ -834,6 +970,10 @@ def attribution_run_and_day_totals(
         "lookback_days": lookback_days,
         "date_basis": date_basis,
         "conversion_type": conversion_type,
+        "source_attributed_orders": source_stats["source_attributed_orders"],
+        "source_attributed_revenue": source_stats["source_attributed_revenue"],
+        "source_unique_sales": source_stats["source_unique_sales"],
+        "source_aov": source_stats["source_aov"],
         "unattributed_orders": int(unattributed_orders),
     }
     return {

@@ -3,7 +3,14 @@
 
 import argparse
 import sqlite3
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from attributionops.schema import ensure_campaign_settings, ensure_refund_log
 
 
 def init_db(db_path: str) -> None:
@@ -121,15 +128,9 @@ def init_db(db_path: str) -> None:
             ctr TEXT, cost TEXT, cost_per_view TEXT
         );""")
 
-        # Per-campaign tracked/excluded flag (absence of a row == tracked).
-        conn.execute("""CREATE TABLE IF NOT EXISTS campaign_settings (
-            platform    TEXT NOT NULL,
-            campaign_id TEXT NOT NULL,
-            tracked     INTEGER NOT NULL DEFAULT 1,
-            note        TEXT DEFAULT '',
-            updated_at  TEXT,
-            PRIMARY KEY (platform, campaign_id)
-        );""")
+        # Per-campaign tracked/excluded flags and parity defaults.
+        ensure_campaign_settings(conn)
+        ensure_refund_log(conn)
 
         conn.commit()
 

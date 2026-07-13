@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from attributionops.db import query, query_iter, sql_rows
+from attributionops.schema import DEFAULT_CAMPAIGN_SETTINGS, ensure_campaign_settings
 from attributionops.tools.audiences import audiences_sync
 from attributionops.tools.conversions import conversions_push
 from attributionops.tools.logs import logs_search
@@ -46,6 +48,38 @@ def test_sql_rows_missing_db_raises(tmp_path):
 
 
 # ── warehouse.query tool ──────────────────────────────────────────────────────
+def test_default_campaign_settings_seed_without_overwriting_manual_override(empty_db):
+    with sqlite3.connect(empty_db) as conn:
+        seeded = conn.execute(
+            "SELECT platform, campaign_id, tracked FROM campaign_settings"
+        ).fetchall()
+        assert set(seeded) >= {
+            (platform, campaign_id, tracked)
+            for platform, campaign_id, tracked, _note in DEFAULT_CAMPAIGN_SETTINGS
+        }
+
+        platform, campaign_id, _tracked, _note = DEFAULT_CAMPAIGN_SETTINGS[0]
+        conn.execute(
+            """
+            UPDATE campaign_settings
+            SET tracked = 1, note = 'Manual override'
+            WHERE platform = ? AND campaign_id = ?
+            """,
+            (platform, campaign_id),
+        )
+        ensure_campaign_settings(conn)
+        override = conn.execute(
+            """
+            SELECT tracked, note
+            FROM campaign_settings
+            WHERE platform = ? AND campaign_id = ?
+            """,
+            (platform, campaign_id),
+        ).fetchone()
+
+    assert override == (1, "Manual override")
+
+
 def test_warehouse_query_wraps_result(empty_db):
     insert_rows(empty_db, "spend", [spend(date="2026-01-10"), spend(date="2026-01-11")])
     out = warehouse_query(empty_db, "SELECT COUNT(*) AS n FROM spend;")

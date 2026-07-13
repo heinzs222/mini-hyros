@@ -534,6 +534,60 @@ def test_attribution_day_totals_groups_by_conversion_date(empty_db):
     assert by_day["2026-01-16"]["total_revenue"] == 60.00
 
 
+def test_source_aov_uses_unique_attributed_sale_groups(empty_db):
+    insert_rows(
+        empty_db,
+        "touchpoints",
+        [
+            touchpoint("2026-01-14T09:00:00Z", "c1", ad_id="ad1"),
+            touchpoint("2026-01-14T10:00:00Z", "c2", ad_id="ad2"),
+            touchpoint("2026-01-15T09:00:00Z", "c3", ad_id="ad3"),
+        ],
+    )
+    insert_rows(
+        empty_db,
+        "orders",
+        [
+            order("o1", "2026-01-15T12:00:00Z", "c1", net=100, sale_group_id="sale-1"),
+            order("o2", "2026-01-15T13:00:00Z", "c2", net=50, sale_group_id="sale-1"),
+            order("o3", "2026-01-16T12:00:00Z", "c3", net=130, sale_group_id="sale-2"),
+            order("o4", "2026-01-16T13:00:00Z", "unlinked", net=999, sale_group_id="sale-3"),
+        ],
+    )
+
+    run = attribution_run(
+        empty_db,
+        model="last_click",
+        start_date=JAN,
+        end_date=JAN_END,
+        lookback_days=30,
+        conversion_type="Purchase",
+        value_type="revenue",
+    )
+    assert run["source_attributed_orders"] == 3
+    assert run["source_attributed_revenue"] == 280.00
+    assert run["source_unique_sales"] == 2
+    assert run["source_aov"] == 140.00
+
+    daily = attribution_day_totals(
+        empty_db,
+        model="last_click",
+        start_date=JAN,
+        end_date=JAN_END,
+        lookback_days=30,
+        conversion_type="Purchase",
+    )
+    by_day = {r["date"]: r for r in daily["rows"]}
+    assert by_day["2026-01-15"]["source_attributed_orders"] == 2
+    assert by_day["2026-01-15"]["source_attributed_revenue"] == 150.00
+    assert by_day["2026-01-15"]["source_unique_sales"] == 1
+    assert by_day["2026-01-15"]["source_aov"] == 150.00
+    assert by_day["2026-01-16"]["source_attributed_orders"] == 1
+    assert by_day["2026-01-16"]["source_attributed_revenue"] == 130.00
+    assert by_day["2026-01-16"]["source_unique_sales"] == 1
+    assert by_day["2026-01-16"]["source_aov"] == 130.00
+
+
 def test_attribution_day_totals_click_basis_groups_by_click_date(empty_db):
     insert_rows(empty_db, "touchpoints", [touchpoint("2026-01-14T09:00:00Z", "c1", ad_id="ad1")])
     insert_rows(empty_db, "orders", [order("o1", "2026-01-15T12:00:00Z", "c1", net=100)])

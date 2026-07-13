@@ -8,6 +8,7 @@ series + summary math) is caught.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -252,3 +253,58 @@ def test_refunded_recurring_sale_stays_in_hyros_recurring_split(empty_db):
     assert totals["total_customers"] == 1
     assert totals["recurring_customers"] == 1
     assert totals["new_customers"] == 0
+
+
+def test_report_applies_refunds_only_when_issued_by_report_end(empty_db):
+    insert_rows(
+        empty_db,
+        "orders",
+        [
+            order(
+                "stripe|ch_historical",
+                "2026-01-15T12:00:00Z",
+                "historical-customer",
+                gross=100,
+                net=70,
+                refunds=30,
+                processor="stripe",
+                processor_customer_id="cus_historical",
+            )
+        ],
+    )
+    insert_rows(
+        empty_db,
+        "refund_log",
+        [
+            {
+                "id": "re_in_window",
+                "ts": "2026-01-20T12:00:00Z",
+                "order_id": "stripe|ch_historical",
+                "customer_key": "historical-customer",
+                "type": "refund",
+                "amount": "10",
+                "source": "stripe_sync",
+            },
+            {
+                "id": "re_after_window",
+                "ts": "2026-02-05T12:00:00Z",
+                "order_id": "stripe|ch_historical",
+                "customer_key": "historical-customer",
+                "type": "refund",
+                "amount": "20",
+                "source": "stripe_sync",
+            },
+        ],
+    )
+
+    before_any_refund = build_hyros_like_report(
+        empty_db,
+        replace(_inputs(), end_date="2026-01-18"),
+    )["summary_totals"]
+    after_first_refund = build_hyros_like_report(empty_db, _inputs())["summary_totals"]
+
+    assert before_any_refund["all_orders_gross_revenue"] == 100.0
+    assert before_any_refund["all_orders_revenue"] == 100.0
+    assert before_any_refund["total_customers"] == 1
+    assert after_first_refund["all_orders_revenue"] == 90.0
+    assert after_first_refund["total_customers"] == 0
