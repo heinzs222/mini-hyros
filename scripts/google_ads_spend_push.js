@@ -9,10 +9,11 @@ var MINI_HYROS_ENDPOINT = "https://mini-hyros.onrender.com";
 var MINI_HYROS_TOKEN =
   "PASTE_GOOGLE_ADS_SCRIPT_TOKEN_HERE";
 
-// Keep false for Hyros-compatible ad-level totals. Set true only when the
-// backend also has GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS=true and you explicitly
-// want campaign-only Performance Max / Smart / Demand Gen billing deltas.
-var INCLUDE_CAMPAIGN_TOTAL_ROWS = false;
+// Include authoritative campaign totals so Performance Max / Smart / Demand
+// Gen spend is not omitted. The backend stores only the positive difference
+// between each campaign total and its matching ad_group_ad rows, which avoids
+// double-counting standard campaigns.
+var INCLUDE_CAMPAIGN_TOTAL_ROWS = true;
 
 // DATE_MODE options:
 // - "LOOKBACK": push exactly LOOKBACK_DAYS calendar days, including today.

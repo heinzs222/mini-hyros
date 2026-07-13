@@ -35,11 +35,13 @@ services:
       - key: GOOGLE_ADS_DEVELOPER_TOKEN
         sync: false
       - key: GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS
-        value: "false"
+        value: "true"
       - key: TIKTOK_ACCESS_TOKEN
         sync: false
       - key: STRIPE_RECURRING_AMOUNT_KEYS
         value: "CAD:5000"
+      - key: STRIPE_HISTORY_BACKFILL_DAYS
+        value: "365"
       - key: AUTH_ENABLED
         value: "false"
       - key: AUTH_USERNAME

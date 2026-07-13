@@ -12,7 +12,7 @@ import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +103,12 @@ def _ensure_orders_table(db_path: str) -> None:
             order_id TEXT DEFAULT '',
             customer_key TEXT DEFAULT ''
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS stripe_sync_coverage (
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (start_date, end_date)
+        )""")
         order_cols = _table_columns(conn, "orders")
         for col in (
             "session_id",
@@ -130,6 +136,87 @@ def _ensure_orders_table(db_path: str) -> None:
         if touchpoint_cols and "visitor_id" not in touchpoint_cols:
             conn.execute("ALTER TABLE touchpoints ADD COLUMN visitor_id TEXT DEFAULT ''")
         ensure_order_semantics(conn)
+        conn.commit()
+
+
+def _history_backfill_days() -> int:
+    """Return the number of pre-window days used to classify repeat buyers."""
+    raw = str(os.environ.get("STRIPE_HISTORY_BACKFILL_DAYS", "365") or "365").strip()
+    try:
+        return max(0, min(int(raw), 3650))
+    except ValueError:
+        return 365
+
+
+def _parse_calendar_date(value: str) -> date:
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def _missing_stripe_coverage(db_path: str, start_date: str, end_date: str) -> list[tuple[str, str]]:
+    """Return uncovered inclusive calendar-date ranges."""
+    start = _parse_calendar_date(start_date)
+    end = _parse_calendar_date(end_date)
+    if start > end:
+        return []
+
+    _ensure_orders_table(db_path)
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT start_date, end_date
+               FROM stripe_sync_coverage
+               WHERE end_date >= ? AND start_date <= ?
+               ORDER BY start_date, end_date""",
+            (start_date, end_date),
+        ).fetchall()
+
+    missing: list[tuple[str, str]] = []
+    cursor = start
+    for row in rows:
+        covered_start = max(start, _parse_calendar_date(str(row[0])))
+        covered_end = min(end, _parse_calendar_date(str(row[1])))
+        if covered_end < cursor:
+            continue
+        if covered_start > cursor:
+            missing.append((cursor.isoformat(), (covered_start - timedelta(days=1)).isoformat()))
+        cursor = max(cursor, covered_end + timedelta(days=1))
+        if cursor > end:
+            break
+    if cursor <= end:
+        missing.append((cursor.isoformat(), end.isoformat()))
+    return missing
+
+
+def _record_stripe_coverage(db_path: str, start_date: str, end_date: str) -> None:
+    """Merge a successfully fetched range into the Stripe coverage ledger."""
+    start = _parse_calendar_date(start_date)
+    end = _parse_calendar_date(end_date)
+    if start > end:
+        start, end = end, start
+
+    _ensure_orders_table(db_path)
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT start_date, end_date FROM stripe_sync_coverage ORDER BY start_date, end_date"
+        ).fetchall()
+        ranges = [(start, end)] + [
+            (_parse_calendar_date(str(row[0])), _parse_calendar_date(str(row[1])))
+            for row in rows
+        ]
+        ranges.sort(key=lambda item: item[0])
+
+        merged: list[tuple[date, date]] = []
+        for range_start, range_end in ranges:
+            if not merged or range_start > merged[-1][1] + timedelta(days=1):
+                merged.append((range_start, range_end))
+            else:
+                previous_start, previous_end = merged[-1]
+                merged[-1] = (previous_start, max(previous_end, range_end))
+
+        conn.execute("DELETE FROM stripe_sync_coverage")
+        conn.executemany(
+            "INSERT INTO stripe_sync_coverage (start_date, end_date, updated_at) VALUES (?, ?, ?)",
+            [(range_start.isoformat(), range_end.isoformat(), _now()) for range_start, range_end in merged],
+        )
         conn.commit()
 
 
@@ -727,14 +814,48 @@ async def stripe_sync(
         start_date = (datetime.now(UTC) - timedelta(days=90)).strftime("%Y-%m-%d")
 
     try:
-        charges = await _fetch_stripe_charges(api_key, start_date, end_date)
+        start_day = _parse_calendar_date(start_date)
+        end_day = _parse_calendar_date(end_date)
+        if start_day > end_day:
+            start_day, end_day = end_day, start_day
+        start_date = start_day.isoformat()
+        end_date = end_day.isoformat()
+
         db_path = _db()
+        _ensure_orders_table(db_path)
+
+        history_ranges: list[tuple[str, str]] = []
+        history_fetched = 0
+        history_synced = 0
+        history_updated = 0
+        history_days = _history_backfill_days()
+        if history_days:
+            history_start = (start_day - timedelta(days=history_days)).isoformat()
+            history_end = (start_day - timedelta(days=1)).isoformat()
+            history_ranges = _missing_stripe_coverage(db_path, history_start, history_end)
+            for range_start, range_end in history_ranges:
+                history_charges = await _fetch_stripe_charges(api_key, range_start, range_end)
+                history_stats = _write_stripe_orders(db_path, history_charges)
+                history_fetched += len(history_charges)
+                history_synced += history_stats["inserted"]
+                history_updated += history_stats["updated"]
+                _record_stripe_coverage(db_path, range_start, range_end)
+
+        charges = await _fetch_stripe_charges(api_key, start_date, end_date)
         stats = _write_stripe_orders(db_path, charges)
+        _record_stripe_coverage(db_path, start_date, end_date)
         return {
             "synced": stats["inserted"],
             "updated": stats["updated"],
             "recurring": stats["recurring"],
             "fetched": len(charges),
+            "history_fetched": history_fetched,
+            "history_synced": history_synced,
+            "history_updated": history_updated,
+            "history_ranges": [
+                {"start_date": range_start, "end_date": range_end}
+                for range_start, range_end in history_ranges
+            ],
             "start_date": start_date,
             "end_date": end_date,
             "query_start_utc": datetime.fromtimestamp(_date_to_unix(start_date), tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),

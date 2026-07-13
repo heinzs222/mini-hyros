@@ -35,6 +35,9 @@ def api_db(tmp_path, monkeypatch) -> str:
     _init_schema(str(db_path))
     monkeypatch.setenv("ATTRIBUTIONOPS_DB_PATH", str(db_path))
     monkeypatch.setenv("AUTH_ENABLED", "false")  # default: auth off, even if .env enables it
+    # Existing endpoint tests mock one selected-range request. Dedicated
+    # history tests opt in explicitly.
+    monkeypatch.setenv("STRIPE_HISTORY_BACKFILL_DAYS", "0")
     return str(db_path)
 
 

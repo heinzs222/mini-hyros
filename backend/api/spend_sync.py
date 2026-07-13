@@ -656,8 +656,14 @@ def _import_google_ads_script_rows(payload: GoogleAdsScriptSpendPayload) -> dict
         )
         inserted_ads += 1
 
-    include_campaign_adjustments = _google_include_campaign_adjustments()
-    for r in campaign_total_rows if include_campaign_adjustments else []:
+    # Campaign totals are intentionally supplied by the Google Ads Script and
+    # are authoritative for campaign types such as Performance Max that have
+    # no ad_group_ad rows. Reconcile every supplied total automatically. The
+    # positive-delta calculation below prevents standard campaigns from being
+    # counted twice and avoids requiring a second Render setting to make the
+    # script payload complete.
+    include_campaign_adjustments = True
+    for r in campaign_total_rows:
         ad_total = ad_totals_by_campaign_day.get((r["date"], r["campaign_id"]), {})
         cost_delta = round(r["cost"] - float(ad_total.get("cost") or 0.0), 6)
         clicks_delta = r["clicks"] - float(ad_total.get("clicks") or 0.0)
@@ -693,12 +699,6 @@ def _import_google_ads_script_rows(payload: GoogleAdsScriptSpendPayload) -> dict
         )
         inserted_campaign_adjustments += 1
         adjustment_cost += max(cost_delta, 0.0)
-
-    if campaign_total_rows and not include_campaign_adjustments:
-        warnings.append(
-            f"Ignored {len(campaign_total_rows)} campaign-total rows in Hyros-compatible mode. "
-            "Set GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS=true to include their positive deltas."
-        )
 
     if not parsed_rows:
         start_date = _parse_import_date(payload.start_date)
@@ -869,10 +869,11 @@ def _google_ads_api_sync_disabled() -> bool:
 def _google_include_campaign_adjustments() -> bool:
     """Return whether campaign-only Google spend should be reconciled.
 
-    Hyros reports ad-level Google rows, so compatibility mode excludes these
-    adjustments by default. Opt in for complete account billing totals.
+    Complete Google reporting includes campaign types such as Performance Max
+    that have no ad_group_ad rows. Default to reconciliation; an explicit false
+    remains available for diagnosing ad-level-only imports.
     """
-    raw = str(os.environ.get("GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS", "") or "").strip().lower()
+    raw = str(os.environ.get("GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS", "true") or "true").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 

@@ -655,8 +655,8 @@ def test_write_google_spend_rows_reconciles_campaign_level_adjustment(api_db, mo
     assert len(rows) == 3
 
 
-def test_write_google_spend_rows_defaults_to_hyros_ad_level_cost(api_db, monkeypatch):
-    monkeypatch.delenv("GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS", raising=False)
+def test_write_google_spend_rows_can_explicitly_disable_campaign_adjustments(api_db, monkeypatch):
+    monkeypatch.setenv("GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS", "false")
     ss._ensure_spend_table(api_db)
     ad_rows = [_google_result_row()]  # campaign 111, ad-level cost 5.5
     campaign_rows = [
@@ -703,7 +703,9 @@ def test_write_google_spend_rows_no_adjustment_when_campaign_matches_ad_sum(api_
 
 def test_google_ads_script_push_campaign_only_row_creates_adjustment(client, api_db, monkeypatch):
     monkeypatch.setenv("GOOGLE_ADS_SCRIPT_TOKEN", "tok")
-    monkeypatch.setenv("GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS", "true")
+    # Script payloads reconcile supplied campaign totals even if the direct API
+    # sync override is explicitly disabled.
+    monkeypatch.setenv("GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS", "false")
 
     # One normal ad-level row for campaign c1, plus a PMax-style campaign-only
     # row for campaign c2 (no adset_id/ad_id) that ad_group_ad would never report.

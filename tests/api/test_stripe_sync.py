@@ -12,6 +12,8 @@ real network.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import respx
 from httpx import Response
 
@@ -189,6 +191,66 @@ def test_sync_uses_reporting_timezone_for_stripe_query_bounds(client, api_db, mo
     assert int(request.url.params["created[lte]"]) == 1782453599  # Jun 26 05:59:59 UTC
     assert body["query_start_utc"] == "2026-06-19T06:00:00Z"
     assert body["query_end_utc"] == "2026-06-26T05:59:59Z"
+
+
+def test_sync_backfills_customer_history_once_for_recurring_classification(
+    client, api_db, monkeypatch
+):
+    monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
+    monkeypatch.setenv("STRIPE_HISTORY_BACKFILL_DAYS", "365")
+
+    history_charge = _charge(
+        "ch_history",
+        amount=12000,
+        email="returning@example.com",
+        created=int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()),
+    )
+    history_charge["description"] = "Guard training"
+    selected_charge = _charge(
+        "ch_selected",
+        amount=12000,
+        email="returning@example.com",
+        created=int(datetime(2026, 7, 5, tzinfo=timezone.utc).timestamp()),
+    )
+    selected_charge["description"] = "Guard training"
+
+    responses = iter([
+        Response(200, json=_charges_page([history_charge])),
+        Response(200, json=_charges_page([selected_charge])),
+        Response(200, json=_charges_page([selected_charge])),
+    ])
+    with respx.mock(assert_all_mocked=False) as router:
+        route = router.get(url__startswith="https://api.stripe.com/v1/charges").mock(
+            side_effect=lambda request: next(responses)
+        )
+        first = client.post(
+            "/api/stripe/sync",
+            params={"start_date": "2026-07-04", "end_date": "2026-07-11"},
+        ).json()
+        second = client.post(
+            "/api/stripe/sync",
+            params={"start_date": "2026-07-04", "end_date": "2026-07-11"},
+        ).json()
+
+    assert route.call_count == 3
+    assert first["history_fetched"] == 1
+    assert first["history_synced"] == 1
+    assert first["recurring"] == 1
+    assert second["history_fetched"] == 0
+    assert second["history_ranges"] == []
+
+    selected = sql_rows(
+        api_db,
+        "SELECT is_recurring FROM orders WHERE order_id = 'stripe|ch_selected'",
+    )[0]
+    assert selected["is_recurring"] == 1
+    coverage = sql_rows(
+        api_db,
+        "SELECT start_date, end_date FROM stripe_sync_coverage",
+    )
+    assert [(row["start_date"], row["end_date"]) for row in coverage] == [
+        ("2025-07-04", "2026-07-11")
+    ]
 
 
 def test_sync_uses_fallback_secret_key_env(client, api_db, monkeypatch):
