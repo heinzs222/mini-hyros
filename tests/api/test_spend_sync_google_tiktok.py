@@ -616,7 +616,8 @@ def test_google_ads_script_empty_replace_preserves_existing_google_spend(client,
 # Google cost: ad_group_ad has no rows at all for PMax/Smart/Demand Gen) --------
 
 
-def test_write_google_spend_rows_reconciles_campaign_level_adjustment(api_db):
+def test_write_google_spend_rows_reconciles_campaign_level_adjustment(api_db, monkeypatch):
+    monkeypatch.setenv("GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS", "true")
     ss._ensure_spend_table(api_db)
     ad_rows = [_google_result_row()]  # campaign 111, cost 5.5
 
@@ -654,6 +655,32 @@ def test_write_google_spend_rows_reconciles_campaign_level_adjustment(api_db):
     assert len(rows) == 3
 
 
+def test_write_google_spend_rows_defaults_to_hyros_ad_level_cost(api_db, monkeypatch):
+    monkeypatch.delenv("GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS", raising=False)
+    ss._ensure_spend_table(api_db)
+    ad_rows = [_google_result_row()]  # campaign 111, ad-level cost 5.5
+    campaign_rows = [
+        {
+            "segments": {"date": "2026-01-10"},
+            "campaign": {"id": "111", "name": "Spring Sale"},
+            "metrics": {"clicks": "60", "impressions": "3000", "costMicros": "20000000"},
+        }
+    ]
+
+    stats = ss._write_google_spend_rows(
+        api_db, "123-456-7890", "2026-01-01", "2026-01-31", ad_rows, campaign_rows
+    )
+
+    assert stats["inserted"] == 1
+    assert stats["inserted_ads"] == 1
+    assert stats["inserted_campaign_adjustments"] == 0
+    with sqlite3.connect(api_db) as conn:
+        total_cost = conn.execute(
+            "SELECT SUM(CAST(cost AS REAL)) FROM spend WHERE platform='google'"
+        ).fetchone()[0]
+    assert total_cost == 5.5
+
+
 def test_write_google_spend_rows_no_adjustment_when_campaign_matches_ad_sum(api_db):
     ss._ensure_spend_table(api_db)
     ad_rows = [_google_result_row()]  # campaign 111, cost 5.5
@@ -676,6 +703,7 @@ def test_write_google_spend_rows_no_adjustment_when_campaign_matches_ad_sum(api_
 
 def test_google_ads_script_push_campaign_only_row_creates_adjustment(client, api_db, monkeypatch):
     monkeypatch.setenv("GOOGLE_ADS_SCRIPT_TOKEN", "tok")
+    monkeypatch.setenv("GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS", "true")
 
     # One normal ad-level row for campaign c1, plus a PMax-style campaign-only
     # row for campaign c2 (no adset_id/ad_id) that ad_group_ad would never report.

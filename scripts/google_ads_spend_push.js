@@ -7,10 +7,15 @@
 
 var MINI_HYROS_ENDPOINT = "https://mini-hyros.onrender.com";
 var MINI_HYROS_TOKEN =
-  "mini-hyros-google-spend-2026-xguard-CHANGE-THIS-LONG-RANDOM";
+  "PASTE_GOOGLE_ADS_SCRIPT_TOKEN_HERE";
+
+// Keep false for Hyros-compatible ad-level totals. Set true only when the
+// backend also has GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS=true and you explicitly
+// want campaign-only Performance Max / Smart / Demand Gen billing deltas.
+var INCLUDE_CAMPAIGN_TOTAL_ROWS = false;
 
 // DATE_MODE options:
-// - "LOOKBACK": push today plus the previous LOOKBACK_DAYS days.
+// - "LOOKBACK": push exactly LOOKBACK_DAYS calendar days, including today.
 // - "CUSTOM": push the exact CUSTOM_START_DATE to CUSTOM_END_DATE range.
 // - "YESTERDAY", "LAST_7_DAYS", "THIS_MONTH", "LAST_MONTH": common presets.
 var DATE_MODE = "LOOKBACK";
@@ -21,6 +26,9 @@ var CUSTOM_END_DATE = "2026-06-16";
 var BATCH_SIZE = 1000;
 
 function main() {
+  if (!MINI_HYROS_TOKEN || MINI_HYROS_TOKEN.indexOf("PASTE_") === 0) {
+    throw new Error("Set MINI_HYROS_TOKEN to the GOOGLE_ADS_SCRIPT_TOKEN from Render before running.");
+  }
   var account = AdsApp.currentAccount();
   var accountId = account.getCustomerId().replace(/-/g, "");
   var tz = account.getTimeZone();
@@ -29,13 +37,12 @@ function main() {
   var end = dateRange.end;
 
   Logger.log("Mini Hyros: running Google Ads spend push for " + start + " to " + end + " (" + dateRange.mode + ").");
-  // ad_group_ad rows cover standard Search/Display/Video ads. Performance Max,
-  // Smart, and Demand Gen campaigns have no ad_group_ad rows at all, so we also
-  // pull campaign-level totals; the backend reconciles the difference so PMax/
-  // Smart cost isn't silently dropped.
+  // Hyros compatibility uses ad_group_ad rows. Campaign totals are optional
+  // because adding them produced a higher cost than the source Hyros account.
   var rows = fetchSpendRows(accountId, start, end);
-  var campaignRows = fetchCampaignSpendRows(accountId, start, end);
-  rows = rows.concat(campaignRows);
+  if (INCLUDE_CAMPAIGN_TOTAL_ROWS) {
+    rows = rows.concat(fetchCampaignSpendRows(accountId, start, end));
+  }
 
   if (!rows.length) {
     postRows(accountId, start, end, [], true);
@@ -64,45 +71,49 @@ function main() {
 
 function getDateRange(tz) {
   var mode = String(DATE_MODE || "LOOKBACK").toUpperCase();
-  var today = stripTime(new Date());
-  var startDate;
-  var endDate;
+  // Derive the account's calendar date first, then do arithmetic on ISO dates.
+  // Mixing Date#getDate() in the script timezone with Utilities.formatDate in
+  // the Google Ads account timezone can shift a boundary by one day.
+  var today = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
+  var start;
+  var end;
 
   if (mode === "CUSTOM") {
-    startDate = parseDateString(CUSTOM_START_DATE);
-    endDate = parseDateString(CUSTOM_END_DATE);
+    start = normalizeIsoDate(CUSTOM_START_DATE);
+    end = normalizeIsoDate(CUSTOM_END_DATE);
   } else if (mode === "YESTERDAY") {
-    startDate = shiftDate(today, -1);
-    endDate = shiftDate(today, -1);
+    start = addIsoDays(today, -1);
+    end = start;
   } else if (mode === "LAST_7_DAYS") {
-    startDate = shiftDate(today, -6);
-    endDate = today;
+    start = addIsoDays(today, -7);
+    end = addIsoDays(today, -1);
   } else if (mode === "THIS_MONTH") {
-    startDate = new Date(today.getFullYear(), today.getMonth(), 1);
-    endDate = today;
+    start = today.slice(0, 8) + "01";
+    end = today;
   } else if (mode === "LAST_MONTH") {
-    startDate = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-    endDate = new Date(today.getFullYear(), today.getMonth(), 0);
+    end = addIsoDays(today.slice(0, 8) + "01", -1);
+    start = end.slice(0, 8) + "01";
   } else {
     mode = "LOOKBACK";
-    endDate = today;
-    startDate = shiftDate(today, -Number(LOOKBACK_DAYS || 30));
+    var days = Math.max(1, Number(LOOKBACK_DAYS || 30));
+    end = today;
+    start = addIsoDays(today, -(days - 1));
   }
 
-  if (!startDate || !endDate || isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+  if (!start || !end) {
     throw new Error("Invalid date range. Use yyyy-MM-dd, for example 2026-05-17.");
   }
 
-  if (startDate.getTime() > endDate.getTime()) {
-    var tmp = startDate;
-    startDate = endDate;
-    endDate = tmp;
+  if (start > end) {
+    var tmp = start;
+    start = end;
+    end = tmp;
   }
 
   return {
     mode: mode,
-    start: Utilities.formatDate(startDate, tz, "yyyy-MM-dd"),
-    end: Utilities.formatDate(endDate, tz, "yyyy-MM-dd")
+    start: start,
+    end: end
   };
 }
 
@@ -146,21 +157,22 @@ function batchDateRange(rows) {
   return { start: min || "", end: max || "" };
 }
 
-function parseDateString(value) {
+function normalizeIsoDate(value) {
   var text = String(value || "").trim();
   var match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) return null;
-  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (!match) return "";
+  var parsed = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  var normalized = Utilities.formatDate(parsed, "UTC", "yyyy-MM-dd");
+  return normalized === text ? text : "";
 }
 
-function shiftDate(date, days) {
-  var copy = new Date(date.getTime());
-  copy.setDate(copy.getDate() + Number(days || 0));
-  return copy;
-}
-
-function stripTime(date) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+function addIsoDays(value, days) {
+  var text = normalizeIsoDate(value);
+  if (!text) return "";
+  var parts = text.split("-");
+  var date = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
+  date.setUTCDate(date.getUTCDate() + Number(days || 0));
+  return Utilities.formatDate(date, "UTC", "yyyy-MM-dd");
 }
 
 function fetchSpendRows(accountId, start, end) {

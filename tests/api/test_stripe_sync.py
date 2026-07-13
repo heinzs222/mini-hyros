@@ -107,6 +107,33 @@ def test_sync_includes_refunded_filters_unpaid_and_zero(client, api_db, monkeypa
     assert float(refunded["net"]) == 0.0
 
 
+def test_sync_applies_configured_recurring_amount_rule(client, api_db, monkeypatch):
+    monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
+    monkeypatch.setenv("STRIPE_RECURRING_AMOUNT_KEYS", "CAD:5000")
+    payload = _charges_page([
+        _charge("ch_plan_repeat", amount=5000, currency="cad", email="plan@example.com", created=1769904000),
+        _charge("ch_other", amount=5000, currency="usd", email="other@example.com", created=1769904000),
+        # Account-specific amount rules allow a shorter repeat cycle, but only
+        # when a prior charge has the same canonical identity.
+        _charge("ch_plan_first", amount=5000, currency="cad", email="plan@example.com", created=1769299200),
+    ])
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith="https://api.stripe.com/v1/charges").mock(
+            return_value=Response(200, json=payload)
+        )
+        body = client.post("/api/stripe/sync").json()
+        second_body = client.post("/api/stripe/sync").json()
+
+    assert body["recurring"] == 1
+    assert second_body["recurring"] == 1
+    rows = sql_rows(api_db, "SELECT order_id, is_recurring FROM orders ORDER BY order_id")
+    assert {row["order_id"]: row["is_recurring"] for row in rows} == {
+        "stripe|ch_other": 0,
+        "stripe|ch_plan_first": 0,
+        "stripe|ch_plan_repeat": 1,
+    }
+
+
 def test_sync_dedupes_on_second_run(client, api_db, monkeypatch):
     monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
     payload = _charges_page([_charge("ch_dup", amount=7000)])
@@ -142,6 +169,26 @@ def test_sync_paginates_with_has_more(client, api_db, monkeypatch):
     assert body["fetched"] == 2
     assert body["synced"] == 2
     assert len(sql_rows(api_db, "SELECT * FROM orders")) == 2
+
+
+def test_sync_uses_reporting_timezone_for_stripe_query_bounds(client, api_db, monkeypatch):
+    monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
+    monkeypatch.setenv("REPORT_TIMEZONE", "Etc/GMT+6")
+
+    with respx.mock(assert_all_mocked=False) as router:
+        route = router.get(url__startswith="https://api.stripe.com/v1/charges").mock(
+            return_value=Response(200, json=_charges_page([]))
+        )
+        body = client.post(
+            "/api/stripe/sync",
+            params={"start_date": "2026-06-19", "end_date": "2026-06-25"},
+        ).json()
+
+    request = route.calls[0].request
+    assert int(request.url.params["created[gte]"]) == 1781848800  # Jun 19 06:00 UTC
+    assert int(request.url.params["created[lte]"]) == 1782453599  # Jun 26 05:59:59 UTC
+    assert body["query_start_utc"] == "2026-06-19T06:00:00Z"
+    assert body["query_end_utc"] == "2026-06-26T05:59:59Z"
 
 
 def test_sync_uses_fallback_secret_key_env(client, api_db, monkeypatch):

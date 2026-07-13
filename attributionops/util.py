@@ -87,11 +87,11 @@ def try_parse_iso_ts(value: Any) -> datetime | None:
 
 # ── Reporting timezone ───────────────────────────────────────────────────────
 # Day boundaries (report ranges, daily buckets) are interpreted in this zone so
-# that a Toronto merchant's "July 2" means local July 2, not the UTC calendar
-# day (which would push post-8pm-ET orders onto the next day). Configure via
-# REPORT_TIMEZONE (IANA name); defaults to America/Toronto.
+# that a merchant's "July 2" means local July 2, not the UTC calendar day.
+# Configure via REPORT_TIMEZONE (IANA name). This account defaults to the same
+# fixed UTC-06 reporting offset configured in Hyros.
 def report_timezone() -> timezone:
-    name = os.environ.get("REPORT_TIMEZONE", "America/Toronto").strip() or "America/Toronto"
+    name = os.environ.get("REPORT_TIMEZONE", "Etc/GMT+6").strip() or "Etc/GMT+6"
     if ZoneInfo is not None:
         try:
             return ZoneInfo(name)  # type: ignore[return-value]

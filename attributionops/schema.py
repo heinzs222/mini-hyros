@@ -23,6 +23,46 @@ _ensured_lock = threading.Lock()
 _ensured_paths: set[str] = set()
 
 
+ORDER_SEMANTIC_COLUMNS: dict[str, str] = {
+    "currency": "TEXT DEFAULT ''",
+    "processor": "TEXT DEFAULT ''",
+    "processor_customer_id": "TEXT DEFAULT ''",
+    "payment_fingerprint": "TEXT DEFAULT ''",
+    "product_key": "TEXT DEFAULT ''",
+    "is_recurring": "INTEGER DEFAULT 0",
+    "sale_group_id": "TEXT DEFAULT ''",
+}
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def ensure_order_semantics(conn: sqlite3.Connection) -> None:
+    """Add the order identity fields required by customer and AOV metrics."""
+    columns = _table_columns(conn, "orders")
+    for name, definition in ORDER_SEMANTIC_COLUMNS.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE orders ADD COLUMN {name} {definition}")
+
+    # Legacy rows represent one sale each until an ingestion source can provide
+    # a stronger grouping key. This keeps every existing order count stable.
+    conn.execute(
+        "UPDATE orders SET sale_group_id = order_id "
+        "WHERE COALESCE(sale_group_id, '') = ''"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_sale_group_id ON orders(sale_group_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_orders_processor_customer_id "
+        "ON orders(processor_customer_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_orders_payment_fingerprint "
+        "ON orders(payment_fingerprint)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_is_recurring ON orders(is_recurring)")
+
+
 def _dedupe_and_unique_index(
     conn: sqlite3.Connection, table: str, key: str, index_name: str, legacy_index: str
 ) -> None:
@@ -72,6 +112,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         ).fetchall()
     }
     if "orders" in tables:
+        ensure_order_semantics(conn)
         _dedupe_and_unique_index(
             conn, "orders", "order_id", "uq_orders_order_id", "idx_orders_order_id"
         )

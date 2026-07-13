@@ -25,6 +25,7 @@ RUN mkdir -p /var/data
 # Default DB path for local/standalone runs. render.yaml overrides this to
 # /var/data/attributionops.sqlite (the persistent disk) when deployed on Render.
 ENV ATTRIBUTIONOPS_DB_PATH=/app/data/live/attributionops.sqlite
+ENV REPORT_TIMEZONE=Etc/GMT+6
 ENV PYTHONUNBUFFERED=1
 ENV TRACKING_DOMAIN=""
 

@@ -29,6 +29,7 @@ from fastapi import APIRouter, Request, HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows as db_query
+from attributionops.schema import ensure_order_semantics
 
 router = APIRouter()
 logger = logging.getLogger("ghl")
@@ -118,6 +119,7 @@ def _ensure_tracking_schema(db_path: str) -> None:
         ):
             if col not in order_cols:
                 conn.execute(f"ALTER TABLE orders ADD COLUMN {col} TEXT DEFAULT ''")
+        ensure_order_semantics(conn)
 
         conversion_cols = _table_columns(conn, "conversions")
         for col in ("session_id", "visitor_id"):

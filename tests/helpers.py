@@ -83,6 +83,13 @@ def order(
     gclid: str = "",
     fbclid: str = "",
     ttclid: str = "",
+    currency: str = "",
+    processor: str = "",
+    processor_customer_id: str = "",
+    payment_fingerprint: str = "",
+    product_key: str = "",
+    is_recurring: int = 0,
+    sale_group_id: str = "",
 ) -> dict[str, Any]:
     return {
         "order_id": order_id,
@@ -106,6 +113,13 @@ def order(
         "gclid": gclid,
         "fbclid": fbclid,
         "ttclid": ttclid,
+        "currency": currency,
+        "processor": processor,
+        "processor_customer_id": processor_customer_id,
+        "payment_fingerprint": payment_fingerprint,
+        "product_key": product_key,
+        "is_recurring": is_recurring,
+        "sale_group_id": sale_group_id or order_id,
     }
 
 

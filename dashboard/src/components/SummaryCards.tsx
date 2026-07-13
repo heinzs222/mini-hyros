@@ -51,6 +51,8 @@ type SummaryTotals = {
   blended_roas?: number | null;
   blended_cvr?: number | null;
   blended_aov?: number | null;
+  grouped_aov?: number | null;
+  attributed_aov?: number | null;
   blended_profit?: number | null;
   blended_cpa?: number | null;
 };
@@ -165,7 +167,8 @@ function SummaryCards({ totals, compareTotals, compareLabel, showCompareBanner =
   const compareClicks = Number(compareTotals?.clicks ?? 0);
   const blendedRoas = totals.blended_roas ?? (cost > 0 ? Math.round((currentTrackedRevenue / cost) * 100) / 100 : null);
   const blendedCvr = totals.blended_cvr ?? (clicks > 0 ? Math.round((currentTrackedOrders / clicks) * 100000) / 1000 : null);
-  const blendedAov = totals.blended_aov ?? (currentTrackedOrders > 0 ? Math.round((currentTrackedRevenue / currentTrackedOrders) * 100) / 100 : null);
+  const blendedAov = totals.blended_aov
+    ?? (currentTrackedOrders > 0 ? Math.round((currentTrackedRevenue / currentTrackedOrders) * 100) / 100 : null);
   const blendedProfit = totals.blended_profit ?? Math.round((currentTrackedRevenue - cost) * 100) / 100;
   const blendedCpa = totals.blended_cpa ?? (currentTrackedOrders > 0 ? Math.round((cost / currentTrackedOrders) * 100) / 100 : null);
   const mer = totals.mer ?? (cost > 0 ? Math.round((currentTrackedRevenue / cost) * 100) / 100 : null);

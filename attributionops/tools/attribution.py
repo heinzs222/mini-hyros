@@ -235,6 +235,8 @@ def _load_orders_and_touchpoints(
         "gclid",
         "fbclid",
         "ttclid",
+        "sale_group_id",
+        "is_recurring",
     ]
     select_cols = [
         "order_id",
@@ -571,6 +573,7 @@ def _aggregate_day_rows(
     by_day: dict[str, dict[str, float]] = defaultdict(
         lambda: {"orders": 0.0, "total_revenue": 0.0, "revenue": 0.0, "cogs": 0.0, "fees": 0.0}
     )
+    sale_groups_by_day: dict[str, set[str]] = defaultdict(set)
 
     tz = report_timezone()
     for o, order_ts, window_tps, weights in contributions:
@@ -578,6 +581,7 @@ def _aggregate_day_rows(
         net = to_float(o.get("net"))
         cogs = to_float(o.get("cogs"))
         fees = to_float(o.get("fees"))
+        sale_group_id = str(o.get("sale_group_id") or o.get("order_id") or "")
 
         # Bucket by LOCAL-zone day so the daily series aligns with the report's
         # (local) day boundaries rather than raw UTC days.
@@ -596,6 +600,8 @@ def _aggregate_day_rows(
             bucket["revenue"] += net * w
             bucket["cogs"] += cogs * w
             bucket["fees"] += fees * w
+            if w > 0 and sale_group_id:
+                sale_groups_by_day[key].add(sale_group_id)
 
     rows_out = []
     for d in sorted(by_day.keys()):
@@ -608,9 +614,34 @@ def _aggregate_day_rows(
                 "revenue": float(f"{row['revenue']:.2f}"),
                 "cogs": float(f"{row['cogs']:.2f}"),
                 "fees": float(f"{row['fees']:.2f}"),
+                "sale_groups": len(sale_groups_by_day.get(d, set())),
             }
         )
     return rows_out
+
+
+def _attributed_sale_group_count(
+    contributions: list[tuple[dict[str, Any], datetime, list[dict[str, Any]], list[float]]],
+    *,
+    date_basis: str,
+    start_d: date,
+    end_d: date,
+) -> int:
+    groups: set[str] = set()
+    tz = report_timezone()
+    for order, order_ts, touchpoints, weights in contributions:
+        if date_basis == "conversion":
+            in_range = start_d <= order_ts.astimezone(tz).date() <= end_d
+        else:
+            in_range = any(
+                weight > 0 and start_d <= tp["_ts"].astimezone(tz).date() <= end_d
+                for tp, weight in zip(touchpoints, weights, strict=True)
+            )
+        if in_range:
+            group_id = str(order.get("sale_group_id") or order.get("order_id") or "")
+            if group_id:
+                groups.add(group_id)
+    return len(groups)
 
 
 def attribution_run(
@@ -666,6 +697,9 @@ def attribution_run(
         contributions, account_map=account_map, value_type=value_type,
         date_basis=date_basis, start_d=start_d, end_d=end_d,
     )
+    sale_groups = _attributed_sale_group_count(
+        contributions, date_basis=date_basis, start_d=start_d, end_d=end_d
+    )
 
     return {
         "model": model,
@@ -676,6 +710,7 @@ def attribution_run(
         "conversion_type": conversion_type,
         "value_type": value_type,
         "rows": out_rows,
+        "sale_groups": sale_groups,
         "unattributed_orders": int(unattributed_orders),
         "notes": [
             "Local attribution computed from touchpoints+orders by customer_key, session_id, visitor_id, then direct order source.",
@@ -710,6 +745,9 @@ def attribution_day_totals(
         lookback=timedelta(days=lookback_days), excluded_raw=excluded_raw, excluded_norm=excluded_norm,
     )
     rows_out = _aggregate_day_rows(contributions, date_basis=date_basis, start_d=start_d, end_d=end_d)
+    sale_groups = _attributed_sale_group_count(
+        contributions, date_basis=date_basis, start_d=start_d, end_d=end_d
+    )
 
     return {
         "model": model,
@@ -719,6 +757,7 @@ def attribution_day_totals(
         "date_basis": date_basis,
         "conversion_type": conversion_type,
         "rows": rows_out,
+        "sale_groups": sale_groups,
         "unattributed_orders": int(unattributed_orders),
         "notes": ["Local helper for charting: attributed totals grouped by attribution date."],
     }
@@ -784,6 +823,9 @@ def attribution_run_and_day_totals(
         date_basis=date_basis, start_d=start_d, end_d=end_d,
     )
     day_rows = _aggregate_day_rows(contributions, date_basis=date_basis, start_d=start_d, end_d=end_d)
+    sale_groups = _attributed_sale_group_count(
+        contributions, date_basis=date_basis, start_d=start_d, end_d=end_d
+    )
 
     base = {
         "model": model,
@@ -795,6 +837,6 @@ def attribution_run_and_day_totals(
         "unattributed_orders": int(unattributed_orders),
     }
     return {
-        "run": {**base, "value_type": value_type, "rows": run_rows},
-        "day_totals": {**base, "rows": day_rows},
+        "run": {**base, "value_type": value_type, "rows": run_rows, "sale_groups": sale_groups},
+        "day_totals": {**base, "rows": day_rows, "sale_groups": sale_groups},
     }

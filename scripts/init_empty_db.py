@@ -46,7 +46,11 @@ def init_db(db_path: str) -> None:
             channel TEXT DEFAULT '', platform TEXT DEFAULT '',
             campaign_id TEXT DEFAULT '', adset_id TEXT DEFAULT '',
             ad_id TEXT DEFAULT '', creative_id TEXT DEFAULT '',
-            gclid TEXT DEFAULT '', fbclid TEXT DEFAULT '', ttclid TEXT DEFAULT ''
+            gclid TEXT DEFAULT '', fbclid TEXT DEFAULT '', ttclid TEXT DEFAULT '',
+            currency TEXT DEFAULT '', processor TEXT DEFAULT '',
+            processor_customer_id TEXT DEFAULT '', payment_fingerprint TEXT DEFAULT '',
+            product_key TEXT DEFAULT '', is_recurring INTEGER DEFAULT 0,
+            sale_group_id TEXT DEFAULT ''
         );""")
 
         conn.execute("""CREATE TABLE conversions (
@@ -75,6 +79,10 @@ def init_db(db_path: str) -> None:
         conn.execute("CREATE INDEX idx_orders_session_id ON orders(session_id);")
         conn.execute("CREATE INDEX idx_orders_visitor_id ON orders(visitor_id);")
         conn.execute("CREATE INDEX idx_orders_ts ON orders(ts);")
+        conn.execute("CREATE INDEX idx_orders_sale_group_id ON orders(sale_group_id);")
+        conn.execute("CREATE INDEX idx_orders_processor_customer_id ON orders(processor_customer_id);")
+        conn.execute("CREATE INDEX idx_orders_payment_fingerprint ON orders(payment_fingerprint);")
+        conn.execute("CREATE INDEX idx_orders_is_recurring ON orders(is_recurring);")
         # UNIQUE so the INSERT OR IGNORE idempotency the ingestion layer relies on
         # actually collapses duplicate webhook/sync deliveries (was a silent no-op).
         conn.execute("CREATE UNIQUE INDEX uq_orders_order_id ON orders(order_id);")

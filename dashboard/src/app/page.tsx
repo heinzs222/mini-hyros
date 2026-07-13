@@ -685,7 +685,10 @@ export default function DashboardPage() {
       : effectiveCompareMode === "custom_range"
       ? { start: compareStartDate, end: compareEndDate }
       : null;
-  const compareCaption = compareRange ? monthDayLabel(compareRange.start) : undefined;
+  // Hyros captions headline cards with the current period start. The previous
+  // implementation used the comparison period start, which made a Jul 05-11
+  // report say "from Jun 28" even though the API request used the right range.
+  const currentRangeCaption = monthDayLabel(windowStart);
 
   const setRange = useCallback((range: { start: string; end: string }) => {
     const [start, end] = normalizeDateRange(range.start, range.end);
@@ -798,7 +801,7 @@ export default function DashboardPage() {
           {/* ───────── Dashboard ───────── */}
           {section === "dashboard" && (
             report ? (
-              <DashboardView report={report} compareReport={compareReport} compareCaption={compareCaption} />
+              <DashboardView report={report} compareReport={compareReport} currentRangeCaption={currentRangeCaption} />
             ) : (
               <div className="flex items-center justify-center py-24">
                 <RefreshCw size={24} className="animate-spin text-brand-500" />

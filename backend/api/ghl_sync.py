@@ -31,7 +31,7 @@ from fastapi import APIRouter, Query, Request
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows as db_query
-from attributionops.util import try_parse_iso_ts
+from attributionops.util import try_parse_iso_ts, utc_ts_to_local_date
 
 logger = logging.getLogger("ghl_sync")
 
@@ -108,10 +108,10 @@ def save_ghl_credentials(db_path: str, token: str, location_id: str) -> None:
         conn.commit()
 
 
-def _headers(token: str) -> dict[str, str]:
+def _headers(token: str, version: str = GHL_API_VERSION) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {token}",
-        "Version": GHL_API_VERSION,
+        "Version": version,
         "Accept": "application/json",
     }
 
@@ -180,12 +180,47 @@ def _has_attribution(src_info: dict) -> bool:
 
 
 def _within(ts: str, start_date: str, end_date: str) -> bool:
-    day = (ts or "")[:10]
+    day = utc_ts_to_local_date(ts) if ts else ""
     if start_date and day < start_date:
         return False
     if end_date and day > end_date:
         return False
     return True
+
+
+def _submission_ts(submission: dict, fallback: str) -> str:
+    raw = str(submission.get("createdAt") or submission.get("dateAdded") or "")
+    dt = try_parse_iso_ts(raw) if raw else None
+    return _iso_ts(dt) if dt is not None else fallback
+
+
+def _submission_source_info(submission: dict) -> dict[str, str]:
+    others = submission.get("others") or {}
+    if not isinstance(others, dict):
+        others = {}
+    event = others.get("eventData") or submission.get("eventData") or {}
+    if not isinstance(event, dict):
+        event = {}
+    source = str(event.get("source") or event.get("adSource") or "")
+    medium = str(event.get("medium") or "form")
+    return {
+        "utm_source": source,
+        "utm_medium": medium,
+        "utm_campaign": str(event.get("campaign") or ""),
+        "utm_content": str(event.get("utmContent") or ""),
+        "gclid": str(event.get("gclid") or ""),
+        "fbclid": str(event.get("fbclid") or ""),
+        "ttclid": str(event.get("ttclid") or ""),
+        "source": source,
+        "referrer": str(event.get("referrer") or ""),
+        "url": str((event.get("page") or {}).get("url") if isinstance(event.get("page"), dict) else ""),
+        "fbc_id": str(event.get("fbc") or ""),
+        "ttc_id": "",
+        "gc_id": "",
+        "h_ad_id": "",
+        "g_special_campaign": "",
+        "detected_platform": "",
+    }
 
 
 def _write_session(db_path: str, session_id: str, ts: str, src_info: dict,
@@ -211,26 +246,108 @@ def _write_session(db_path: str, session_id: str, ts: str, src_info: dict,
 
 # ── GHL API fetchers ───────────────────────────────────────────────────────────
 
-async def _fetch_contacts(client: httpx.AsyncClient, token: str, location_id: str,
-                          limit: int) -> list[dict]:
-    """Fetch up to ``limit`` recent contacts (newest first) via the v2 API."""
+async def _fetch_contacts(
+    client: httpx.AsyncClient,
+    token: str,
+    location_id: str,
+    limit: int,
+    start_date: str = "",
+    end_date: str = "",
+) -> list[dict]:
+    """Fetch contacts in the requested window, following newest-first pages.
+
+    ``limit`` caps matching contacts, not the number of recent contacts scanned.
+    This matters for historical windows: filtering the first N recent contacts
+    after the fetch silently misses older leads.
+    """
     contacts: list[dict] = []
     params: dict[str, Any] = {"locationId": location_id, "limit": min(limit, 100)}
     page_url = f"{GHL_API_BASE}/contacts/"
     guard = 0
-    while page_url and len(contacts) < limit and guard < 50:
+    while page_url and len(contacts) < limit and guard < 250:
         guard += 1
         resp = await client.get(page_url, headers=_headers(token), params=params)
         resp.raise_for_status()
         data = resp.json()
-        batch = data.get("contacts") or []
-        contacts.extend(batch)
+        batch = list(data.get("contacts") or [])
+
+        batch_days: list[str] = []
+        for contact in batch:
+            ts = _contact_ts(contact, "")
+            day = utc_ts_to_local_date(ts) if ts else ""
+            if day:
+                batch_days.append(day)
+            if _within(ts, start_date, end_date):
+                contacts.append(contact)
+                if len(contacts) >= limit:
+                    break
+
         meta = data.get("meta") or {}
         next_url = meta.get("nextPageUrl")
         if not batch or not next_url:
             break
+        # The contacts endpoint is newest-first. Once an entire page reaches
+        # before the requested window, subsequent pages cannot contain matches.
+        if start_date and batch_days and max(batch_days) < start_date:
+            break
         page_url, params = next_url, {}
     return contacts[:limit]
+
+
+async def _fetch_form_submissions(
+    client: httpx.AsyncClient,
+    token: str,
+    location_id: str,
+    limit: int,
+    start_date: str,
+    end_date: str,
+) -> list[dict]:
+    """Fetch every form submission in the requested local-date window.
+
+    HighLevel exposes submissions separately from contacts. A contact is a
+    person; a submission is an opt-in event, and the same person may submit
+    more than once. Keeping both is required for Hyros-compatible Leads,
+    New Leads and Leads Opt-ins metrics.
+    """
+    submissions: list[dict] = []
+    page = 1
+    while len(submissions) < limit and page <= 250:
+        params = {
+            "locationId": location_id,
+            "page": page,
+            "limit": min(100, limit - len(submissions)),
+            "startAt": start_date,
+            "endAt": end_date,
+        }
+        resp = await client.get(
+            f"{GHL_API_BASE}/forms/submissions",
+            headers=_headers(token),
+            params=params,
+        )
+        # The current docs identify this as the v3 API. Older private tokens
+        # still expect the dated version header, so retry only on a version-
+        # shaped validation response instead of making the whole sync brittle.
+        if resp.status_code in {400, 422}:
+            retry = await client.get(
+                f"{GHL_API_BASE}/forms/submissions",
+                headers=_headers(token, "v3"),
+                params=params,
+            )
+            if retry.status_code < 400:
+                resp = retry
+        resp.raise_for_status()
+        data = resp.json()
+        batch = list(data.get("submissions") or [])
+        submissions.extend(batch)
+        meta = data.get("meta") or {}
+        next_page = meta.get("nextPage")
+        if not batch or next_page in (None, "", False):
+            break
+        try:
+            page = int(next_page)
+        except (TypeError, ValueError):
+            page += 1
+    return submissions[:limit]
 
 
 async def _fetch_opportunities(client: httpx.AsyncClient, token: str, location_id: str,
@@ -292,6 +409,63 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
                                customer_key, session_id)
         leads += 1
     return {"leads": leads, "skipped": skipped}
+
+
+def _write_form_submissions(
+    db_path: str,
+    submissions: list[dict],
+    start_date: str,
+    end_date: str,
+    contacts_by_id: dict[str, dict] | None = None,
+) -> dict[str, int]:
+    optins = 0
+    skipped = 0
+    now = _now()
+    contact_map = contacts_by_id or {}
+    for submission in submissions:
+        ts = _submission_ts(submission, now)
+        if not _within(ts, start_date, end_date):
+            skipped += 1
+            continue
+
+        contact_id = str(submission.get("contactId") or "").strip()
+        contact = contact_map.get(contact_id) or {}
+        email = str(submission.get("email") or _contact_email(contact) or "").strip().lower()
+        customer_key = _sha256(email) if email else ""
+        submission_id = str(submission.get("id") or "").strip()
+        if not submission_id:
+            skipped += 1
+            continue
+
+        conv_id = _sha256(f"ghl_submission|{submission_id}")
+        _insert_conversion(db_path, conv_id, ts, "OptIn", 0.0, conv_id, customer_key)
+
+        src_info = _submission_source_info(submission)
+        platform, channel = _resolve_platform(
+            src_info["utm_source"], src_info["utm_medium"], src_info["source"], src_info=src_info,
+        )
+        session_id = _sha256(f"ghl_submission_session|{submission_id}")
+        form_name = str(submission.get("name") or submission.get("formId") or "GHL Form")
+        _write_session(
+            db_path,
+            session_id,
+            ts,
+            src_info,
+            src_info.get("url", "") or form_name,
+            customer_key,
+        )
+        if _has_attribution(src_info):
+            _insert_touchpoint(
+                db_path,
+                ts,
+                channel or "crm",
+                platform,
+                src_info,
+                customer_key,
+                session_id,
+            )
+        optins += 1
+    return {"optins": optins, "skipped": skipped}
 
 
 def _write_opportunities(db_path: str, opportunities: list[dict], start_date: str,
@@ -445,17 +619,38 @@ async def ghl_sync(
 
     errors: list[str] = []
     lead_stats = {"leads": 0, "skipped": 0}
+    form_stats = {"optins": 0, "skipped": 0}
     opp_stats = {"orders": 0, "open_opportunities": 0, "skipped": 0}
 
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            contacts: list[dict] = []
             try:
-                contacts = await _fetch_contacts(client, token, location_id, limit)
+                contacts = await _fetch_contacts(
+                    client, token, location_id, limit, start_date=start_date, end_date=end_date
+                )
                 lead_stats = _write_contacts(db_path, contacts, start_date, end_date)
             except httpx.HTTPStatusError as exc:
                 errors.append(f"contacts: HTTP {exc.response.status_code} {exc.response.text[:160]}")
             except Exception as exc:
                 errors.append(f"contacts: {exc}")
+
+            try:
+                submissions = await _fetch_form_submissions(
+                    client, token, location_id, limit, start_date, end_date
+                )
+                contacts_by_id = {
+                    str(contact.get("id") or ""): contact
+                    for contact in contacts
+                    if contact.get("id")
+                }
+                form_stats = _write_form_submissions(
+                    db_path, submissions, start_date, end_date, contacts_by_id
+                )
+            except httpx.HTTPStatusError as exc:
+                errors.append(f"forms: HTTP {exc.response.status_code} {exc.response.text[:160]}")
+            except Exception as exc:
+                errors.append(f"forms: {exc}")
 
             try:
                 opportunities = await _fetch_opportunities(client, token, location_id, limit)
@@ -468,11 +663,12 @@ async def ghl_sync(
         return {"synced": 0, "leads": 0, "orders": 0, "error": str(exc)}
 
     return {
-        "synced": lead_stats["leads"] + opp_stats["orders"],
+        "synced": lead_stats["leads"] + form_stats["optins"] + opp_stats["orders"],
         "leads": lead_stats["leads"],
+        "optins": form_stats["optins"],
         "orders": opp_stats["orders"],
         "open_opportunities": opp_stats["open_opportunities"],
-        "skipped": lead_stats["skipped"] + opp_stats["skipped"],
+        "skipped": lead_stats["skipped"] + form_stats["skipped"] + opp_stats["skipped"],
         "start_date": start_date,
         "end_date": end_date,
         "errors": errors,

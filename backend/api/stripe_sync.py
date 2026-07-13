@@ -22,6 +22,8 @@ from fastapi import APIRouter, Query
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows
+from attributionops.schema import ensure_order_semantics
+from attributionops.util import local_day_bounds_utc, parse_iso_ts
 
 router = APIRouter()
 UTC = timezone.utc
@@ -127,20 +129,20 @@ def _ensure_orders_table(db_path: str) -> None:
         touchpoint_cols = _table_columns(conn, "touchpoints")
         if touchpoint_cols and "visitor_id" not in touchpoint_cols:
             conn.execute("ALTER TABLE touchpoints ADD COLUMN visitor_id TEXT DEFAULT ''")
+        ensure_order_semantics(conn)
         conn.commit()
 
 
 def _date_to_unix(date_str: str) -> int:
-    """Convert YYYY-MM-DD to unix timestamp (start of day UTC)."""
-    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=UTC)
-    return int(dt.timestamp())
+    """Convert a reporting-zone local day start to a Unix timestamp."""
+    start_utc, _ = local_day_bounds_utc(date_str, date_str)
+    return int(parse_iso_ts(start_utc).timestamp())
 
 
 def _date_to_unix_end(date_str: str) -> int:
-    """Convert YYYY-MM-DD to unix timestamp (end of day UTC)."""
-    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=UTC)
-    dt = dt.replace(hour=23, minute=59, second=59)
-    return int(dt.timestamp())
+    """Convert a reporting-zone local day end to an inclusive Unix timestamp."""
+    _, end_exclusive_utc = local_day_bounds_utc(date_str, date_str)
+    return int(parse_iso_ts(end_exclusive_utc).timestamp()) - 1
 
 
 async def _fetch_stripe_charges(
@@ -247,6 +249,233 @@ def _customer_key_from_charge(charge: dict, email: str) -> str:
     return normalized
 
 
+def _stripe_customer_id(charge: dict) -> str:
+    customer = charge.get("customer")
+    if isinstance(customer, dict):
+        return str(customer.get("id") or "").strip()
+    return str(customer or "").strip()
+
+
+def _payment_fingerprint(charge: dict) -> str:
+    details = charge.get("payment_method_details") or {}
+    if isinstance(details, dict):
+        card = details.get("card") or {}
+        if isinstance(card, dict) and card.get("fingerprint"):
+            return str(card["fingerprint"]).strip()
+    payment_method = charge.get("payment_method")
+    if isinstance(payment_method, dict):
+        card = payment_method.get("card") or {}
+        if isinstance(card, dict) and card.get("fingerprint"):
+            return str(card["fingerprint"]).strip()
+    return ""
+
+
+def _product_key(charge: dict, amount_cents: int, currency: str) -> str:
+    explicit = _meta_value(
+        charge,
+        "product_id",
+        "product",
+        "price_id",
+        "price",
+        "plan_id",
+        "plan",
+        "offer_id",
+        "offer",
+    )
+    if explicit:
+        return explicit.strip().lower()
+
+    invoice = charge.get("invoice")
+    if isinstance(invoice, dict):
+        lines = (invoice.get("lines") or {}).get("data") or []
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            price = line.get("price") or {}
+            if isinstance(price, dict) and price.get("id"):
+                return str(price["id"]).strip().lower()
+            if line.get("description"):
+                return str(line["description"]).strip().lower()
+
+    description = str(charge.get("description") or "").strip().lower()
+    if description:
+        return description
+    # Amount is only a weak product identity. Keep it explicit so recurrence
+    # heuristics can refuse to use this fallback on its own.
+    return f"amount:{currency.lower()}:{amount_cents}"
+
+
+def _explicit_recurring(charge: dict) -> bool:
+    invoice = charge.get("invoice")
+    billing_reason = str(
+        invoice.get("billing_reason") if isinstance(invoice, dict) else ""
+    ).strip().lower()
+    if billing_reason == "subscription_cycle":
+        return True
+
+    raw = _meta_value(charge, "is_recurring", "recurring", "subscription_cycle")
+    return raw.strip().lower() in {"1", "true", "yes", "y", "recurring", "cycle"}
+
+
+def _configured_recurring_amount(amount_cents: int, currency: str) -> bool:
+    """Apply account-owned recurrence rules for metadata-free charges.
+
+    Some legacy payment links emit bare Stripe charges with no customer,
+    invoice, product or description. Hyros handles those through configured
+    sale-item rules (for this account, ``$stripe-50``). Keep that policy in an
+    environment variable so an amount is never assumed recurring globally.
+    Format: ``CAD:5000,USD:9900`` (minor currency units).
+    """
+    candidate = f"{str(currency or '').strip().upper()}:{int(amount_cents)}"
+    configured = {
+        item.strip().upper()
+        for item in os.environ.get("STRIPE_RECURRING_AMOUNT_KEYS", "").split(",")
+        if item.strip()
+    }
+    return candidate in configured
+
+
+def _canonical_customer_key(
+    conn: sqlite3.Connection,
+    charge: dict,
+    email: str,
+    processor_customer_id: str,
+    fingerprint: str,
+) -> str:
+    """Resolve Stripe aliases to one durable customer identity."""
+    explicit = _customer_key_from_charge(charge, email)
+    existing = None
+    if processor_customer_id:
+        existing = conn.execute(
+            """SELECT customer_key FROM orders
+               WHERE processor = 'stripe' AND processor_customer_id = ?
+                 AND COALESCE(customer_key, '') != ''
+               ORDER BY ts DESC LIMIT 1""",
+            (processor_customer_id,),
+        ).fetchone()
+    if not existing and fingerprint:
+        existing = conn.execute(
+            """SELECT customer_key FROM orders
+               WHERE processor = 'stripe' AND payment_fingerprint = ?
+                 AND COALESCE(customer_key, '') != ''
+               ORDER BY ts DESC LIMIT 1""",
+            (fingerprint,),
+        ).fetchone()
+
+    # A newly observed email/explicit tracking key is stronger than an older
+    # processor-only alias. Backfill earlier rows to prevent one buyer becoming
+    # two customers when Stripe later supplies their email.
+    if explicit:
+        customer_key = explicit
+    elif existing and existing[0]:
+        customer_key = str(existing[0])
+    elif processor_customer_id:
+        customer_key = _sha256(f"stripe_customer|{processor_customer_id}")
+    elif fingerprint:
+        customer_key = _sha256(f"stripe_card|{fingerprint}")
+    else:
+        customer_key = ""
+
+    if customer_key and processor_customer_id:
+        conn.execute(
+            """UPDATE orders SET customer_key = ?
+               WHERE processor = 'stripe' AND processor_customer_id = ?
+                 AND customer_key != ?""",
+            (customer_key, processor_customer_id, customer_key),
+        )
+    if customer_key and fingerprint:
+        conn.execute(
+            """UPDATE orders SET customer_key = ?
+               WHERE processor = 'stripe' AND payment_fingerprint = ?
+                 AND customer_key != ?""",
+            (customer_key, fingerprint, customer_key),
+        )
+    return customer_key
+
+
+def _matching_identity_sql(
+    customer_key: str, processor_customer_id: str, fingerprint: str
+) -> tuple[str, list[str]]:
+    clauses: list[str] = []
+    params: list[str] = []
+    if customer_key:
+        clauses.append("customer_key = ?")
+        params.append(customer_key)
+    if processor_customer_id:
+        clauses.append("processor_customer_id = ?")
+        params.append(processor_customer_id)
+    if fingerprint:
+        clauses.append("payment_fingerprint = ?")
+        params.append(fingerprint)
+    return (" OR ".join(clauses) or "0"), params
+
+
+def _infer_recurring_from_history(
+    conn: sqlite3.Connection,
+    *,
+    ts: str,
+    product_key: str,
+    customer_key: str,
+    processor_customer_id: str,
+    fingerprint: str,
+    allow_amount_fallback: bool = False,
+) -> bool:
+    # Normal products use Hyros' 30..365 day recurrence window. Account-specific
+    # amount fallbacks may repeat sooner, but still require a shared identity and
+    # an older matching charge; amount alone is never enough.
+    if not product_key or (product_key.startswith("amount:") and not allow_amount_fallback):
+        return False
+    identity_sql, identity_params = _matching_identity_sql(
+        customer_key, processor_customer_id, fingerprint
+    )
+    if identity_sql == "0":
+        return False
+    current = parse_iso_ts(ts)
+    start = (current - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if allow_amount_fallback:
+        # The current charge may already exist during a resync. Keep the upper
+        # bound strictly earlier so a first purchase cannot match itself.
+        end = (current - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        end = (current - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    row = conn.execute(
+        f"""SELECT 1 FROM orders
+            WHERE processor = 'stripe' AND product_key = ?
+              AND ts >= ? AND ts <= ? AND ({identity_sql})
+            LIMIT 1""",
+        [product_key, start, end, *identity_params],
+    ).fetchone()
+    return bool(row)
+
+
+def _sale_group_id(
+    conn: sqlite3.Connection,
+    *,
+    order_id: str,
+    ts: str,
+    customer_key: str,
+    processor_customer_id: str,
+    fingerprint: str,
+) -> str:
+    """Collapse same-buyer charges within the configured 10-minute window."""
+    identity_sql, identity_params = _matching_identity_sql(
+        customer_key, processor_customer_id, fingerprint
+    )
+    if identity_sql == "0":
+        return order_id
+    current = parse_iso_ts(ts)
+    lower = (current - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    upper = (current + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    row = conn.execute(
+        f"""SELECT COALESCE(NULLIF(sale_group_id, ''), order_id) AS group_id
+            FROM orders
+            WHERE order_id != ? AND ts >= ? AND ts <= ? AND ({identity_sql})
+            ORDER BY ts ASC LIMIT 1""",
+        [order_id, lower, upper, *identity_params],
+    ).fetchone()
+    return str(row[0]) if row and row[0] else order_id
+
+
 def _extract_tracking_from_charge(charge: dict) -> dict[str, str]:
     def value(*keys: str) -> str:
         return _meta_value(charge, *keys)
@@ -341,10 +570,13 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
 
     inserted = 0
     updated = 0
+    recurring = 0
     now = _now()
 
     with connect(db_path) as conn:
-        for charge in charges:
+        # Stripe returns newest first. Oldest first makes historical recurrence
+        # checks and same-minute sale grouping deterministic within this batch.
+        for charge in sorted(charges, key=lambda item: int(item.get("created", 0) or 0)):
             charge_id = str(charge.get("id", ""))
             if not charge_id:
                 continue
@@ -371,7 +603,11 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
 
             email = _extract_email_from_charge(charge)
             tracking = _extract_tracking_from_charge(charge)
-            customer_key = _customer_key_from_charge(charge, email)
+            processor_customer_id = _stripe_customer_id(charge)
+            fingerprint = _payment_fingerprint(charge)
+            customer_key = _canonical_customer_key(
+                conn, charge, email, processor_customer_id, fingerprint
+            )
             _backfill_customer_key(
                 conn,
                 customer_key,
@@ -386,19 +622,45 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
                 or charge.get("subscription")
                 or ""
             )
+            product_key = _product_key(charge, amount_cents, currency)
+            is_recurring = (
+                _explicit_recurring(charge)
+                or _infer_recurring_from_history(
+                    conn,
+                    ts=ts,
+                    product_key=product_key,
+                    customer_key=customer_key,
+                    processor_customer_id=processor_customer_id,
+                    fingerprint=fingerprint,
+                    allow_amount_fallback=_configured_recurring_amount(amount_cents, currency),
+                )
+            )
+            sale_group_id = _sale_group_id(
+                conn,
+                order_id=order_id,
+                ts=ts,
+                customer_key=customer_key,
+                processor_customer_id=processor_customer_id,
+                fingerprint=fingerprint,
+            )
+            recurring += int(is_recurring)
 
             cur = conn.execute(
                 """INSERT OR IGNORE INTO orders
                    (order_id, ts, gross, net, refunds, chargebacks, cogs, fees,
                     customer_key, subscription_id, session_id, visitor_id, channel,
-                    platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    platform, campaign_id, adset_id, ad_id, creative_id, gclid, fbclid, ttclid,
+                    currency, processor, processor_customer_id, payment_fingerprint,
+                    product_key, is_recurring, sale_group_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, 'stripe', ?, ?, ?, ?, ?)""",
                 (order_id, ts, str(gross), str(net), str(refunds), "0", "0", str(fees),
                  customer_key, subscription_id,
                  tracking["session_id"], tracking["visitor_id"], tracking["channel"],
                  tracking["platform"], tracking["campaign_id"], tracking["adset_id"],
                  tracking["ad_id"], tracking["creative_id"], tracking["gclid"],
-                 tracking["fbclid"], tracking["ttclid"]),
+                 tracking["fbclid"], tracking["ttclid"], currency,
+                 processor_customer_id, fingerprint, product_key, int(is_recurring), sale_group_id),
             )
             if cur.rowcount and cur.rowcount > 0:
                 inserted += 1
@@ -406,8 +668,22 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
                 # Already synced: refresh refunds/net so refunds issued after the
                 # first sync actually reduce reported revenue.
                 conn.execute(
-                    "UPDATE orders SET refunds = ?, net = ? WHERE order_id = ?",
-                    (str(refunds), str(net), order_id),
+                    """UPDATE orders SET ts = ?, gross = ?, refunds = ?, net = ?, fees = ?,
+                           customer_key = ?, subscription_id = ?, session_id = ?, visitor_id = ?,
+                           channel = ?, platform = ?, campaign_id = ?, adset_id = ?, ad_id = ?,
+                           creative_id = ?, gclid = ?, fbclid = ?, ttclid = ?, currency = ?,
+                           processor = 'stripe', processor_customer_id = ?, payment_fingerprint = ?,
+                           product_key = ?, is_recurring = ?, sale_group_id = ?
+                       WHERE order_id = ?""",
+                    (
+                        ts, str(gross), str(refunds), str(net), str(fees), customer_key,
+                        subscription_id, tracking["session_id"], tracking["visitor_id"],
+                        tracking["channel"], tracking["platform"], tracking["campaign_id"],
+                        tracking["adset_id"], tracking["ad_id"], tracking["creative_id"],
+                        tracking["gclid"], tracking["fbclid"], tracking["ttclid"], currency,
+                        processor_customer_id, fingerprint, product_key, int(is_recurring),
+                        sale_group_id, order_id,
+                    ),
                 )
                 updated += 1
 
@@ -431,7 +707,7 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
 
         conn.commit()
 
-    return {"inserted": inserted, "updated": updated}
+    return {"inserted": inserted, "updated": updated, "recurring": recurring}
 
 
 @router.post("/sync")
@@ -457,9 +733,12 @@ async def stripe_sync(
         return {
             "synced": stats["inserted"],
             "updated": stats["updated"],
+            "recurring": stats["recurring"],
             "fetched": len(charges),
             "start_date": start_date,
             "end_date": end_date,
+            "query_start_utc": datetime.fromtimestamp(_date_to_unix(start_date), tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "query_end_utc": datetime.fromtimestamp(_date_to_unix_end(end_date), tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text[:400] if exc.response is not None else str(exc)

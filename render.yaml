@@ -18,6 +18,8 @@ services:
     envVars:
       - key: ATTRIBUTIONOPS_DB_PATH
         value: /var/data/attributionops.sqlite
+      - key: REPORT_TIMEZONE
+        value: Etc/GMT+6
       - key: TRACKING_DOMAIN
         sync: false
       - key: SITE_TOKEN
@@ -26,12 +28,18 @@ services:
         sync: false
       - key: META_AD_ACCOUNT_ID
         sync: false
+      - key: META_INCLUDE_CAMPAIGN_ADJUSTMENTS
+        value: "false"
       - key: META_PIXEL_ID
         sync: false
       - key: GOOGLE_ADS_DEVELOPER_TOKEN
         sync: false
+      - key: GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS
+        value: "false"
       - key: TIKTOK_ACCESS_TOKEN
         sync: false
+      - key: STRIPE_RECURRING_AMOUNT_KEYS
+        value: "CAD:5000"
       - key: AUTH_ENABLED
         value: "false"
       - key: AUTH_USERNAME

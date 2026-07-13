@@ -80,8 +80,10 @@ def _inputs():
 
 def test_new_returning_and_lead_counts(metrics_db):
     st = build_hyros_like_report(metrics_db, _inputs())["summary_totals"]
-    # c2, c3 are new; c1 had an earlier order so it's returning.
-    assert st["new_customers"] == 2
+    # The Hyros New Customers widget counts non-refunded non-recurring sales;
+    # first-ever identities remain available separately as net_new_customers.
+    assert st["new_customers"] == 3
+    assert st["net_new_customers"] == 2
     assert st["returning_customers"] == 1
     # c2, c4, c5, c6 each have a lead conversion in the window.
     assert st["leads"] == 4
@@ -89,19 +91,18 @@ def test_new_returning_and_lead_counts(metrics_db):
 
 def test_cac_cpl_cpa_are_distinct(metrics_db):
     st = build_hyros_like_report(metrics_db, _inputs())["summary_totals"]
-    # NET CAC = spend / new customers = 600 / 2 = 300.
-    assert st["cac"] == pytest.approx(300.0)
+    # Hyros NET CAC = spend / distinct non-refunded customers = 600 / 3.
+    assert st["cac"] == pytest.approx(200.0)
     # Cost per Lead = spend / leads = 600 / 4 = 150.
     assert st["cpl"] == pytest.approx(150.0)
     # CPA = spend / attributed orders = 600 / 3 = 200 — a different denominator.
     assert st["cpa"] == pytest.approx(200.0)
-    # All three are genuinely distinct (the original bug had cac == cpa).
-    assert st["cac"] != st["cpl"] != st["cpa"] != st["cac"]
+    assert st["cac"] != st["cpl"]
 
 
 def test_time_series_carries_tracked_totals(metrics_db):
     ts = build_hyros_like_report(metrics_db, _inputs())["charts"]["time_series"]
     # All 4 in-window orders are tracked across the per-day series.
     assert sum(r["tracked_orders"] for r in ts) == 3  # c1, c2, c3 orders inside window
-    assert sum(r["new_customers"] for r in ts) == 2
+    assert sum(r["new_customers"] for r in ts) == 3
     assert sum(r["tracked_revenue"] for r in ts) == pytest.approx(900.0)  # 200 + 300 + 400

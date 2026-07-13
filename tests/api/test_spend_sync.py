@@ -57,7 +57,8 @@ def test_meta_spend_sync_with_mocked_api(client, api_db, monkeypatch):
                 "campaign_id": "cmp1",
                 "adset_id": "set1",
                 "ad_id": "ad1",
-                "clicks": "10",
+                "clicks": "19",
+                "inline_link_clicks": "10",
                 "spend": "5.50",
                 "impressions": "1000",
                 "campaign_name": "C1",
@@ -89,8 +90,82 @@ def test_meta_spend_sync_with_mocked_api(client, api_db, monkeypatch):
     # Campaign total equals the summed ad total, so no adjustment row is added.
     meta_rows = sql_rows(api_db, "SELECT * FROM spend WHERE platform = 'meta'")
     assert len(meta_rows) == 1
+    assert meta_rows[0]["clicks"] == "10"
+    assert '"click_metric":"inline_link_clicks"' in meta_rows[0]["metadata"]
+    assert '"all_clicks":"19"' in meta_rows[0]["metadata"]
     # The mocked spend row is now queryable.
     assert "meta" in ads_list_platforms(api_db)["platforms"]
+
+
+def test_meta_hyros_clicks_falls_back_for_legacy_payload():
+    from api import spend_sync
+
+    assert spend_sync._meta_hyros_clicks({"inline_link_clicks": "47", "clicks": "91"}) == 47
+    assert spend_sync._meta_hyros_clicks({"clicks": "15"}) == 15
+
+
+def test_meta_campaign_adjustments_are_disabled_for_hyros_parity(api_db, monkeypatch):
+    from api import spend_sync
+
+    monkeypatch.delenv("META_INCLUDE_CAMPAIGN_ADJUSTMENTS", raising=False)
+    ad_rows = [{
+        "date_start": "2026-07-04",
+        "account_id": "123",
+        "campaign_id": "cmp1",
+        "adset_id": "set1",
+        "ad_id": "ad1",
+        "inline_link_clicks": "10",
+        "spend": "5.50",
+        "impressions": "1000",
+    }]
+    campaign_rows = [{
+        "date_start": "2026-07-04",
+        "account_id": "123",
+        "campaign_id": "cmp1",
+        "inline_link_clicks": "14",
+        "spend": "8.00",
+        "impressions": "1300",
+    }]
+
+    stats = spend_sync._write_meta_spend_rows(
+        api_db, "123", "2026-07-04", "2026-07-04", ad_rows, campaign_rows
+    )
+
+    rows = sql_rows(api_db, "SELECT cost, clicks, impressions FROM spend WHERE platform='meta'")
+    assert stats["inserted_campaign_adjustments"] == 0
+    assert rows == [{"cost": "5.50", "clicks": "10", "impressions": "1000"}]
+
+
+def test_meta_campaign_adjustments_remain_available_as_opt_in(api_db, monkeypatch):
+    from api import spend_sync
+
+    monkeypatch.setenv("META_INCLUDE_CAMPAIGN_ADJUSTMENTS", "true")
+    ad_rows = [{
+        "date_start": "2026-07-04",
+        "account_id": "123",
+        "campaign_id": "cmp1",
+        "adset_id": "set1",
+        "ad_id": "ad1",
+        "inline_link_clicks": "10",
+        "spend": "5.50",
+        "impressions": "1000",
+    }]
+    campaign_rows = [{
+        "date_start": "2026-07-04",
+        "account_id": "123",
+        "campaign_id": "cmp1",
+        "inline_link_clicks": "14",
+        "spend": "8.00",
+        "impressions": "1300",
+    }]
+
+    stats = spend_sync._write_meta_spend_rows(
+        api_db, "123", "2026-07-04", "2026-07-04", ad_rows, campaign_rows
+    )
+
+    rows = sql_rows(api_db, "SELECT SUM(CAST(cost AS REAL)) AS cost FROM spend WHERE platform='meta'")
+    assert stats["inserted_campaign_adjustments"] == 1
+    assert rows[0]["cost"] == 8.0
 
 
 def test_meta_spend_sync_missing_credentials(client, api_db, monkeypatch):

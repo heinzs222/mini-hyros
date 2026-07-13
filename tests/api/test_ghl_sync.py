@@ -51,6 +51,24 @@ def _opportunity(oid, email, *, value=199.0, status="won", created="2026-06-16T0
     }
 
 
+def _submission(sid, contact_id, email, *, created="2026-06-15T12:30:00.000Z"):
+    return {
+        "id": sid,
+        "contactId": contact_id,
+        "email": email,
+        "name": "Demo form",
+        "createdAt": created,
+        "others": {
+            "eventData": {
+                "source": "facebook",
+                "medium": "form",
+                "page": {"url": "https://funnel.example/optin"},
+                "fbclid": "fb-click",
+            }
+        },
+    }
+
+
 # ── credential storage ──────────────────────────────────────────────────────────
 
 def test_save_and_get_credentials_roundtrip(api_db):
@@ -70,10 +88,14 @@ def test_get_credentials_env_fallback(api_db, monkeypatch):
 
 # ── mapping helpers ─────────────────────────────────────────────────────────────
 
-def test_within_range():
+def test_within_range(monkeypatch):
     assert gs._within("2026-06-15T00:00:00Z", "2026-06-01", "2026-06-30")
     assert not gs._within("2026-05-31T00:00:00Z", "2026-06-01", "2026-06-30")
     assert not gs._within("2026-07-01T00:00:00Z", "2026-06-01", "2026-06-30")
+    # Reporting uses Hyros's fixed UTC-06 day boundary, not the UTC date.
+    monkeypatch.setenv("REPORT_TIMEZONE", "Etc/GMT+6")
+    assert gs._within("2026-07-12T04:30:00Z", "2026-07-11", "2026-07-11")
+    assert not gs._within("2026-07-12T06:30:00Z", "2026-07-11", "2026-07-11")
 
 
 def test_src_info_and_attribution_flags():
@@ -127,6 +149,23 @@ def test_write_opportunities_won_creates_order(api_db):
     assert len(orders) == 1
     assert float(orders[0]["gross"]) == 199.0
     assert orders[0]["customer_key"] == gs._sha256("buyer@example.com")
+
+
+def test_write_form_submissions_preserves_repeat_optins(api_db):
+    contact = _contact("c1", "lead@example.com")
+    submissions = [
+        _submission("s1", "c1", "lead@example.com"),
+        _submission("s2", "c1", "lead@example.com", created="2026-06-16T12:30:00.000Z"),
+    ]
+
+    stats = gs._write_form_submissions(
+        api_db, submissions, "2026-06-01", "2026-06-30", {"c1": contact}
+    )
+
+    assert stats == {"optins": 2, "skipped": 0}
+    rows = sql_rows(api_db, "SELECT type, customer_key FROM conversions ORDER BY ts")
+    assert [row["type"] for row in rows] == ["OptIn", "OptIn"]
+    assert {row["customer_key"] for row in rows} == {gs._sha256("lead@example.com")}
 
 
 # ── endpoints ───────────────────────────────────────────────────────────────────
@@ -188,14 +227,20 @@ def test_sync_writes_leads_and_orders(client, api_db):
     opps_page = {"opportunities": [
         _opportunity("o1", "buyer@example.com", value=250.0, status="won"),
     ]}
+    forms_page = {
+        "submissions": [_submission("s1", "c1", "lead1@example.com")],
+        "meta": {"currentPage": 1, "nextPage": None},
+    }
 
     with respx.mock(assert_all_mocked=False) as router:
         router.get(url__startswith=f"{GHL}/contacts/").mock(return_value=Response(200, json=contacts_page))
+        router.get(url__startswith=f"{GHL}/forms/submissions").mock(return_value=Response(200, json=forms_page))
         router.get(url__startswith=f"{GHL}/opportunities/search").mock(return_value=Response(200, json=opps_page))
         r = client.post("/api/ghl/sync", params={"start_date": "2026-06-01", "end_date": "2026-06-30"})
 
     body = r.json()
     assert body["leads"] == 2
+    assert body["optins"] == 1
     assert body["orders"] == 1
     assert body["errors"] == []
 
@@ -203,6 +248,79 @@ def test_sync_writes_leads_and_orders(client, api_db):
     assert int(leads[0]["c"]) == 2
     orders = sql_rows(api_db, "SELECT COUNT(*) AS c FROM orders")
     assert int(orders[0]["c"]) == 1
+
+
+def test_sync_scans_recent_pages_until_historical_window(client, api_db):
+    gs.save_ghl_credentials(api_db, "pit-xyz", "loc_1")
+    first_url = f"{GHL}/contacts/"
+    second_url = f"{GHL}/contacts/?startAfter=page2"
+    third_url = f"{GHL}/contacts/?startAfter=page3"
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith=first_url).mock(
+            side_effect=[
+                Response(200, json={
+                    "contacts": [_contact("new", "new@example.com", date_added="2026-07-10T00:00:00Z")],
+                    "meta": {"nextPageUrl": second_url},
+                }),
+                Response(200, json={
+                    "contacts": [_contact("match", "match@example.com", date_added="2026-06-20T00:00:00Z")],
+                    "meta": {"nextPageUrl": third_url},
+                }),
+                Response(200, json={
+                    "contacts": [_contact("old", "old@example.com", date_added="2026-05-01T00:00:00Z")],
+                    "meta": {"nextPageUrl": f"{GHL}/contacts/?startAfter=page4"},
+                }),
+            ]
+        )
+        router.get(url__startswith=f"{GHL}/opportunities/search").mock(
+            return_value=Response(200, json={"opportunities": []})
+        )
+        router.get(url__startswith=f"{GHL}/forms/submissions").mock(
+            return_value=Response(200, json={"submissions": [], "meta": {"nextPage": None}})
+        )
+        response = client.post(
+            "/api/ghl/sync",
+            params={"start_date": "2026-06-19", "end_date": "2026-06-25", "limit": 100},
+        )
+
+    body = response.json()
+    assert body["errors"] == []
+    assert body["leads"] == 1
+    leads = sql_rows(api_db, "SELECT customer_key FROM conversions WHERE LOWER(type)='lead'")
+    assert [row["customer_key"] for row in leads] == [gs._sha256("match@example.com")]
+
+
+def test_form_submission_fetch_follows_all_pages(client, api_db):
+    gs.save_ghl_credentials(api_db, "pit-xyz", "loc_1")
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith=f"{GHL}/contacts/").mock(
+            return_value=Response(200, json={"contacts": [], "meta": {}})
+        )
+        router.get(url__startswith=f"{GHL}/forms/submissions").mock(
+            side_effect=[
+                Response(200, json={
+                    "submissions": [_submission("s1", "c1", "one@example.com")],
+                    "meta": {"currentPage": 1, "nextPage": 2},
+                }),
+                Response(200, json={
+                    "submissions": [_submission("s2", "c2", "two@example.com")],
+                    "meta": {"currentPage": 2, "nextPage": None},
+                }),
+            ]
+        )
+        router.get(url__startswith=f"{GHL}/opportunities/search").mock(
+            return_value=Response(200, json={"opportunities": []})
+        )
+        response = client.post(
+            "/api/ghl/sync",
+            params={"start_date": "2026-06-01", "end_date": "2026-06-30", "limit": 100},
+        )
+
+    body = response.json()
+    assert body["errors"] == []
+    assert body["optins"] == 2
+    assert body["synced"] == 2
 
 
 def test_sync_not_configured_returns_error(client, api_db, monkeypatch):

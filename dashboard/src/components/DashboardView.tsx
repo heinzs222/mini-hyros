@@ -34,7 +34,7 @@ type TsRow = {
 interface Props {
   report: any;
   compareReport?: any;
-  compareCaption?: string;
+  currentRangeCaption?: string;
 }
 
 const COLORS = {
@@ -62,6 +62,16 @@ function shortAxisDate(iso: string): string {
 
 function trackedRevenue(s: any): number {
   return num(s?.tracked_revenue ?? s?.all_orders_revenue ?? s?.revenue);
+}
+
+function rangeStartLabel(iso: string | null | undefined): string | undefined {
+  if (!iso) return undefined;
+  const [year, month, day] = iso.split("-").map(Number);
+  if (!year || !month || !day) return undefined;
+  return new Date(year, month - 1, day).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
 }
 function trackedOrders(s: any): number {
   return num(s?.tracked_orders ?? s?.all_orders_count ?? s?.orders);
@@ -122,11 +132,15 @@ function StatTile({
   );
 }
 
-export default function DashboardView({ report, compareReport, compareCaption }: Props) {
+export default function DashboardView({ report, compareReport, currentRangeCaption }: Props) {
   const ts: TsRow[] = report?.charts?.time_series || [];
   const sum = report?.summary_totals || {};
   const csum = compareReport?.summary_totals || null;
-  const caption = compareCaption ? `from ${compareCaption}` : undefined;
+  // Prefer the range echoed by the response. This keeps labels attached to the
+  // exact dataset currently rendered if a new request is still in flight.
+  const responseRangeStart = rangeStartLabel(report?.report_meta?.date_range?.start);
+  const captionStart = responseRangeStart || currentRangeCaption;
+  const caption = captionStart ? `from ${captionStart}` : undefined;
 
   const derived = useMemo(() => {
     const cost = num(sum.cost);
@@ -150,7 +164,9 @@ export default function DashboardView({ report, compareReport, compareCaption }:
     const cRevenue = csum ? trackedRevenue(csum) : null;
     const cOrders = csum ? trackedOrders(csum) : null;
     const cRoas = csum ? (csum.blended_roas ?? csum.roas ?? (cCost ? cRevenue! / cCost : null)) : null;
-    const cAov = csum ? (csum.blended_aov ?? (cOrders ? cRevenue! / cOrders : null)) : null;
+    const cAov = csum
+      ? (csum.blended_aov ?? (cOrders ? cRevenue! / cOrders : null))
+      : null;
     const cClicks = csum ? num(csum.clicks) : null;
     const cNewCustomers = csum ? (csum.new_customers != null ? num(csum.new_customers) : cOrders) : null;
     const cLeadsFunnel = (compareReport?.funnels?.rows || []).reduce((a: number, r: any) => a + num(r.leads), 0);
@@ -193,7 +209,7 @@ export default function DashboardView({ report, compareReport, compareCaption }:
         newCustomers: num((r as any).new_customers ?? 0),
         clicks: num(r.clicks),
         roas: num((r as any).blended_roas ?? r.roas ?? 0),
-        aov: ord > 0 ? Math.round((rev / ord) * 100) / 100 : 0,
+        aov: num((r as any).blended_aov ?? (ord > 0 ? Math.round((rev / ord) * 100) / 100 : 0)),
         cpa: ord > 0 ? Math.round((num(r.cost) / ord) * 100) / 100 : 0,
       };
     });

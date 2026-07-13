@@ -656,7 +656,8 @@ def _import_google_ads_script_rows(payload: GoogleAdsScriptSpendPayload) -> dict
         )
         inserted_ads += 1
 
-    for r in campaign_total_rows:
+    include_campaign_adjustments = _google_include_campaign_adjustments()
+    for r in campaign_total_rows if include_campaign_adjustments else []:
         ad_total = ad_totals_by_campaign_day.get((r["date"], r["campaign_id"]), {})
         cost_delta = round(r["cost"] - float(ad_total.get("cost") or 0.0), 6)
         clicks_delta = r["clicks"] - float(ad_total.get("clicks") or 0.0)
@@ -692,6 +693,12 @@ def _import_google_ads_script_rows(payload: GoogleAdsScriptSpendPayload) -> dict
         )
         inserted_campaign_adjustments += 1
         adjustment_cost += max(cost_delta, 0.0)
+
+    if campaign_total_rows and not include_campaign_adjustments:
+        warnings.append(
+            f"Ignored {len(campaign_total_rows)} campaign-total rows in Hyros-compatible mode. "
+            "Set GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS=true to include their positive deltas."
+        )
 
     if not parsed_rows:
         start_date = _parse_import_date(payload.start_date)
@@ -820,6 +827,7 @@ def _import_google_ads_script_rows(payload: GoogleAdsScriptSpendPayload) -> dict
         "date_range": {"start": start_date, "end": end_date},
         "replace": bool(payload.replace),
         "source": "google_ads_script",
+        "campaign_adjustments_enabled": include_campaign_adjustments,
         "warnings": warnings,
     }
 
@@ -856,6 +864,28 @@ def _google_ads_api_sync_disabled() -> bool:
     mode = str(os.environ.get("GOOGLE_ADS_SYNC_MODE", "api") or "api").strip().lower()
     disabled = str(os.environ.get("DISABLE_GOOGLE_ADS_API_SYNC", "") or "").strip().lower()
     return mode in {"script", "push", "manual", "disabled", "off"} or disabled in {"1", "true", "yes", "on"}
+
+
+def _google_include_campaign_adjustments() -> bool:
+    """Return whether campaign-only Google spend should be reconciled.
+
+    Hyros reports ad-level Google rows, so compatibility mode excludes these
+    adjustments by default. Opt in for complete account billing totals.
+    """
+    raw = str(os.environ.get("GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _meta_include_campaign_adjustments() -> bool:
+    """Return whether campaign-only Meta spend should be reconciled.
+
+    Hyros's platform totals are built from ad-level Insights rows. Meta campaign
+    totals can be higher than that ad-level view, so adding their positive delta
+    makes Mini Hyros disagree with Hyros even though both source payloads are
+    individually valid. Keep the complete-billing view available as an opt-in.
+    """
+    raw = str(os.environ.get("META_INCLUDE_CAMPAIGN_ADJUSTMENTS", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _google_api_error_message(response: httpx.Response | None, fallback: str) -> str:
@@ -948,6 +978,7 @@ async def _fetch_meta_insights(access_token: str, ad_account_id: str, start_date
             "adset_id",
             "ad_id",
             "clicks",
+            "inline_link_clicks",
             "spend",
             "impressions",
             "campaign_name",
@@ -998,6 +1029,7 @@ async def _fetch_meta_campaign_insights(access_token: str, ad_account_id: str, s
             "campaign_id",
             "campaign_name",
             "clicks",
+            "inline_link_clicks",
             "spend",
             "impressions",
         ]
@@ -1029,6 +1061,19 @@ async def _fetch_meta_campaign_insights(access_token: str, ad_account_id: str, s
     return rows
 
 
+def _meta_hyros_clicks(row: dict[str, Any]) -> float:
+    """Return the Meta link-click metric displayed by Hyros.
+
+    Meta's broad ``clicks`` value includes reactions and other interactions.
+    Hyros displays link CTR, so its click total comes from
+    ``inline_link_clicks``. Fall back to ``clicks`` for legacy payloads that do
+    not contain the link-click field.
+    """
+    if "inline_link_clicks" in row and row.get("inline_link_clicks") is not None:
+        return max(_num(row.get("inline_link_clicks"), 0.0), 0.0)
+    return max(_num(row.get("clicks"), 0.0), 0.0)
+
+
 def _write_meta_spend_rows(
     db_path: str,
     ad_account_id: str,
@@ -1047,14 +1092,14 @@ def _write_meta_spend_rows(
     ad_totals_by_campaign_day: dict[tuple[str, str], dict[str, float]] = defaultdict(
         lambda: {"cost": 0.0, "clicks": 0.0, "impressions": 0.0}
     )
-
+    include_campaign_adjustments = _meta_include_campaign_adjustments()
     _ensure_spend_table(db_path)
     _ensure_ad_names_table(db_path)
 
     # An empty fetch must never wipe existing rows: skip the delete-and-replace
     # entirely and preserve whatever is already stored (mirrors the guard in
     # _import_google_ads_script_rows).
-    if not rows and not (campaign_rows or []):
+    if not rows and not ((campaign_rows or []) if include_campaign_adjustments else []):
         return {
             "deleted": 0,
             "inserted": 0,
@@ -1088,7 +1133,7 @@ def _write_meta_spend_rows(
             campaign_name = str(r.get("campaign_name") or "").strip()
             adset_name = str(r.get("adset_name") or "").strip()
             ad_name = str(r.get("ad_name") or "").strip()
-            clicks = str(r.get("clicks") or "0").strip()
+            clicks = str(int(round(_meta_hyros_clicks(r))))
             spend = str(r.get("spend") or "0").strip()
             impressions = str(r.get("impressions") or "0").strip()
 
@@ -1104,6 +1149,8 @@ def _write_meta_spend_rows(
                     "adset_name": adset_name,
                     "ad_name": ad_name,
                     "source": "meta_insights_api",
+                    "click_metric": "inline_link_clicks",
+                    "all_clicks": str(r.get("clicks") or "0").strip(),
                     "synced_at": synced_at,
                 },
                 separators=(",", ":"),
@@ -1144,7 +1191,7 @@ def _write_meta_spend_rows(
         # Reconcile ad-level totals against campaign-level totals: insert only the
         # positive per-(date, campaign_id) delta as an unattributed adjustment row
         # so campaign cost that never resolves to an ad_id is still counted.
-        for r in campaign_rows or []:
+        for r in (campaign_rows or []) if include_campaign_adjustments else []:
             day = str(r.get("date_start") or "").strip()
             campaign_id = str(r.get("campaign_id") or "").strip()
             if not day or not campaign_id:
@@ -1153,7 +1200,7 @@ def _write_meta_spend_rows(
             account = str(r.get("account_id") or account_id).replace("act_", "").strip()
             campaign_name = str(r.get("campaign_name") or "").strip()
             campaign_cost = _num(r.get("spend"), 0.0)
-            campaign_clicks = _num(r.get("clicks"), 0.0)
+            campaign_clicks = _meta_hyros_clicks(r)
             campaign_impressions = _num(r.get("impressions"), 0.0)
 
             ad_total = ad_totals_by_campaign_day.get((day, campaign_id), {})
@@ -1247,7 +1294,11 @@ async def _sync_meta_spend(start_date: str, end_date: str) -> dict[str, Any]:
 
     try:
         api_rows = await _fetch_meta_insights(access_token, ad_account_id, start_date, end_date)
-        campaign_rows = await _fetch_meta_campaign_insights(access_token, ad_account_id, start_date, end_date)
+        campaign_rows = (
+            await _fetch_meta_campaign_insights(access_token, ad_account_id, start_date, end_date)
+            if _meta_include_campaign_adjustments()
+            else []
+        )
         write_stats = await asyncio.to_thread(
             _write_meta_spend_rows, db_path, ad_account_id, start_date, end_date, api_rows, campaign_rows
         )
@@ -1412,11 +1463,12 @@ def _write_google_spend_rows(
     ad_totals_by_campaign_day: dict[tuple[str, str], dict[str, float]] = defaultdict(
         lambda: {"cost": 0.0, "clicks": 0.0, "impressions": 0.0}
     )
+    include_campaign_adjustments = _google_include_campaign_adjustments()
 
     # An empty fetch must never wipe existing rows: skip the delete-and-replace
     # entirely and preserve whatever is already stored (mirrors the guard in
     # _import_google_ads_script_rows).
-    if not rows and not (campaign_rows or []):
+    if not rows and not ((campaign_rows or []) if include_campaign_adjustments else []):
         return {
             "deleted": 0,
             "inserted": 0,
@@ -1504,7 +1556,7 @@ def _write_google_spend_rows(
             inserted += 1
             inserted_ads += 1
 
-        for r in campaign_rows or []:
+        for r in (campaign_rows or []) if include_campaign_adjustments else []:
             day = str(_first_present(r, ("segments", "date"), ("segments", "date_start"))).strip()
             campaign_id = str(_first_present(r, ("campaign", "id"), ("campaign", "resourceName"))).strip()
             if not day or not campaign_id:

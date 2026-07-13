@@ -14,10 +14,12 @@ from attributionops.tools.tracking import tracking_health_check
 from attributionops.util import (
     local_day_bounds_utc,
     normalize_campaign_key,
+    report_timezone,
     round_money,
     safe_div,
     to_float,
     to_int,
+    try_parse_iso_ts,
 )
 
 
@@ -641,6 +643,30 @@ def _child_count_map(db_path: str, *, start_date: str, end_date: str, active_tab
     return {k: len(v) for k, v in children.items()}
 
 
+_ORDER_IDENTITY_SQL = """
+CASE
+  WHEN COALESCE(customer_key, '') != '' THEN 'customer:' || customer_key
+  WHEN COALESCE(processor_customer_id, '') != '' THEN 'processor:' || processor_customer_id
+  WHEN COALESCE(payment_fingerprint, '') != '' THEN 'fingerprint:' || payment_fingerprint
+  ELSE 'sale:' || COALESCE(NULLIF(sale_group_id, ''), order_id)
+END
+"""
+
+
+def _order_group_id(row: dict[str, Any]) -> str:
+    return str(row.get("sale_group_id") or row.get("order_id") or "")
+
+
+def _order_identity(row: dict[str, Any]) -> str:
+    if row.get("customer_key"):
+        return f"customer:{row['customer_key']}"
+    if row.get("processor_customer_id"):
+        return f"processor:{row['processor_customer_id']}"
+    if row.get("payment_fingerprint"):
+        return f"fingerprint:{row['payment_fingerprint']}"
+    return f"sale:{_order_group_id(row)}"
+
+
 def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any]:
     # Ensure the read-time exclusion table exists before any raw SQL references it
     # (memoized). Compute the timezone-aware, sargable date bounds once and reuse
@@ -1018,90 +1044,148 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     conversions_count = attributed_orders_all
     cpa = safe_div(total_cost, conversions_count) if conversions_count else None
 
-    # Total all-orders revenue from DB (regardless of attribution)
+    # Raw sales and customer metrics are deliberately separate. Hyros counts
+    # every processor order as a Sale, groups same-buyer charges inside a short
+    # window for Customer/AOV measures, and excludes recurring groups from the
+    # New Customers widget. NET CAC uses genuinely first-ever identities.
+    order_rows: list[dict[str, Any]] = []
+    first_customer_rows: list[dict[str, Any]] = []
+    first_by_identity: dict[str, str] = {}
+    all_orders_count = 0
+    all_orders_gross_revenue = 0.0
+    all_orders_revenue = 0.0
+    all_orders_cogs = 0.0
+    all_orders_fees = 0.0
+    total_customers = 0
+    new_customers = 0
+    recurring_customers = 0
+    unique_customers = 0
+    net_new_customers = 0
+    returning_customers = 0
     try:
-        _all_orders = query(
+        order_rows = query(
             db_path,
-            """
-            SELECT
-              COUNT(*) AS cnt,
-              COALESCE(SUM(gross),0) AS gross_rev,
-              COALESCE(SUM(net),0) AS net_rev,
-              COALESCE(SUM(cogs),0) AS cogs,
-              COALESCE(SUM(fees),0) AS fees
-            FROM orders
-            WHERE ts >= :start_utc AND ts < :end_excl_utc
-            """,
+            """SELECT order_id, ts, gross, net, refunds, cogs, fees, customer_key,
+                      processor,
+                      processor_customer_id, payment_fingerprint,
+                      COALESCE(NULLIF(sale_group_id, ''), order_id) AS sale_group_id,
+                      COALESCE(is_recurring, 0) AS is_recurring
+               FROM orders
+               WHERE ts >= :start_utc AND ts < :end_excl_utc""",
             {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
         ).rows
-        _ao = _all_orders[0] if _all_orders else {}
-        all_orders_count = int(_ao.get("cnt") or 0)
-        all_orders_gross_revenue = float(_ao.get("gross_rev") or 0.0)
-        all_orders_revenue = float(_ao.get("net_rev") or 0.0)
-        all_orders_cogs = float(_ao.get("cogs") or 0.0)
-        all_orders_fees = float(_ao.get("fees") or 0.0)
+        all_orders_count = len(order_rows)
+        all_orders_gross_revenue = sum(
+            to_float(row.get("gross")) or to_float(row.get("net")) for row in order_rows
+        )
+        all_orders_revenue = sum(to_float(row.get("net")) for row in order_rows)
+        all_orders_cogs = sum(to_float(row.get("cogs")) for row in order_rows)
+        all_orders_fees = sum(to_float(row.get("fees")) for row in order_rows)
+
+        # Hyros's New Customers widget is sale-based despite its label: every
+        # non-refunded sale contributes one customer, split into recurring and
+        # non-recurring rows. Any refunded amount excludes that sale from this
+        # widget, while the General Overview still includes it in Sales and
+        # subtracts the refund from revenue.
+        customer_order_rows = [row for row in order_rows if to_float(row.get("refunds")) <= 0]
+        total_customers = len(customer_order_rows)
+        # Hyros reports recurrence independently of its non-refunded customer
+        # denominator. A refunded recurring charge remains classified recurring,
+        # while Total Customers still excludes refunded sales.
+        recurring_customers = sum(to_int(row.get("is_recurring")) != 0 for row in order_rows)
+        new_customers = max(total_customers - recurring_customers, 0)
+
+        # Hyros NET CAC uses distinct non-refunded processor customers. Stripe
+        # charges without a Stripe customer id are not added to that denominator.
+        # Non-Stripe/manual imports fall back to the warehouse identity so their
+        # CAC remains useful when no processor customer concept exists.
+        acquisition_identities: set[str] = set()
+        for row in customer_order_rows:
+            processor = str(row.get("processor") or "").strip().lower()
+            processor_customer_id = str(row.get("processor_customer_id") or "").strip()
+            if processor == "stripe":
+                if processor_customer_id:
+                    acquisition_identities.add(f"stripe:{processor_customer_id}")
+            else:
+                identity = _order_identity(row)
+                if identity:
+                    acquisition_identities.add(identity)
+        unique_customers = len(acquisition_identities)
+
+        first_customer_rows = query(
+            db_path,
+            f"""SELECT identity, MIN(ts) AS first_ts
+                FROM (SELECT {_ORDER_IDENTITY_SQL} AS identity, ts FROM orders)
+                GROUP BY identity""",
+        ).rows
+        first_by_identity = {
+            str(row.get("identity") or ""): str(row.get("first_ts") or "")
+            for row in first_customer_rows
+        }
+        window_identities = {_order_identity(row) for row in order_rows}
+        net_new_customers = sum(
+            1
+            for identity in window_identities
+            if start_utc <= first_by_identity.get(identity, "") < end_excl_utc
+        )
+        returning_customers = max(len(window_identities) - net_new_customers, 0)
     except Exception:
-        all_orders_count = 0
-        all_orders_gross_revenue = 0.0
-        all_orders_revenue = 0.0
-        all_orders_cogs = 0.0
-        all_orders_fees = 0.0
+        order_rows = []
+        first_customer_rows = []
+        first_by_identity = {}
 
     # New vs returning customers + leads — these power true NET CAC and Cost-per-Lead.
     # A "new customer" is one whose first-ever order falls inside the window (not just
     # any order in the window), so CAC reflects net-new acquisition rather than CPA.
-    new_customers = 0
-    returning_customers = 0
     leads_count = 0
+    lead_contacts = 0
+    new_leads = 0
+    lead_optins = 0
     try:
-        _nc = query(
+        lead_types = "'lead','formsubmission','form_submission','signup','optin','opt_in'"
+        lead_rows = query(
             db_path,
-            """
-            SELECT COUNT(*) AS cnt FROM (
-                SELECT customer_key, MIN(substr(ts, 1, 10)) AS first_day
-                FROM orders
-                WHERE COALESCE(customer_key, '') != ''
-                GROUP BY customer_key
+            f"""SELECT conversion_id, ts, LOWER(type) AS type, customer_key, session_id, visitor_id
+                FROM conversions
+                WHERE ts >= :start_utc AND ts < :end_excl_utc
+                  AND LOWER(type) IN ({lead_types})""",
+            {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
+        ).rows
+        leads_count = len(lead_rows)
+
+        def lead_identity(row: dict[str, Any]) -> str:
+            return str(
+                row.get("customer_key")
+                or row.get("visitor_id")
+                or row.get("session_id")
+                or row.get("conversion_id")
+                or ""
             )
-            WHERE first_day BETWEEN :s AND :e
-            """,
-            {"s": inputs.start_date, "e": inputs.end_date},
-        ).rows
-        new_customers = int((_nc[0] if _nc else {}).get("cnt") or 0)
 
-        _cw = query(
+        lead_contacts = len({lead_identity(row) for row in lead_rows if lead_identity(row)})
+        lead_optins = sum(1 for row in lead_rows if str(row.get("type") or "") != "lead")
+        first_leads = query(
             db_path,
-            """
-            SELECT COUNT(DISTINCT customer_key) AS cnt
-            FROM orders
-            WHERE COALESCE(customer_key, '') != ''
-              AND ts >= :start_utc AND ts < :end_excl_utc
-            """,
-            {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
+            f"""SELECT identity, MIN(ts) AS first_ts FROM (
+                    SELECT COALESCE(NULLIF(customer_key, ''), NULLIF(visitor_id, ''),
+                                    NULLIF(session_id, ''), conversion_id) AS identity, ts
+                    FROM conversions WHERE LOWER(type) IN ({lead_types})
+                ) GROUP BY identity""",
         ).rows
-        customers_in_window = int((_cw[0] if _cw else {}).get("cnt") or 0)
-        returning_customers = max(customers_in_window - new_customers, 0)
-
-        # Count each distinct lead once, falling back to session_id then the (now
-        # UNIQUE) conversion_id so keyless leads are counted and repeats collapse.
-        _ld = query(
-            db_path,
-            """
-            SELECT COUNT(DISTINCT COALESCE(NULLIF(customer_key, ''), NULLIF(session_id, ''), conversion_id)) AS cnt
-            FROM conversions
-            WHERE ts >= :start_utc AND ts < :end_excl_utc
-              AND LOWER(type) IN ('lead', 'formsubmission', 'form_submission', 'signup', 'optin', 'opt_in')
-            """,
-            {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
-        ).rows
-        leads_count = int((_ld[0] if _ld else {}).get("cnt") or 0)
+        new_leads = sum(
+            1
+            for row in first_leads
+            if start_utc <= str(row.get("first_ts") or "") < end_excl_utc
+        )
     except Exception:
-        new_customers = 0
-        returning_customers = 0
         leads_count = 0
+        lead_contacts = 0
+        new_leads = 0
+        lead_optins = 0
 
-    # NET CAC = ad spend / net-new customers (distinct from CPA = spend / orders).
-    net_cac = safe_div(total_cost, float(new_customers)) if new_customers else None
+    # Hyros labels this NET CAC but divides spend by distinct non-refunded
+    # processor customers in the selected window (not by raw sales).
+    net_cac = safe_div(total_cost, float(unique_customers)) if unique_customers else None
     # Cost per Lead = ad spend / leads (distinct from CAC and CPA).
     cost_per_lead = safe_div(total_cost, float(leads_count)) if leads_count else None
 
@@ -1110,6 +1194,8 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     # attribution_rate and unattributed_* don't shift when switching breakdown tabs.
     attributed_orders = round(attributed_orders_all, 2)
     attributed_revenue = attributed_revenue_all
+    attributed_sale_groups = int(_attr["run"].get("sale_groups") or 0)
+    attributed_aov = safe_div(attributed_revenue, float(attributed_sale_groups))
     unattributed_orders = round(max(float(all_orders_count) - attributed_orders, 0.0), 2)
     unattributed_revenue = round_money(max(all_orders_revenue - attributed_revenue, 0.0))
     attribution_rate = safe_div(attributed_orders, float(all_orders_count))
@@ -1118,6 +1204,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     blended_roas = safe_div(all_orders_revenue, total_cost)
     blended_cvr = safe_div(all_orders_count, total_clicks)
     blended_aov = safe_div(all_orders_revenue, all_orders_count) if all_orders_count else None
+    grouped_aov = safe_div(all_orders_revenue, total_customers) if total_customers else None
     blended_profit = round_money(all_orders_revenue - total_cost - all_orders_cogs - all_orders_fees)
     blended_cpa = safe_div(total_cost, all_orders_count) if all_orders_count else None
 
@@ -1129,8 +1216,15 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         "cpa": round_money(cpa) if cpa is not None else None,
         "cpl": round_money(cost_per_lead) if cost_per_lead is not None else None,
         "new_customers": new_customers,
+        "unique_customers": unique_customers,
+        "net_new_customers": net_new_customers,
         "returning_customers": returning_customers,
+        "recurring_customers": recurring_customers,
+        "total_customers": total_customers,
         "leads": leads_count,
+        "lead_contacts": lead_contacts,
+        "new_leads": new_leads,
+        "lead_optins": lead_optins,
         "all_orders_count": all_orders_count,
         "all_orders_revenue": round_money(all_orders_revenue),
         "all_orders_gross_revenue": round_money(all_orders_gross_revenue),
@@ -1140,13 +1234,16 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         "tracked_revenue": round_money(all_orders_revenue),
         "tracked_gross_revenue": round_money(all_orders_gross_revenue),
         "attributed_orders": attributed_orders,
+        "attributed_sale_groups": attributed_sale_groups,
         "attributed_revenue": round_money(attributed_revenue),
+        "attributed_aov": round_money(attributed_aov) if attributed_aov is not None else None,
         "unattributed_orders": unattributed_orders,
         "unattributed_revenue": unattributed_revenue,
         "attribution_rate": round(attribution_rate * 100.0, 2) if attribution_rate is not None else None,
         "blended_roas": round(blended_roas, 2) if blended_roas is not None else None,
         "blended_cvr": round(blended_cvr * 100.0, 3) if blended_cvr is not None else None,
         "blended_aov": round_money(blended_aov) if blended_aov is not None else None,
+        "grouped_aov": round_money(grouped_aov) if grouped_aov is not None else None,
         "blended_profit": blended_profit,
         "blended_cpa": round_money(blended_cpa) if blended_cpa is not None else None,
     }
@@ -1176,43 +1273,50 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     spend_day_map = {r["name"]: r for r in spend_by_day}
     attrib_day_map = {r["date"]: r for r in attrib_by_day}
 
-    # Tracked (all-orders) totals by day + new customers by day. These drive the
-    # blended dashboard charts so they match the headline tracked numbers even
-    # when attribution is incomplete (otherwise the charts read flat at 0).
+    # Tracked (all-orders) totals by local reporting day. Do not bucket with
+    # substr(ts, 1, 10): warehouse timestamps are UTC while Hyros reports in the
+    # account timezone, so late-evening orders otherwise appear a day early.
     tracked_day_map: dict[str, dict[str, Any]] = {}
     new_cust_day_map: dict[str, int] = {}
+    net_new_cust_day_map: dict[str, int] = {}
     try:
-        _td = query(
-            db_path,
-            """
-            SELECT substr(ts, 1, 10) AS day, COUNT(*) AS orders,
-                   COALESCE(SUM(net), 0) AS revenue, COALESCE(SUM(gross), 0) AS gross
-            FROM orders
-            WHERE ts >= :start_utc AND ts < :end_excl_utc
-            GROUP BY day
-            """,
-            {"start_utc": start_utc, "end_excl_utc": end_excl_utc},
-        ).rows
-        tracked_day_map = {str(r["day"]): r for r in _td}
+        tz = report_timezone()
+        grouped_by_day: dict[str, set[str]] = defaultdict(set)
+        nonrecurring_by_day: dict[str, int] = defaultdict(int)
+        net_new_by_day: dict[str, set[str]] = defaultdict(set)
 
-        _ncd = query(
-            db_path,
-            """
-            SELECT first_day AS day, COUNT(*) AS cnt FROM (
-                SELECT customer_key, MIN(substr(ts, 1, 10)) AS first_day
-                FROM orders
-                WHERE COALESCE(customer_key, '') != ''
-                GROUP BY customer_key
+        for row in order_rows:
+            parsed_ts = try_parse_iso_ts(row.get("ts"))
+            if parsed_ts is None:
+                continue
+            day = parsed_ts.astimezone(tz).date().isoformat()
+            bucket = tracked_day_map.setdefault(
+                day,
+                {"orders": 0, "revenue": 0.0, "gross": 0.0, "sale_groups": 0},
             )
-            WHERE first_day BETWEEN :s AND :e
-            GROUP BY first_day
-            """,
-            {"s": inputs.start_date, "e": inputs.end_date},
-        ).rows
-        new_cust_day_map = {str(r["day"]): int(r["cnt"] or 0) for r in _ncd}
+            bucket["orders"] += 1
+            bucket["revenue"] += to_float(row.get("net"))
+            bucket["gross"] += to_float(row.get("gross")) or to_float(row.get("net"))
+
+            group_id = _order_group_id(row)
+            if group_id:
+                grouped_by_day[day].add(group_id)
+            if to_float(row.get("refunds")) <= 0 and not to_int(row.get("is_recurring")):
+                nonrecurring_by_day[day] += 1
+
+            identity = _order_identity(row)
+            first_ts = try_parse_iso_ts(first_by_identity.get(identity))
+            if identity and first_ts is not None and first_ts == parsed_ts:
+                net_new_by_day[day].add(identity)
+
+        for day, bucket in tracked_day_map.items():
+            bucket["sale_groups"] = len(grouped_by_day.get(day, set()))
+        new_cust_day_map = dict(nonrecurring_by_day)
+        net_new_cust_day_map = {day: len(ids) for day, ids in net_new_by_day.items()}
     except Exception:
         tracked_day_map = {}
         new_cust_day_map = {}
+        net_new_cust_day_map = {}
 
     start_d = date.fromisoformat(inputs.start_date)
     end_d = date.fromisoformat(inputs.end_date)
@@ -1235,7 +1339,11 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         fees = to_float(a.get("fees"))
         tracked_revenue = to_float(t.get("revenue"))
         tracked_orders = to_int(t.get("orders"))
+        tracked_sale_groups = to_int(t.get("sale_groups"))
         new_customers_day = int(new_cust_day_map.get(day, 0))
+        net_new_customers_day = int(net_new_cust_day_map.get(day, 0))
+        attributed_sale_groups_day = to_int(a.get("sale_groups"))
+        attributed_aov_day = safe_div(revenue, float(attributed_sale_groups_day))
         profit = revenue - cost - cogs - fees
         roas = safe_div(revenue, cost)
         blended_roas_day = safe_div(tracked_revenue, cost)
@@ -1250,7 +1358,11 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
                 "clicks": clicks,
                 "orders": round(orders, 2),
                 "tracked_orders": tracked_orders,
+                "tracked_sale_groups": tracked_sale_groups,
                 "new_customers": new_customers_day,
+                "net_new_customers": net_new_customers_day,
+                "attributed_sale_groups": attributed_sale_groups_day,
+                "attributed_aov": round_money(attributed_aov_day) if attributed_aov_day is not None else None,
                 "roas": round(roas, 2) if roas is not None else None,
                 "blended_roas": round(blended_roas_day, 2) if blended_roas_day is not None else None,
                 "cvr": round(cvr * 100.0, 2) if cvr is not None else None,
