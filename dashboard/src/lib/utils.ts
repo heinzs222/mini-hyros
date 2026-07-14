@@ -6,7 +6,17 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function formatMoney(value: number | null | undefined): string {
-  if (value == null) return "—";
+  if (value == null) return "\u2014";
+  const abs = Math.abs(value);
+  const sign = value < 0 ? "-" : "";
+  return `${sign}$${abs.toLocaleString("en-CA", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+export function formatMoneyCompact(value: number | null | undefined): string {
+  if (value == null) return "\u2014";
   const abs = Math.abs(value);
   const sign = value < 0 ? "-" : "";
   if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(1)}M`;

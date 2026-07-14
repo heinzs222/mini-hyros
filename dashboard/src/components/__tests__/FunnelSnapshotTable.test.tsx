@@ -51,10 +51,9 @@ describe("FunnelSnapshotTable", () => {
     // Visits use formatNumber's locale separators.
     expect(screen.getByText((12_345).toLocaleString())).toBeInTheDocument();
 
-    // Revenue >= 1K is abbreviated with a K suffix.
-    expect(screen.getByText("$45.0K")).toBeInTheDocument();
-    // Revenue < 1K uses two decimals.
-    expect(screen.getByText("$1.8K")).toBeInTheDocument();
+    // Revenue uses exact grouped currency values in data tables.
+    expect(screen.getByText("$45,000.00")).toBeInTheDocument();
+    expect(screen.getByText("$1,800.00")).toBeInTheDocument();
 
     // Percentages use formatPercentValue with 2 digits.
     expect(screen.getByText("16.20%")).toBeInTheDocument();

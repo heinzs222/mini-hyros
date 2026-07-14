@@ -13,7 +13,7 @@ import {
   YAxis,
 } from "recharts";
 import { Image as ImageIcon } from "lucide-react";
-import { formatMoney, formatNumber, formatRatio } from "@/lib/utils";
+import { formatMoney, formatMoneyCompact, formatNumber, formatRatio } from "@/lib/utils";
 import KpiCard from "./KpiCard";
 
 type TsRow = {
@@ -382,7 +382,7 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" vertical={false} />
               <XAxis dataKey="label" tick={{ fill: "#595c68", fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={32} />
-              <YAxis tick={{ fill: "#595c68", fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={(v) => formatMoney(v)} />
+              <YAxis tick={{ fill: "#595c68", fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={(v) => formatMoneyCompact(v)} />
               <Tooltip content={<ChartTooltip fmt={formatMoney} />} />
               <Area type="monotone" name="Cumulative" dataKey="v" stroke={COLORS.green} strokeWidth={2.5} fill="url(#g-ltv)" isAnimationActive={false} dot={false} />
             </AreaChart>

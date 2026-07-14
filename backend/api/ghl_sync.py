@@ -315,9 +315,7 @@ async def _fetch_form_submissions(
         params = {
             "locationId": location_id,
             "page": page,
-            "limit": min(100, limit - len(submissions)),
-            "startAt": start_date,
-            "endAt": end_date,
+            "limit": min(100, limit),
         }
         resp = await client.get(
             f"{GHL_API_BASE}/forms/submissions",
@@ -338,10 +336,28 @@ async def _fetch_form_submissions(
         resp.raise_for_status()
         data = resp.json()
         batch = list(data.get("submissions") or [])
-        submissions.extend(batch)
+        batch_days: list[str] = []
+        for submission in batch:
+            ts = _submission_ts(submission, "")
+            if not ts:
+                continue
+            day = utc_ts_to_local_date(ts)
+            batch_days.append(day)
+            if _within(ts, start_date, end_date):
+                submissions.append(submission)
+                if len(submissions) >= limit:
+                    break
+
         meta = data.get("meta") or {}
         next_page = meta.get("nextPage")
-        if not batch or next_page in (None, "", False):
+        # The endpoint is newest-first. Its startAt/endAt parameters are not
+        # consistently honored, so filter locally and keep paging until the
+        # requested window has been crossed. Newer rows must not consume the
+        # requested match limit.
+        entirely_before_window = bool(
+            start_date and batch_days and max(batch_days) < start_date
+        )
+        if not batch or entirely_before_window or next_page in (None, "", False):
             break
         try:
             page = int(next_page)

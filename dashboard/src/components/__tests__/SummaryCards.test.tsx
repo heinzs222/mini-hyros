@@ -52,12 +52,11 @@ describe("SummaryCards", () => {
   it("formats money, ratios, and percentages from the totals", () => {
     render(<SummaryCards totals={makeTotals()} />);
 
-    // Ad spend $5,000 -> abbreviated K.
-    expect(screen.getByText("$5.0K")).toBeInTheDocument();
-    // Tracked revenue $25,000 -> $25.0K.
-    expect(screen.getByText("$25.0K")).toBeInTheDocument();
-    // Attributed revenue $20,000 -> $20.0K (also used as the ROAS/CVR baseline).
-    expect(screen.getAllByText("$20.0K").length).toBeGreaterThan(0);
+    // Headline currency values remain exact rather than using K/M suffixes.
+    expect(screen.getByText("$5,000.00")).toBeInTheDocument();
+    expect(screen.getByText("$25,000.00")).toBeInTheDocument();
+    // Attributed revenue is also used as the ROAS/CVR baseline.
+    expect(screen.getAllByText("$20,000.00").length).toBeGreaterThan(0);
     // ROAS ratio with the x suffix.
     expect(screen.getAllByText("4.00x").length).toBeGreaterThan(0);
     // Attribution rate percentage.

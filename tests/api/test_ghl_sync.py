@@ -323,6 +323,52 @@ def test_form_submission_fetch_follows_all_pages(client, api_db):
     assert body["synced"] == 2
 
 
+def test_form_submission_fetch_filters_before_applying_match_limit(client, api_db):
+    gs.save_ghl_credentials(api_db, "pit-xyz", "loc_1")
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith=f"{GHL}/contacts/").mock(
+            return_value=Response(200, json={"contacts": [], "meta": {}})
+        )
+        forms_route = router.get(url__startswith=f"{GHL}/forms/submissions").mock(
+            side_effect=[
+                Response(200, json={
+                    "submissions": [
+                        _submission("new-1", "c-new-1", "new1@example.com", created="2026-07-10T12:00:00Z"),
+                        _submission("new-2", "c-new-2", "new2@example.com", created="2026-07-09T12:00:00Z"),
+                    ],
+                    "meta": {"currentPage": 1, "nextPage": 2},
+                }),
+                Response(200, json={
+                    "submissions": [
+                        _submission("match", "c-match", "match@example.com", created="2026-06-15T12:00:00Z"),
+                    ],
+                    "meta": {"currentPage": 2, "nextPage": 3},
+                }),
+                Response(200, json={
+                    "submissions": [
+                        _submission("old", "c-old", "old@example.com", created="2026-05-01T12:00:00Z"),
+                    ],
+                    "meta": {"currentPage": 3, "nextPage": 4},
+                }),
+            ]
+        )
+        router.get(url__startswith=f"{GHL}/opportunities/search").mock(
+            return_value=Response(200, json={"opportunities": []})
+        )
+        response = client.post(
+            "/api/ghl/sync",
+            params={"start_date": "2026-06-01", "end_date": "2026-06-30", "limit": 1},
+        )
+
+    body = response.json()
+    assert body["errors"] == []
+    assert body["optins"] == 1
+    assert body["synced"] == 1
+    assert forms_route.call_count == 2
+    rows = sql_rows(api_db, "SELECT conversion_id FROM conversions WHERE LOWER(type)='optin'")
+    assert rows == [{"conversion_id": gs._sha256("ghl_submission|match")}]
+
+
 def test_sync_not_configured_returns_error(client, api_db, monkeypatch):
     monkeypatch.delenv("GHL_API_TOKEN", raising=False)
     monkeypatch.delenv("GHL_LOCATION_ID", raising=False)

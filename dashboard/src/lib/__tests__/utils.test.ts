@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   cn,
   formatMoney,
+  formatMoneyCompact,
   formatNumber,
   formatPercent,
   formatPercentValue,
@@ -24,17 +25,10 @@ describe("formatMoney", () => {
     expect(formatMoney(undefined)).toBe("—");
   });
 
-  it("formats values >= 1M with an M suffix (1 decimal)", () => {
-    expect(formatMoney(1_000_000)).toBe("$1.0M");
-    expect(formatMoney(1_500_000)).toBe("$1.5M");
-    expect(formatMoney(2_340_000)).toBe("$2.3M");
-  });
-
-  it("formats values >= 1K (and < 1M) with a K suffix (1 decimal)", () => {
-    expect(formatMoney(1_000)).toBe("$1.0K");
-    expect(formatMoney(1_500)).toBe("$1.5K");
-    expect(formatMoney(12_345)).toBe("$12.3K");
-    expect(formatMoney(999_999)).toBe("$1000.0K");
+  it("shows exact grouped dollars and cents instead of compact rounding", () => {
+    expect(formatMoney(1_000)).toBe("$1,000.00");
+    expect(formatMoney(12_345.67)).toBe("$12,345.67");
+    expect(formatMoney(1_500_000)).toBe("$1,500,000.00");
   });
 
   it("formats values < 1000 with two decimals", () => {
@@ -46,9 +40,19 @@ describe("formatMoney", () => {
 
   it("handles negative values with a leading minus sign", () => {
     expect(formatMoney(-50)).toBe("-$50.00");
-    expect(formatMoney(-1_500)).toBe("-$1.5K");
-    expect(formatMoney(-2_000_000)).toBe("-$2.0M");
+    expect(formatMoney(-1_500)).toBe("-$1,500.00");
+    expect(formatMoney(-2_000_000)).toBe("-$2,000,000.00");
     expect(formatMoney(-0.5)).toBe("-$0.50");
+  });
+});
+
+describe("formatMoneyCompact", () => {
+  it("keeps compact labels available for chart axes", () => {
+    expect(formatMoneyCompact(null)).toBe("—");
+    expect(formatMoneyCompact(999.99)).toBe("$999.99");
+    expect(formatMoneyCompact(12_345)).toBe("$12.3K");
+    expect(formatMoneyCompact(1_500_000)).toBe("$1.5M");
+    expect(formatMoneyCompact(-1_500)).toBe("-$1.5K");
   });
 });
 
