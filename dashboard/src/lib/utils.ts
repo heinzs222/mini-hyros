@@ -60,17 +60,40 @@ export function profitColor(value: number | null | undefined): string {
 }
 
 /**
- * Returns the YYYY-MM-DD calendar date `n` days before today, in the browser's
- * local timezone. `daysAgo(0)` is today, `daysAgo(1)` is yesterday, etc.
- * Reporting-timezone day boundaries are resolved server-side; this only needs
- * to yield a stable local calendar date for default range seeds.
+ * The reporting timezone the backend buckets days into. Configure a deployment
+ * via NEXT_PUBLIC_REPORT_TIMEZONE to match the backend's REPORT_TIMEZONE; both
+ * default to Etc/GMT+6 (the Hyros parity offset).
+ */
+export function reportTimeZone(): string {
+  return process.env.NEXT_PUBLIC_REPORT_TIMEZONE || "Etc/GMT+6";
+}
+
+/**
+ * "Today" (YYYY-MM-DD) in the reporting timezone — NOT the browser's zone. Using
+ * the browser zone let a user ahead of the reporting zone pick a "Today" window
+ * that was entirely in the server's future, which returned an empty report.
+ */
+export function reportTodayIso(): string {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: reportTimeZone() }).format(new Date());
+  } catch {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+}
+
+/** Shift a YYYY-MM-DD date string by whole days (timezone-agnostic date math). */
+export function shiftIso(iso: string, deltaDays: number): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + deltaDays);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Returns the YYYY-MM-DD calendar date `n` days before "today" in the reporting
+ * timezone. `daysAgo(0)` is today, `daysAgo(1)` is yesterday, etc.
  */
 export function daysAgo(n: number): string {
   const days = Number.isFinite(n) ? Math.trunc(n) : 0;
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return shiftIso(reportTodayIso(), -days);
 }

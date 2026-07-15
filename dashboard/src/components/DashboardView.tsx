@@ -200,17 +200,26 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
     const series = ts.map((r) => {
       const rev = dayRevenue(r);
       const ord = dayOrders(r);
+      const dayCost = num(r.cost);
+      const dayLeads = num((r as any).leads ?? 0);
+      const dayNewCustomers = num((r as any).new_customers ?? 0);
       return {
         date: r.date,
         label: shortAxisDate(r.date),
-        cost: num(r.cost),
+        cost: dayCost,
         revenue: rev,
         orders: ord,
-        newCustomers: num((r as any).new_customers ?? 0),
+        newCustomers: dayNewCustomers,
+        leads: dayLeads,
         clicks: num(r.clicks),
         roas: num((r as any).blended_roas ?? r.roas ?? 0),
         aov: (r as any).source_aov == null ? null : num((r as any).source_aov),
-        cpa: ord > 0 ? Math.round((num(r.cost) / ord) * 100) / 100 : 0,
+        cpa: ord > 0 ? Math.round((dayCost / ord) * 100) / 100 : 0,
+        // Cost per Lead = spend / leads; NET CAC = spend / net-new customers.
+        // These are distinct from CPA (spend / orders) — plotting cpa on the CPL
+        // and CAC cards was the mislabeled-trend bug.
+        cpl: dayLeads > 0 ? Math.round((dayCost / dayLeads) * 100) / 100 : null,
+        cac: dayNewCustomers > 0 ? Math.round((dayCost / dayNewCustomers) * 100) / 100 : null,
       };
     });
 
@@ -267,7 +276,7 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
           deltaPct={deltaPct(num(d.cpl), d.cCpl == null ? null : num(d.cCpl))}
           goodWhenUp={false}
           caption={caption}
-          data={d.series.map((r) => r.cpa)}
+          data={d.series.map((r) => r.cpl)}
           labels={d.series.map((r) => r.label)}
           valueFormatter={formatMoney}
           color={COLORS.red}
@@ -278,7 +287,7 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
           deltaPct={deltaPct(num(d.cac), d.cCac == null ? null : num(d.cCac))}
           goodWhenUp={false}
           caption={caption}
-          data={d.series.map((r) => r.cpa)}
+          data={d.series.map((r) => r.cac)}
           labels={d.series.map((r) => r.label)}
           valueFormatter={formatMoney}
           color={COLORS.red}

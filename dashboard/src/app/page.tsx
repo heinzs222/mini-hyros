@@ -256,7 +256,15 @@ export default function DashboardPage() {
     // Dashboard and the attribution report consume the full report; feature
     // panels such as Journey/Spend/Ad Names load their own data.
     const needsFullReport = section === "dashboard" || (section === "reports" && mainTab === "attribution");
-    if (!needsFullReport) return;
+    if (!needsFullReport) {
+      // Navigating to a surface that doesn't consume the full report: cancel any
+      // outstanding build so an orphaned request can't land stale state later
+      // (mirrors the abort discipline loadCompare already uses).
+      reportAbortRef.current?.abort();
+      reportAbortRef.current = null;
+      reportInFlightRef.current = false;
+      return;
+    }
 
     const requestSeq = reportRequestSeqRef.current + 1;
     reportRequestSeqRef.current = requestSeq;
@@ -831,7 +839,12 @@ export default function DashboardPage() {
           {/* ───────── Dashboard ───────── */}
           {section === "dashboard" && (
             report ? (
-              <DashboardView report={report} compareReport={compareReport} currentRangeCaption={currentRangeCaption} />
+              // Keep the prior dashboard visible but dimmed during a refetch so a
+              // range/model switch reads as "updating", not a jarring blank flash.
+              // The top progress bar signals the in-flight request app-wide.
+              <div className={loading ? "pointer-events-none opacity-60 transition-opacity duration-150" : "transition-opacity duration-150"}>
+                <DashboardView report={report} compareReport={compareReport} currentRangeCaption={currentRangeCaption} />
+              </div>
             ) : (
               <div className="flex items-center justify-center py-24">
                 <RefreshCw size={24} className="animate-spin text-brand-500" />

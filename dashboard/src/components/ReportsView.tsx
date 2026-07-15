@@ -6,6 +6,7 @@ import ModelSelect, { modelLabel } from "./ModelSelect";
 import AttributionTable from "./AttributionTable";
 import PerformanceChart from "./PerformanceChart";
 import PlatformMixChart from "./PlatformMixChart";
+import { reportTodayIso } from "@/lib/utils";
 import {
   Megaphone,
   Copy,
@@ -80,10 +81,6 @@ function fmtPill(iso: string): string {
   const d = new Date(`${iso}T00:00:00`);
   return `${pad(d.getMonth() + 1)}.${pad(d.getDate())}`;
 }
-function todayIso(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
 function addDaysIso(iso: string, n: number): string {
   const d = new Date(`${iso}T00:00:00`);
   d.setDate(d.getDate() + n);
@@ -120,11 +117,21 @@ const COLUMN_CATEGORIES: { key: string; label: string; match: (key: string) => b
 
 export default function ReportsView(props: Props) {
   const {
-    report, compareReport, compareLabel, model, onModelChange, range, onRangeChange,
+    report, compareReport, compareLabel, loading, model, onModelChange, range, onRangeChange,
     compareRange, compareEnabled, onCompareEnabledChange, autoCompare, onAutoCompareChange,
     useClickDate, onUseClickDateChange, activeTab, onTabChange, platformFilter,
     onPlatformFilterChange, startDate, endDate, autoRefresh, onToggleAutoRefresh, syncing, onSync, onReload,
   } = props;
+
+  // Ground-truth tab of the currently-held report payload. When the user switches
+  // tabs/ranges/model, `report` still holds the PREVIOUS tab's rows until the slow
+  // refetch lands — rendering those under the new tab's label is the "campaign
+  // rows / PMax under Traffic source" bug. Gate on this so a mismatched report
+  // shows a neutral skeleton instead of misinterpreted rows.
+  const dataTab: string | undefined = report?.table?.active_tab;
+  const tabMismatch = Boolean(report && dataTab && dataTab !== activeTab);
+  const showSkeleton = !report || tabMismatch;
+  const isRefreshing = Boolean(loading);
 
   const [filtersOpen, setFiltersOpen] = useState(true);
   const [openByDefault, setOpenByDefault] = useState(true);
@@ -163,7 +170,7 @@ export default function ReportsView(props: Props) {
     [model, range, activeTab, useClickDate],
   );
 
-  const today = todayIso();
+  const today = reportTodayIso();
   const quickPresets = [
     { label: "Today", range: { start: today, end: today } },
     { label: "Yesterday", range: { start: addDaysIso(today, -1), end: addDaysIso(today, -1) } },
@@ -425,11 +432,18 @@ export default function ReportsView(props: Props) {
           )}
 
           {/* Content */}
-          {!report ? (
-            <div className="flex items-center justify-center py-24">
-              <RefreshCw size={22} className="animate-spin text-brand-500" />
-            </div>
-          ) : viewMode === "chart" ? (
+          {showSkeleton ? (
+            <TableSkeleton />
+          ) : (
+            <div className={`relative transition-opacity duration-150 ${isRefreshing ? "pointer-events-none opacity-50" : ""}`}>
+              {isRefreshing && (
+                <div className="pointer-events-none absolute inset-x-0 top-1 z-30 flex justify-center">
+                  <div className="flex items-center gap-2 rounded-full border border-[var(--card-border)] bg-[#0c0c11] px-3 py-1.5 text-[12px] text-ink-dim shadow-lg">
+                    <RefreshCw size={13} className="animate-spin text-brand-400" /> Updating report…
+                  </div>
+                </div>
+              )}
+              {viewMode === "chart" ? (
             <div className="space-y-6">
               <PerformanceChart
                 data={report.charts?.time_series || []}
@@ -444,6 +458,29 @@ export default function ReportsView(props: Props) {
             </div>
           ) : (
             <>
+              {(() => {
+                // Explicit empty state — the coverage banner below suppresses
+                // itself when total<=0, which is exactly when the user most needs
+                // to know WHY the grid is blank (no data vs a data error vs a
+                // future window that got clamped).
+                const s = report.summary_totals || {};
+                const total = Number(s.all_orders_count ?? s.tracked_orders ?? 0);
+                if (total > 0) return null;
+                const dataErrors = report?.diagnostics?.data_errors || [];
+                const clamped = Boolean(report?.report_meta?.future_window_clamped);
+                return (
+                  <div className="mb-3 flex items-start gap-2 rounded-xl border border-[var(--card-border)] bg-white/[0.03] px-4 py-3 text-[13px] leading-relaxed text-ink-dim">
+                    <Info size={16} className="mt-0.5 flex-shrink-0 text-ink-faint" />
+                    <div>
+                      <span className="font-semibold text-ink">No orders found for this range.</span>{" "}
+                      {clamped && "This window was in the future and was clamped to today. "}
+                      {dataErrors.length > 0
+                        ? "A data error occurred while building this report — some numbers may be missing. Check the backend logs."
+                        : "If you expect data here, press Sync to pull the latest spend and orders, widen the date range, or confirm the tracking script is firing on your funnel and checkout pages."}
+                    </div>
+                  </div>
+                );
+              })()}
               {(() => {
                 const s = report.summary_totals || {};
                 const total = Number(s.all_orders_count ?? s.tracked_orders ?? 0);
@@ -502,6 +539,7 @@ export default function ReportsView(props: Props) {
               compareRows={compareReport?.table?.rows || []}
               compareLabel={compareLabel}
               activeTab={activeTab}
+              dataTab={dataTab}
               onTabChange={onTabChange}
               startDate={startDate}
               endDate={endDate}
@@ -516,6 +554,8 @@ export default function ReportsView(props: Props) {
               hiddenColumnKeys={Array.from(hiddenCols)}
             />
             </>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -553,6 +593,31 @@ function Row({ label, children }: { label: React.ReactNode; children: React.Reac
     <div className="mt-3 flex items-center justify-between rounded-lg border border-[var(--card-border)] px-3 py-2.5 text-[13px] text-ink">
       <span>{label}</span>
       {children}
+    </div>
+  );
+}
+
+function TableSkeleton() {
+  return (
+    <div className="hpanel overflow-hidden" aria-busy="true" aria-label="Loading report">
+      <div className="flex items-center gap-3 border-b border-[var(--card-border)] px-4 py-3">
+        <div className="skeleton h-3 w-28" />
+        <div className="ml-auto flex gap-6">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="skeleton h-3 w-14" />
+          ))}
+        </div>
+      </div>
+      {Array.from({ length: 9 }).map((_, r) => (
+        <div key={r} className="flex items-center gap-3 border-b border-[var(--card-border)]/60 px-4 py-3">
+          <div className="skeleton h-4 w-44" style={{ opacity: 1 - r * 0.06 }} />
+          <div className="ml-auto flex gap-6">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="skeleton h-3 w-14" style={{ opacity: 1 - r * 0.06 }} />
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
