@@ -25,13 +25,17 @@ jobs:
 
       - name: Run pytest with coverage
         run: |
+          set -o pipefail
           python -m pytest \
             --cov=attributionops --cov=backend \
             --cov-report=term-missing \
             --cov-report=xml \
-            --cov-fail-under=${{ env.COV_MIN }}
+            --cov-fail-under=${{ env.COV_MIN }} 2>&1 | tee pytest-output.txt
         env:
           COV_MIN: "85"
+
+      - name: Build production backend image
+        run: docker build --tag mini-hyros-ci .
 
       - name: Upload coverage artifact
         if: always()
@@ -39,6 +43,14 @@ jobs:
         with:
           name: python-coverage
           path: coverage.xml
+
+      - name: Upload backend test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-log
+          path: pytest-output.txt
+          if-no-files-found: ignore
 
   frontend-tests:
     name: Dashboard tests (Vitest)
@@ -60,7 +72,17 @@ jobs:
         run: npm ci
 
       - name: Run production build and Vitest
-        run: npm run test
+        run: |
+          set -o pipefail
+          npm run test 2>&1 | tee frontend-output.txt
+
+      - name: Upload frontend test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-log
+          path: dashboard/frontend-output.txt
+          if-no-files-found: ignore
 
       - name: Upload dashboard build log
         if: always()
