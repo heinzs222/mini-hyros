@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "next start",
     "pretest": "node scripts/apply-sync-fix.mjs",
-    "test": "next build && vitest run",
+    "test": "bash -o pipefail -c 'next build 2>&1 | tee build-output.txt && vitest run'",
     "pretest:cov": "node scripts/apply-sync-fix.mjs",
     "test:cov": "vitest run --coverage"
   },
