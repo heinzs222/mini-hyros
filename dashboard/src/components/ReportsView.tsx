@@ -6,7 +6,7 @@ import ModelSelect, { modelLabel } from "./ModelSelect";
 import AttributionTable from "./AttributionTable";
 import PerformanceChart from "./PerformanceChart";
 import PlatformMixChart from "./PlatformMixChart";
-import { reportTodayIso } from "@/lib/utils";
+import { reportTodayIso, shiftIso } from "@/lib/utils";
 import {
   Megaphone,
   Copy,
@@ -80,11 +80,6 @@ function fmtPill(iso: string): string {
   if (!iso) return "—";
   const d = new Date(`${iso}T00:00:00`);
   return `${pad(d.getMonth() + 1)}.${pad(d.getDate())}`;
-}
-function addDaysIso(iso: string, n: number): string {
-  const d = new Date(`${iso}T00:00:00`);
-  d.setDate(d.getDate() + n);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 function hashId(s: string): string {
   let h = 0;
@@ -173,9 +168,9 @@ export default function ReportsView(props: Props) {
   const today = reportTodayIso();
   const quickPresets = [
     { label: "Today", range: { start: today, end: today } },
-    { label: "Yesterday", range: { start: addDaysIso(today, -1), end: addDaysIso(today, -1) } },
-    { label: "7 days", range: { start: addDaysIso(today, -7), end: addDaysIso(today, -1) } },
-    { label: "30 days", range: { start: addDaysIso(today, -30), end: addDaysIso(today, -1) } },
+    { label: "Yesterday", range: { start: shiftIso(today, -1), end: shiftIso(today, -1) } },
+    { label: "7 days", range: { start: shiftIso(today, -7), end: shiftIso(today, -1) } },
+    { label: "30 days", range: { start: shiftIso(today, -30), end: shiftIso(today, -1) } },
   ];
   const activePreset = quickPresets.find((p) => p.range.start === range.start && p.range.end === range.end)?.label;
 

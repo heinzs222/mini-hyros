@@ -1,14 +1,7 @@
 from __future__ import annotations
 
 from attributionops.db import query
-from attributionops.util import local_day_bounds_utc
-
-
-def _table_columns(db_path: str, table: str) -> set[str]:
-    try:
-        return {str(r.get("name") or "") for r in query(db_path, f"PRAGMA table_info({table})").rows}
-    except Exception:
-        return set()
+from attributionops.util import local_day_bounds_utc, session_identity_agg_exprs, table_columns
 
 
 def tracking_health_check(
@@ -67,26 +60,12 @@ def tracking_health_check(
         params,
     ).rows[0]["n"]
 
-    order_cols = _table_columns(db_path, "orders")
-    conversion_cols = _table_columns(db_path, "conversions")
-    touchpoint_cols = _table_columns(db_path, "touchpoints")
-    session_cols = _table_columns(db_path, "sessions")
+    order_cols = table_columns(db_path, "orders")
+    conversion_cols = table_columns(db_path, "conversions")
+    touchpoint_cols = table_columns(db_path, "touchpoints")
+    session_cols = table_columns(db_path, "sessions")
 
-    # The sessions identity subquery below hard-coded MAX(visitor_id)/MAX(customer_key);
-    # on a warehouse whose sessions table lacks one of those columns SQLite raises
-    # "misuse of aggregate: MAX()" and crashes the ENTIRE report build (this call
-    # site is not wrapped in try/except). Guard each aggregate by actual column
-    # presence, mirroring the order/conversion/touchpoint guards above.
-    session_visitor_agg = (
-        "MAX(NULLIF(visitor_id, '')) AS visitor_id"
-        if "visitor_id" in session_cols
-        else "'' AS visitor_id"
-    )
-    session_customer_agg = (
-        "MAX(NULLIF(customer_key, '')) AS customer_key"
-        if "customer_key" in session_cols
-        else "'' AS customer_key"
-    )
+    session_visitor_agg, session_customer_agg = session_identity_agg_exprs(session_cols)
 
     def order_expr(col: str) -> str:
         return f"COALESCE(o.{col}, '')" if col in order_cols else "''"

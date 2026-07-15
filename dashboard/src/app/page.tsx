@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncStripe, syncGhl, type ManagedWebSocket } from "@/lib/api";
-import { daysAgo } from "@/lib/utils";
+import { daysAgo, reportTodayIso } from "@/lib/utils";
 import Sidebar, { Section } from "@/components/Sidebar";
 import DateRangePicker from "@/components/DateRangePicker";
 import DashboardView from "@/components/DashboardView";
@@ -297,6 +297,11 @@ export default function DashboardPage() {
 
       if (requestSeq !== reportRequestSeqRef.current) return;
       setReport(data);
+      // Fresh primary data (auto-refresh, WS new_order, Reload) may change the
+      // comparison window too — drop the completed-key so the deferred
+      // comparison effect refetches it. The in-flight key still dedupes
+      // concurrent duplicate comparison requests.
+      compareCompletedKeyRef.current = "";
     } catch (err: any) {
       if (isAbortError(err)) return;
       if (requestSeq !== reportRequestSeqRef.current) return;
@@ -336,7 +341,14 @@ export default function DashboardPage() {
     let compareParams: Parameters<typeof fetchReport>[0] | null = null;
     let nextCompareLabel = "";
     if (needsFullReport && effectiveCompareMode !== "none") {
-      const [startDate, endDate] = normalizeDateRange(primaryStartDate, primaryEndDate);
+      // Mirror the backend's clamp of future dates to today before deriving the
+      // comparison window; otherwise a future-dated primary range and its
+      // "previous period" both collapse server-side to the same [today, today]
+      // window and the report is silently compared against itself.
+      const todayIso = reportTodayIso();
+      const [normalizedStart, normalizedEnd] = normalizeDateRange(primaryStartDate, primaryEndDate);
+      const startDate = normalizedStart > todayIso ? todayIso : normalizedStart;
+      const endDate = normalizedEnd > todayIso ? todayIso : normalizedEnd;
       if (effectiveCompareMode === "previous_period") {
         const { start: previousStart, end: previousEnd } = previousPeriod(startDate, endDate);
         compareParams = { start_date: previousStart, end_date: previousEnd, model, active_tab: activeTab, use_click_date: useClickDate };
@@ -360,6 +372,9 @@ export default function DashboardPage() {
       compareAbortRef.current?.abort();
       compareAbortRef.current = null;
       compareInFlightKeyRef.current = "";
+      // Also forget the last completed period so re-enabling compare with the
+      // same range fetches again instead of staying blank.
+      compareCompletedKeyRef.current = "";
       setCompareReport(null);
       setCompareLabel("");
       setCompareUnavailable(false);
@@ -431,7 +446,7 @@ export default function DashboardPage() {
     syncingSpendRef.current = true;
     setSyncingSpend(true);
     const toastId = notify
-      ? toastRef.current.loading("Syncing report data…", { description: "Pulling ad spend, Stripe orders and GHL attribution." })
+      ? toastRef.current.loading("Syncing report data…", { description: "Pulling ad spend, Stripe orders and GHL contacts, forms and opportunities." })
       : 0;
 
     try {
@@ -440,11 +455,12 @@ export default function DashboardPage() {
         // The API's own timeout still caps the request.
         syncSpend({ platform: "all", start_date: syncStart, end_date: syncEnd }),
         withSyncDeadline("Stripe sync", 180_000, (signal) => syncStripe({ start_date: syncStart, end_date: syncEnd }, signal)),
-        withSyncDeadline("GHL attribution sync", 120_000, (signal) => syncGhl({
+        // Rely on the backend defaults (forms + opportunities included) so a
+        // manual Sync backfills GHL form opt-ins and won-opportunity orders —
+        // the pull-based catch-up path when the realtime webhook was down.
+        withSyncDeadline("GHL sync", 120_000, (signal) => syncGhl({
           start_date: syncStart,
           end_date: syncEnd,
-          include_forms: false,
-          include_opportunities: false,
         }, signal)),
       ]);
       const errors: string[] = [];
@@ -475,7 +491,7 @@ export default function DashboardPage() {
       };
       addSyncErrors("Spend", spendResult);
       addSyncErrors("Stripe", stripeResult);
-      addSyncErrors("GHL attribution", ghlResult);
+      addSyncErrors("GHL", ghlResult);
       setSyncErrors(errors);
       setLastAutoSyncAt(new Date().toISOString());
 
@@ -484,7 +500,7 @@ export default function DashboardPage() {
           toastRef.current.update(toastId, {
             type: "success",
             title: "Sync complete",
-            description: "Ad spend, Stripe orders and GHL attribution are up to date.",
+            description: "Ad spend, Stripe orders and GHL data are up to date.",
             duration: 4500,
           });
         } else {
@@ -737,8 +753,11 @@ export default function DashboardPage() {
     await syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true });
     // One force-fresh report build after every sync operation has settled.
     await loadReport({ fresh: true });
-    // A sync may backfill the comparison period too. Invalidate exactly once,
-    // then the request-key guard prevents duplicate comparison calls.
+    // A sync may backfill the comparison period too. Abort any pre-sync
+    // comparison fetch still in flight (its stale response must not land and
+    // mark the key completed) and invalidate both key guards before refetching.
+    compareAbortRef.current?.abort();
+    compareInFlightKeyRef.current = "";
     compareCompletedKeyRef.current = "";
     await loadCompare();
   }, [loadCompare, loadReport, syncSpendData, windowEnd, windowStart]);

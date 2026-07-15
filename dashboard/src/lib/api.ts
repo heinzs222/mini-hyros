@@ -106,10 +106,17 @@ export async function apiFetch(input: string, init: RequestInit = {}, signal?: A
     }
     throw err;
   } finally {
+    bumpActivity(-1);
     if (timeoutId !== null) clearTimeout(timeoutId);
     timeoutController?.signal.removeEventListener("abort", abort);
     providedSignal?.removeEventListener("abort", abort);
   }
+}
+
+export async function fetchHealth() {
+  const res = await apiFetch(`${API_BASE}/api/health`);
+  if (!res.ok) throw new Error(`Health fetch failed: ${res.status}`);
+  return res.json();
 }
 
 export async function loginWithPassword(username: string, password: string) {

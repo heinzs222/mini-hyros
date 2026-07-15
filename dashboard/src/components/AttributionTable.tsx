@@ -199,12 +199,10 @@ const LEVEL_LABELS: Record<string, string> = {
 
 function CellValue({ col, metrics }: { col: Column; metrics: any }) {
   const val = metrics[col.key];
-  // Zero / empty cells are dimmed so a sparse row reads as "no data here" rather
-  // than as broken output competing visually with real numbers.
-  const isEmpty =
-    val == null ||
-    (typeof val === "number" && val === 0) ||
-    (typeof val === "string" && (val === "0" || val === ""));
+  // Only truly missing cells (null/undefined/empty) are dimmed as "no data here".
+  // A real zero — e.g. spend with zero orders — is a signal the buyer must see,
+  // so it keeps normal styling.
+  const isEmpty = val == null || val === "";
   const dim = isEmpty ? "text-ink-faint" : "";
   if (col.type === "money") {
     const colorCls = col.key === "profit" || col.key === "net_profit" ? profitColor(val) : dim;

@@ -29,6 +29,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from attributionops.config import default_db_path
 from attributionops.report import ReportInputs, build_hyros_like_report
+from attributionops.report_integrity import resolve_attribution_dimensions
 from attributionops.schema import ensure_schema
 from attributionops.util import report_timezone, report_timezone_name, local_day_bounds_utc, normalize_campaign_key
 from attributionops.tools.ads import ads_get_spend, ads_get_reported_value, ads_list_platforms
@@ -282,6 +283,46 @@ def _default_dates() -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
+def _clamp_future_window(start_date: str, end_date: str) -> tuple[str, str, bool]:
+    """Clamp a future window down to "today" in the reporting timezone.
+
+    A dashboard that computed "Today" in a timezone ahead of the reporting zone
+    would otherwise request a window entirely in the server's future and
+    legitimately get zero rows — the report then looks mysteriously empty. The
+    returned flag lets the UI explain the adjustment instead of silently showing
+    nothing.
+    """
+    today_iso = datetime.now(report_timezone()).date().isoformat()
+    clamped = False
+    if start_date > today_iso:
+        start_date = today_iso
+        clamped = True
+    if end_date > today_iso:
+        end_date = today_iso
+        clamped = True
+    return start_date, end_date, clamped
+
+
+def _validate_date_order(start_date: str, end_date: str) -> None:
+    if start_date > end_date:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid date range: start_date {start_date} is after end_date {end_date}.",
+        )
+
+
+def _with_clamp_meta(report: Any, clamped: bool) -> Any:
+    """Stamp the clamp flag onto a shallow copy of the response.
+
+    The flag is per-request presentation state: the same cache entry serves both
+    a clamped future request and a genuine "today" request, so the cached object
+    itself must never carry the flag.
+    """
+    if not clamped:
+        return report
+    return {**report, "report_meta": {**report.get("report_meta", {}), "future_window_clamped": True}}
+
+
 def _report_currency() -> str:
     return os.environ.get("REPORT_CURRENCY", "CAD").strip() or "CAD"
 
@@ -358,19 +399,8 @@ def get_report(
     if not end_date:
         end_date = e
 
-    # Clamp a future window down to "today" in the reporting timezone. A dashboard
-    # that computed "Today" in a timezone ahead of the reporting zone would
-    # otherwise request a window entirely in the server's future and legitimately
-    # get zero rows — the report then looks mysteriously empty. The flag lets the
-    # UI explain the adjustment instead of silently showing nothing.
-    today_iso = datetime.now(report_timezone()).date().isoformat()
-    future_window_clamped = False
-    if start_date > today_iso:
-        start_date = today_iso
-        future_window_clamped = True
-    if end_date > today_iso:
-        end_date = today_iso
-        future_window_clamped = True
+    start_date, end_date, future_window_clamped = _clamp_future_window(start_date, end_date)
+    _validate_date_order(start_date, end_date)
 
     cache_key = (
         _db(), start_date, end_date, model, lookback_days, active_tab,
@@ -379,7 +409,7 @@ def get_report(
     if not no_cache:
         cached = _report_cache_get(cache_key)
         if cached is not None:
-            return cached
+            return _with_clamp_meta(cached, future_window_clamped)
 
     inputs = ReportInputs(
         report_name="Mini Hyros Report",
@@ -445,11 +475,8 @@ def get_report(
             row["creative_type"] = creative.get("creative_type", "")
             row["video_id"] = creative.get("video_id", "")
 
-    if future_window_clamped:
-        report.setdefault("report_meta", {})["future_window_clamped"] = True
-
     _report_cache_put(cache_key, report)
-    return report
+    return _with_clamp_meta(report, future_window_clamped)
 
 
 @app.get("/api/report/children")
@@ -476,6 +503,11 @@ def get_report_children(
         start_date = s
     if not end_date:
         end_date = e
+
+    # Clamp exactly like get_report, so an expanded parent row (built from the
+    # clamped window) queries the same window instead of an empty future one.
+    start_date, end_date, _ = _clamp_future_window(start_date, end_date)
+    _validate_date_order(start_date, end_date)
 
     db_path = _db()
     ensure_campaign_settings_table(db_path)
@@ -648,6 +680,36 @@ def get_report_children(
         attrib_rows = attrib_result.get("rows", [])
     except Exception:
         attrib_rows = []
+
+    # Touchpoints may carry display-name aliases (e.g. GHL) while spend and
+    # the parent row IDs carry canonical numeric IDs. Canonicalize before
+    # filtering by parent_id segments, mirroring build_hyros_like_report —
+    # including its LIFETIME alias catalog, so parent and child rows agree on
+    # whether an alias maps. Kept outside the attribution try above, and
+    # falling back to the unresolved rows, so a spend-catalog failure cannot
+    # discard attribution data that is already in hand.
+    if attrib_rows:
+        try:
+            attrib_rows = resolve_attribution_dimensions(
+                ads_get_spend(
+                    db_path,
+                    platform="all",
+                    start_date=start_date,
+                    end_date=end_date,
+                    breakdown=child_tab,
+                )["rows"],
+                attrib_rows,
+                active_tab=child_tab,
+                alias_rows=ads_get_spend(
+                    db_path,
+                    platform="all",
+                    start_date="0000-01-01",
+                    end_date="9999-12-31",
+                    breakdown=child_tab,
+                )["rows"],
+            )
+        except Exception:
+            pass
 
     # Build attribution lookup by child key
     attrib_by_child: dict[str, dict[str, float]] = defaultdict(lambda: {

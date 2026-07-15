@@ -77,6 +77,7 @@ def resolve_attribution_dimensions(
     attrib_rows: list[dict[str, Any]],
     *,
     active_tab: str,
+    alias_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Canonicalize attribution rows against the selected spend breakdown.
 
@@ -84,38 +85,28 @@ def resolve_attribution_dimensions(
     alias identifies exactly one spend entity. Existing non-empty aliases remain
     visible when no unique platform match exists, but are marked unmatched so the
     coverage diagnostic does not pretend they are joined to spend.
+
+    ``alias_rows`` supplies the spend identities used to build the alias map —
+    ideally the lifetime spend catalog, so an alias that is ambiguous across the
+    account's history stays unmapped in every date window instead of resolving
+    only when the window happens to contain a single candidate. When omitted,
+    the in-window ``spend_rows`` are used.
     """
 
     field = _DIMENSION_FIELD.get(active_tab, "")
     if not field or not attrib_rows:
         return [dict(row) for row in attrib_rows]
 
-    alias_map = _unique_alias_map(spend_rows, id_field=field)
+    alias_map = _unique_alias_map(
+        alias_rows if alias_rows is not None else spend_rows,
+        id_field=field,
+    )
     resolved: list[dict[str, Any]] = []
     for raw in attrib_rows:
         row = dict(raw)
         platform = _platform(row.get("platform"))
         alias = _norm(row.get(field))
         canonical = alias_map.get((platform, alias)) if platform and alias else None
-
-        # For ad-account rows the account may be absent on the touchpoint while
-        # the platform has exactly one account in the selected spend data.
-        if active_tab == "ad_account" and not alias and platform:
-            account_candidates = {
-                str(spend.get("account_id") or "").strip()
-                for spend in spend_rows
-                if _platform(spend.get("platform")) == platform
-                and str(spend.get("account_id") or "").strip()
-            }
-            if len(account_candidates) == 1:
-                account_id = next(iter(account_candidates))
-                canonical = {
-                    "platform": platform,
-                    "account_id": account_id,
-                    "campaign_id": "",
-                    "adset_id": "",
-                    "ad_id": "",
-                }
 
         if canonical:
             row["platform"] = canonical["platform"] or row.get("platform", "")
