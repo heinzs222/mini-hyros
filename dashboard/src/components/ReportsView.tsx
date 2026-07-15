@@ -450,6 +450,18 @@ export default function ReportsView(props: Props) {
                 const attributed = Number(s.attributed_orders ?? 0);
                 const unattrOrders = Math.max(Number(s.unattributed_orders ?? (total - attributed)), 0);
                 const unattrRev = Number(s.unattributed_revenue ?? 0);
+                const tableCoverage = report?.table?.coverage || {};
+                const dimensionAttributed = Number(
+                  tableCoverage.dimension_attributed_orders ?? report?.table?.totals_row?.orders ?? 0,
+                );
+                const dimensionSourceOrders = Number(
+                  tableCoverage.source_attributed_orders ?? attributed,
+                );
+                const dimensionUnmapped = Number(
+                  tableCoverage.unmapped_orders ??
+                    Math.max(dimensionSourceOrders - dimensionAttributed, 0),
+                );
+                const dimensionLabel = String(activeTab || "dimension").replaceAll("_", " ");
                 if (total <= 0 || unattrOrders <= 0) return null;
                 const pct = total > 0 ? Math.round((attributed / total) * 100) : 0;
                 const money = (v: number) =>
@@ -459,14 +471,26 @@ export default function ReportsView(props: Props) {
                     <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" />
                     <div>
                       <span className="font-semibold">
-                        Reporting gap — {pct}% of orders matched to a source.
+                        Source coverage — {pct}% of orders matched to a source touchpoint.
                       </span>{" "}
                       {unattrOrders} of {total} order{total === 1 ? "" : "s"}
-                      {unattrRev > 0 ? ` (${money(unattrRev)})` : ""} in this range aren’t
-                      attributed to any ad source. That usually means the tracking pixel didn’t
-                      capture a click for those sales, or a platform’s spend/clicks haven’t synced
-                      yet — press <span className="font-semibold">Sync</span>, and confirm the
-                      tracking script is firing on both your funnel and checkout pages.
+                      {unattrRev > 0 ? ` (${money(unattrRev)})` : ""} in this range have no
+                      qualifying source touchpoint inside the attribution window. This is not
+                      automatically a sync failure: direct, recurring, offline, and identity-unmatched
+                      sales can remain unattributed.
+                      {activeTab !== "traffic_source" && dimensionSourceOrders > 0 && (
+                        <>
+                          {" "}<span className="font-semibold">
+                            {dimensionAttributed.toLocaleString(undefined, { maximumFractionDigits: 2 })} of{" "}
+                            {dimensionSourceOrders.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                          </span>{" "}
+                          source-attributed orders map to a platform {dimensionLabel};{" "}
+                          <span className="font-semibold">
+                            {dimensionUnmapped.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                          </span>{" "}
+                          remain source-known but platform-unmapped at this level.
+                        </>
+                      )}
                     </div>
                   </div>
                 );

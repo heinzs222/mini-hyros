@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
-import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncAdNames, syncStripe, syncGhl, type ManagedWebSocket } from "@/lib/api";
+import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncStripe, syncGhl, type ManagedWebSocket } from "@/lib/api";
 import { daysAgo } from "@/lib/utils";
 import Sidebar, { Section } from "@/components/Sidebar";
 import DateRangePicker from "@/components/DateRangePicker";
@@ -222,6 +222,10 @@ export default function DashboardPage() {
   // fail (or be superseded) without disturbing the primary report.
   const compareRequestSeqRef = useRef(0);
   const compareAbortRef = useRef<AbortController | null>(null);
+  // Prevent the same comparison period from being fetched repeatedly while
+  // React effects and primary refreshes settle.
+  const compareInFlightKeyRef = useRef("");
+  const compareCompletedKeyRef = useRef("");
   // Mirrors the currently-selected window so background sync covers what's on
   // screen without re-subscribing the sync interval on every range change.
   const syncRangeRef = useRef<{ start: string; end: string }>({ start: primaryStartDate, end: primaryEndDate });
@@ -341,22 +345,33 @@ export default function DashboardPage() {
       }
     }
 
-    const requestSeq = compareRequestSeqRef.current + 1;
-    compareRequestSeqRef.current = requestSeq;
-    compareAbortRef.current?.abort();
-
     // No comparison requested (disabled, unsupported mode, or model matches):
     // clear any stale comparison state and stop.
     if (!compareParams) {
+      compareRequestSeqRef.current += 1;
+      compareAbortRef.current?.abort();
       compareAbortRef.current = null;
+      compareInFlightKeyRef.current = "";
       setCompareReport(null);
       setCompareLabel("");
       setCompareUnavailable(false);
       return;
     }
 
+    const compareKey = JSON.stringify(compareParams);
+    if (
+      compareInFlightKeyRef.current === compareKey ||
+      compareCompletedKeyRef.current === compareKey
+    ) {
+      return;
+    }
+
+    const requestSeq = compareRequestSeqRef.current + 1;
+    compareRequestSeqRef.current = requestSeq;
+    compareAbortRef.current?.abort();
     const abortController = new AbortController();
     compareAbortRef.current = abortController;
+    compareInFlightKeyRef.current = compareKey;
     setCompareUnavailable(false);
 
     try {
@@ -364,6 +379,7 @@ export default function DashboardPage() {
       if (requestSeq !== compareRequestSeqRef.current) return;
       setCompareReport(compareData);
       setCompareLabel(nextCompareLabel);
+      compareCompletedKeyRef.current = compareKey;
     } catch (err: any) {
       if (isAbortError(err)) return;
       if (requestSeq !== compareRequestSeqRef.current) return;
@@ -374,6 +390,9 @@ export default function DashboardPage() {
     } finally {
       if (compareAbortRef.current === abortController) {
         compareAbortRef.current = null;
+      }
+      if (compareInFlightKeyRef.current === compareKey) {
+        compareInFlightKeyRef.current = "";
       }
     }
   }, [
@@ -404,15 +423,21 @@ export default function DashboardPage() {
     syncingSpendRef.current = true;
     setSyncingSpend(true);
     const toastId = notify
-      ? toastRef.current.loading("Syncing all platforms…", { description: "Pulling ad spend, ad names and Stripe orders." })
+      ? toastRef.current.loading("Syncing report data…", { description: "Pulling ad spend, Stripe orders and GHL attribution." })
       : 0;
 
     try {
-      const [spendResult, namesResult, stripeResult, ghlResult] = await Promise.allSettled([
-        withSyncDeadline("Spend sync", 60_000, (signal) => syncSpend({ platform: "all", start_date: syncStart, end_date: syncEnd }, signal)),
-        withSyncDeadline("Ad name sync", 90_000, (signal) => syncAdNames("all", signal)),
+      const [spendResult, stripeResult, ghlResult] = await Promise.allSettled([
+        // Spend can legitimately take longer than the old 60-second browser deadline.
+        // The API's own timeout still caps the request.
+        syncSpend({ platform: "all", start_date: syncStart, end_date: syncEnd }),
         withSyncDeadline("Stripe sync", 180_000, (signal) => syncStripe({ start_date: syncStart, end_date: syncEnd }, signal)),
-        withSyncDeadline("Lead sync", 90_000, (signal) => syncGhl({ start_date: syncStart, end_date: syncEnd }, signal)),
+        withSyncDeadline("GHL attribution sync", 120_000, (signal) => syncGhl({
+          start_date: syncStart,
+          end_date: syncEnd,
+          include_forms: false,
+          include_opportunities: false,
+        }, signal)),
       ]);
       const errors: string[] = [];
       const addSyncErrors = (scope: string, result: PromiseSettledResult<any>) => {
@@ -432,14 +457,17 @@ export default function DashboardPage() {
           for (const [name, info] of Object.entries<any>(platforms)) {
             if (info && typeof info === "object" && info.error) {
               errors.push(`${scope} (${name}): ${info.error}`);
+            } else if (info && typeof info === "object" && info.skipped) {
+              errors.push(
+                `${scope} (${name}): ${info.reason || "Platform refresh was skipped"}`,
+              );
             }
           }
         }
       };
       addSyncErrors("Spend", spendResult);
-      addSyncErrors("Names", namesResult);
       addSyncErrors("Stripe", stripeResult);
-      addSyncErrors("Leads", ghlResult);
+      addSyncErrors("GHL attribution", ghlResult);
       setSyncErrors(errors);
       setLastAutoSyncAt(new Date().toISOString());
 
@@ -448,7 +476,7 @@ export default function DashboardPage() {
           toastRef.current.update(toastId, {
             type: "success",
             title: "Sync complete",
-            description: "Ad spend, ad names and Stripe orders are up to date.",
+            description: "Ad spend, Stripe orders and GHL attribution are up to date.",
             duration: 4500,
           });
         } else {
@@ -698,12 +726,14 @@ export default function DashboardPage() {
   }, []);
 
   const handleManualSync = useCallback(async () => {
-    const syncPromise = syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true });
-    await loadReport();
-    await syncPromise;
-    // Force-fresh after the sync wrote new data so the cache doesn't serve stale numbers.
+    await syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true });
+    // One force-fresh report build after every sync operation has settled.
     await loadReport({ fresh: true });
-  }, [loadReport, syncSpendData, windowEnd, windowStart]);
+    // A sync may backfill the comparison period too. Invalidate exactly once,
+    // then the request-key guard prevents duplicate comparison calls.
+    compareCompletedKeyRef.current = "";
+    await loadCompare();
+  }, [loadCompare, loadReport, syncSpendData, windowEnd, windowStart]);
 
   if (!authChecked) {
     return (

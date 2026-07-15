@@ -430,10 +430,14 @@ export async function fetchStripeStatus() {
 export async function syncGhl(params: {
   start_date?: string;
   end_date?: string;
+  include_forms?: boolean;
+  include_opportunities?: boolean;
 } = {}, signal?: AbortSignal) {
   const sp = new URLSearchParams();
   if (params.start_date) sp.set("start_date", params.start_date);
   if (params.end_date) sp.set("end_date", params.end_date);
+  if (typeof params.include_forms === "boolean") sp.set("include_forms", String(params.include_forms));
+  if (typeof params.include_opportunities === "boolean") sp.set("include_opportunities", String(params.include_opportunities));
   const url = `${API_BASE}/api/ghl/sync${sp.toString() ? `?${sp.toString()}` : ""}`;
   const res = await apiFetch(url, { method: "POST" }, signal);
   if (!res.ok) throw new Error(`GHL sync failed: ${res.status}`);
