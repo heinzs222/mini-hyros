@@ -86,16 +86,20 @@ patchFile("src/app/page.tsx", (input) => {
 
   text = replaceExact(
     text,
-    `            if (info && typeof info === "object" && info.error) {
-              errors.push(\`${scope} (\${name}): \${info.error}\`);
-            }`,
-    `            if (info && typeof info === "object" && info.error) {
-              errors.push(\`${scope} (\${name}): \${info.error}\`);
-            } else if (info && typeof info === "object" && info.skipped) {
-              errors.push(
-                \`${scope} (\${name}): \${info.reason || "Platform refresh was skipped"}\`,
-              );
-            }`,
+    [
+      '            if (info && typeof info === "object" && info.error) {',
+      '              errors.push(`${scope} (${name}): ${info.error}`);',
+      '            }',
+    ].join("\n"),
+    [
+      '            if (info && typeof info === "object" && info.error) {',
+      '              errors.push(`${scope} (${name}): ${info.error}`);',
+      '            } else if (info && typeof info === "object" && info.skipped) {',
+      '              errors.push(',
+      '                `${scope} (${name}): ${info.reason || "Platform refresh was skipped"}`,',
+      '              );',
+      '            }',
+    ].join("\n"),
     "skipped platform sync warning",
   );
 
