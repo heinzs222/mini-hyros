@@ -151,13 +151,13 @@ describe("profitColor", () => {
   });
 
   it("returns emerald for positive values", () => {
-    expect(profitColor(1)).toBe("text-emerald-400");
-    expect(profitColor(0.01)).toBe("text-emerald-400");
+    expect(profitColor(1)).toBe("text-positive");
+    expect(profitColor(0.01)).toBe("text-positive");
   });
 
   it("returns rose for negative values", () => {
-    expect(profitColor(-1)).toBe("text-rose-400");
-    expect(profitColor(-0.01)).toBe("text-rose-400");
+    expect(profitColor(-1)).toBe("text-negative");
+    expect(profitColor(-0.01)).toBe("text-negative");
   });
 
   it("returns muted for exactly zero", () => {
