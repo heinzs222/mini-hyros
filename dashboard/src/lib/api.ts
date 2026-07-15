@@ -57,13 +57,17 @@ export async function apiFetch(input: string, init: RequestInit = {}, signal?: A
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const timeoutController = new AbortController();
-  const timeoutId = setTimeout(() => timeoutController.abort(), API_TIMEOUT_MS);
   const providedSignal = signal ?? init.signal;
+  // Callers such as the dashboard sync coordinator provide operation-specific
+  // deadlines. Do not let the generic request timeout preempt those deadlines.
+  const timeoutController = providedSignal ? null : new AbortController();
+  const timeoutId = timeoutController
+    ? setTimeout(() => timeoutController.abort(), API_TIMEOUT_MS)
+    : null;
   const controller = new AbortController();
 
   const abort = () => controller.abort();
-  timeoutController.signal.addEventListener("abort", abort, { once: true });
+  timeoutController?.signal.addEventListener("abort", abort, { once: true });
   providedSignal?.addEventListener("abort", abort, { once: true });
 
   try {
@@ -74,8 +78,8 @@ export async function apiFetch(input: string, init: RequestInit = {}, signal?: A
     }
     throw err;
   } finally {
-    clearTimeout(timeoutId);
-    timeoutController.signal.removeEventListener("abort", abort);
+    if (timeoutId !== null) clearTimeout(timeoutId);
+    timeoutController?.signal.removeEventListener("abort", abort);
     providedSignal?.removeEventListener("abort", abort);
   }
 }
@@ -118,6 +122,7 @@ export async function fetchReport(params: {
   const sp = new URLSearchParams();
   if (params.start_date) sp.set("start_date", params.start_date);
   if (params.end_date) sp.set("end_date", params.end_date);
+  if (params.start_date || params.end_date) sp.set("defer_history", "true");
   if (params.model) sp.set("model", params.model);
   if (params.lookback_days) sp.set("lookback_days", String(params.lookback_days));
   if (params.active_tab) sp.set("active_tab", params.active_tab);

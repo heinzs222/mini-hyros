@@ -410,9 +410,9 @@ export default function DashboardPage() {
     try {
       const [spendResult, namesResult, stripeResult, ghlResult] = await Promise.allSettled([
         withSyncDeadline("Spend sync", 60_000, (signal) => syncSpend({ platform: "all", start_date: syncStart, end_date: syncEnd }, signal)),
-        withSyncDeadline("Ad name sync", 25_000, (signal) => syncAdNames("all", signal)),
+        withSyncDeadline("Ad name sync", 90_000, (signal) => syncAdNames("all", signal)),
         withSyncDeadline("Stripe sync", 180_000, (signal) => syncStripe({ start_date: syncStart, end_date: syncEnd }, signal)),
-        withSyncDeadline("Lead sync", 45_000, (signal) => syncGhl({ start_date: syncStart, end_date: syncEnd }, signal)),
+        withSyncDeadline("Lead sync", 90_000, (signal) => syncGhl({ start_date: syncStart, end_date: syncEnd }, signal)),
       ]);
       const errors: string[] = [];
       const addSyncErrors = (scope: string, result: PromiseSettledResult<any>) => {

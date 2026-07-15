@@ -18,6 +18,7 @@ Endpoints (mounted at /api/ghl):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -640,41 +641,57 @@ async def ghl_sync(
 
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            contacts: list[dict] = []
-            try:
-                contacts = await _fetch_contacts(
+            contacts_result, submissions_result, opportunities_result = await asyncio.gather(
+                _fetch_contacts(
                     client, token, location_id, limit, start_date=start_date, end_date=end_date
-                )
-                lead_stats = _write_contacts(db_path, contacts, start_date, end_date)
-            except httpx.HTTPStatusError as exc:
-                errors.append(f"contacts: HTTP {exc.response.status_code} {exc.response.text[:160]}")
-            except Exception as exc:
-                errors.append(f"contacts: {exc}")
-
-            try:
-                submissions = await _fetch_form_submissions(
+                ),
+                _fetch_form_submissions(
                     client, token, location_id, limit, start_date, end_date
+                ),
+                _fetch_opportunities(client, token, location_id, limit),
+                return_exceptions=True,
+            )
+
+            contacts: list[dict] = []
+            if isinstance(contacts_result, httpx.HTTPStatusError):
+                errors.append(
+                    f"contacts: HTTP {contacts_result.response.status_code} "
+                    f"{contacts_result.response.text[:160]}"
                 )
+            elif isinstance(contacts_result, Exception):
+                errors.append(f"contacts: {contacts_result}")
+            else:
+                contacts = contacts_result
+                lead_stats = _write_contacts(db_path, contacts, start_date, end_date)
+
+            if isinstance(submissions_result, httpx.HTTPStatusError):
+                errors.append(
+                    f"forms: HTTP {submissions_result.response.status_code} "
+                    f"{submissions_result.response.text[:160]}"
+                )
+            elif isinstance(submissions_result, Exception):
+                errors.append(f"forms: {submissions_result}")
+            else:
                 contacts_by_id = {
                     str(contact.get("id") or ""): contact
                     for contact in contacts
                     if contact.get("id")
                 }
                 form_stats = _write_form_submissions(
-                    db_path, submissions, start_date, end_date, contacts_by_id
+                    db_path, submissions_result, start_date, end_date, contacts_by_id
                 )
-            except httpx.HTTPStatusError as exc:
-                errors.append(f"forms: HTTP {exc.response.status_code} {exc.response.text[:160]}")
-            except Exception as exc:
-                errors.append(f"forms: {exc}")
 
-            try:
-                opportunities = await _fetch_opportunities(client, token, location_id, limit)
-                opp_stats = _write_opportunities(db_path, opportunities, start_date, end_date)
-            except httpx.HTTPStatusError as exc:
-                errors.append(f"opportunities: HTTP {exc.response.status_code} {exc.response.text[:160]}")
-            except Exception as exc:
-                errors.append(f"opportunities: {exc}")
+            if isinstance(opportunities_result, httpx.HTTPStatusError):
+                errors.append(
+                    f"opportunities: HTTP {opportunities_result.response.status_code} "
+                    f"{opportunities_result.response.text[:160]}"
+                )
+            elif isinstance(opportunities_result, Exception):
+                errors.append(f"opportunities: {opportunities_result}")
+            else:
+                opp_stats = _write_opportunities(
+                    db_path, opportunities_result, start_date, end_date
+                )
     except Exception as exc:
         return {"synced": 0, "leads": 0, "orders": 0, "error": str(exc)}
 

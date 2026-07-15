@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, BackgroundTasks, Query
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
@@ -920,15 +921,40 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
     }
 
 
+async def _backfill_stripe_history(
+    api_key: str,
+    db_path: str,
+    history_ranges: list[tuple[str, str]],
+    selected_charges: list[dict],
+) -> None:
+    """Backfill customer history after a range response has been delivered."""
+    try:
+        for range_start, range_end in history_ranges:
+            history_charges = await _fetch_stripe_charges(api_key, range_start, range_end)
+            _write_stripe_orders(db_path, history_charges)
+            _record_stripe_coverage(db_path, range_start, range_end)
+
+        # Re-evaluate the selected orders now that their customer history is
+        # available. The upsert upgrades recurring classifications in place.
+        if selected_charges:
+            _write_stripe_orders(db_path, selected_charges)
+    except Exception:
+        logging.exception("Deferred Stripe history backfill failed")
+
+
 @router.post("/sync")
 async def stripe_sync(
+    background_tasks: BackgroundTasks,
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
+    defer_history: bool = Query(default=False),
 ):
     """Pull Stripe charges for date range and store as orders + conversions."""
     api_key = _get_stripe_key()
     if not api_key:
         return {"synced": 0, "error": "STRIPE_API_SECRET_KEY not set in environment"}
+
+    explicit_range = bool(start_date or end_date)
 
     # Default: last 90 days
     if not end_date:
@@ -957,18 +983,28 @@ async def stripe_sync(
             history_start = (start_day - timedelta(days=history_days)).isoformat()
             history_end = (start_day - timedelta(days=1)).isoformat()
             history_ranges = _missing_stripe_coverage(db_path, history_start, history_end)
-            for range_start, range_end in history_ranges:
-                history_charges = await _fetch_stripe_charges(api_key, range_start, range_end)
-                history_stats = _write_stripe_orders(db_path, history_charges)
-                history_fetched += len(history_charges)
-                history_synced += history_stats["inserted"]
-                history_updated += history_stats["updated"]
-                history_refund_events += history_stats["refund_events"]
-                _record_stripe_coverage(db_path, range_start, range_end)
+            if not (explicit_range and defer_history):
+                for range_start, range_end in history_ranges:
+                    history_charges = await _fetch_stripe_charges(api_key, range_start, range_end)
+                    history_stats = _write_stripe_orders(db_path, history_charges)
+                    history_fetched += len(history_charges)
+                    history_synced += history_stats["inserted"]
+                    history_updated += history_stats["updated"]
+                    history_refund_events += history_stats["refund_events"]
+                    _record_stripe_coverage(db_path, range_start, range_end)
 
         charges = await _fetch_stripe_charges(api_key, start_date, end_date)
         stats = _write_stripe_orders(db_path, charges)
         _record_stripe_coverage(db_path, start_date, end_date)
+        history_deferred = bool(explicit_range and defer_history and history_ranges)
+        if history_deferred:
+            background_tasks.add_task(
+                _backfill_stripe_history,
+                api_key,
+                db_path,
+                history_ranges,
+                charges,
+            )
         return {
             "synced": stats["inserted"],
             "updated": stats["updated"],
@@ -979,6 +1015,7 @@ async def stripe_sync(
             "history_synced": history_synced,
             "history_updated": history_updated,
             "history_refund_events": history_refund_events,
+            "history_deferred": history_deferred,
             "history_ranges": [
                 {"start_date": range_start, "end_date": range_end}
                 for range_start, range_end in history_ranges
