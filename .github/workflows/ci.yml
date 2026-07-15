@@ -69,7 +69,17 @@ jobs:
         run: npm ci
 
       - name: Run production build and Vitest
-        run: npm run test
+        run: |
+          set -o pipefail
+          npm run test 2>&1 | tee frontend-output.txt
+
+      - name: Upload frontend test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-log
+          path: dashboard/frontend-output.txt
+          if-no-files-found: ignore
 
       - name: Upload dashboard build log
         if: always()
