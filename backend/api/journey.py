@@ -55,7 +55,13 @@ def _identity_predicate(
     ):
         value = str(value or "").strip()
         if value and col in columns:
-            clauses.append(f"COALESCE({prefix}{col}, '') = ?")
+            # Plain equality (not COALESCE(col,'')=?) so SQLite can use the
+            # customer_key/session_id/visitor_id indexes. Equivalent here because
+            # a clause is only emitted for a non-empty bound value, for which
+            # `col = ?` and `COALESCE(col,'') = ?` select the same rows. The old
+            # COALESCE wrapper forced a full table scan per lead (the CRM tab's
+            # "takes forever" bottleneck).
+            clauses.append(f"{prefix}{col} = ?")
             params.append(value)
     return " OR ".join(clauses), params
 
@@ -251,6 +257,25 @@ def _conversion_timeline(
         visitor_id=visitor_id,
     )
     sid_filter = f" AND ({sid_where})" if sid_where else ""
+    # Pre-filter the touchpoints scan on the RAW indexed columns (sargable) OR to
+    # sessions already resolved above, so the touch_identity CTE no longer
+    # materializes the entire touchpoints table on every conversion — the O(rows ×
+    # table) blow-up behind the slow CRM/Journey load. The outer WHERE below still
+    # applies the identity-resolved filter, so results are unchanged.
+    raw_touch_where, raw_touch_params = _identity_predicate(
+        touchpoint_cols,
+        customer_key=customer_key,
+        session_id=session_id,
+        visitor_id=visitor_id,
+        alias="t",
+    )
+    if raw_touch_where:
+        touch_prefilter = (
+            f"WHERE ({raw_touch_where}) "
+            "OR t.session_id IN (SELECT session_id FROM session_identity)"
+        )
+    else:
+        touch_prefilter = "WHERE t.session_id IN (SELECT session_id FROM session_identity)"
     touchpoints = []
     if touch_where:
         touchpoints = db_query(db_path, f"""
@@ -270,12 +295,13 @@ def _conversion_timeline(
                        {touchpoint_visitor_expr}
                 FROM touchpoints t
                 LEFT JOIN session_identity s ON s.session_id = t.session_id
+                {touch_prefilter}
             )
             SELECT *
             FROM touch_identity
             WHERE ({touch_where}) AND ts <= ?
             ORDER BY ts
-        """, [*sid_params, *touch_params, conversion_ts])
+        """, [*sid_params, *raw_touch_params, *touch_params, conversion_ts])
 
     for t in touchpoints:
         platform = str(t.get("platform") or "")

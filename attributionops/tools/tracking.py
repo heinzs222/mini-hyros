@@ -70,6 +70,23 @@ def tracking_health_check(
     order_cols = _table_columns(db_path, "orders")
     conversion_cols = _table_columns(db_path, "conversions")
     touchpoint_cols = _table_columns(db_path, "touchpoints")
+    session_cols = _table_columns(db_path, "sessions")
+
+    # The sessions identity subquery below hard-coded MAX(visitor_id)/MAX(customer_key);
+    # on a warehouse whose sessions table lacks one of those columns SQLite raises
+    # "misuse of aggregate: MAX()" and crashes the ENTIRE report build (this call
+    # site is not wrapped in try/except). Guard each aggregate by actual column
+    # presence, mirroring the order/conversion/touchpoint guards above.
+    session_visitor_agg = (
+        "MAX(NULLIF(visitor_id, '')) AS visitor_id"
+        if "visitor_id" in session_cols
+        else "'' AS visitor_id"
+    )
+    session_customer_agg = (
+        "MAX(NULLIF(customer_key, '')) AS customer_key"
+        if "customer_key" in session_cols
+        else "'' AS customer_key"
+    )
 
     def order_expr(col: str) -> str:
         return f"COALESCE(o.{col}, '')" if col in order_cols else "''"
@@ -127,8 +144,8 @@ def tracking_health_check(
             FROM touchpoints t
             LEFT JOIN (
                 SELECT session_id,
-                       MAX(NULLIF(visitor_id, '')) AS visitor_id,
-                       MAX(NULLIF(customer_key, '')) AS customer_key
+                       {session_visitor_agg},
+                       {session_customer_agg}
                 FROM sessions
                 WHERE COALESCE(session_id, '') <> ''
                 GROUP BY session_id

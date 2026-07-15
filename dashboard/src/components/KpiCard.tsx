@@ -12,6 +12,10 @@ interface Props {
   goodWhenUp?: boolean;
   caption?: string;
   data: Array<number | null | undefined>;
+  /** Optional per-point labels (short dates) surfaced in the sparkline hover. */
+  labels?: string[];
+  /** Formats the hovered sparkline value (money / ratio / number). */
+  valueFormatter?: (value: number) => string;
   color?: string;
 }
 
@@ -22,6 +26,8 @@ export default function KpiCard({
   goodWhenUp = true,
   caption,
   data,
+  labels,
+  valueFormatter,
   color = "#22c55e",
 }: Props) {
   const hasDelta = deltaPct != null && Number.isFinite(deltaPct);
@@ -31,7 +37,7 @@ export default function KpiCard({
   const deltaBg = isGood ? "bg-emerald-500/10" : "bg-rose-500/10";
 
   return (
-    <div className="hpanel group relative overflow-hidden p-4 transition-colors hover:border-white/10">
+    <div className="hpanel group relative p-4 transition-colors hover:border-white/10">
       <div className="mb-1">
         <span className="h-label text-ink-dim">{label}</span>
       </div>
@@ -52,7 +58,7 @@ export default function KpiCard({
           </div>
         </div>
         <div className="h-[58px] w-[52%] shrink-0 self-end">
-          <Sparkline data={data} color={color} height={58} />
+          <Sparkline data={data} labels={labels} valueFormatter={valueFormatter} color={color} height={58} />
         </div>
       </div>
     </div>

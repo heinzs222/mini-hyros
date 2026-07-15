@@ -50,12 +50,40 @@ export class ApiError extends Error {
   }
 }
 
+// ── Global request-activity signal ───────────────────────────────────────────
+// Every network call funnels through apiFetch, so a tiny pub/sub counter here
+// lets a single <TopProgressBar/> reflect ANY in-flight request (report, compare,
+// leads, sync, feature panels) without each caller wiring up its own spinner.
+let activeRequests = 0;
+const activityListeners = new Set<() => void>();
+
+export function subscribeApiActivity(listener: () => void): () => void {
+  activityListeners.add(listener);
+  return () => {
+    activityListeners.delete(listener);
+  };
+}
+
+export function getApiActivitySnapshot(): number {
+  return activeRequests;
+}
+
+function bumpActivity(delta: number) {
+  activeRequests = Math.max(0, activeRequests + delta);
+  for (const listener of activityListeners) {
+    try {
+      listener();
+    } catch {}
+  }
+}
+
 export async function apiFetch(input: string, init: RequestInit = {}, signal?: AbortSignal) {
   const headers = new Headers(init.headers || {});
   const token = readAuthToken();
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
+  bumpActivity(1);
 
   const providedSignal = signal ?? init.signal;
   // Callers such as the dashboard sync coordinator provide operation-specific
@@ -143,7 +171,7 @@ export async function fetchChildren(params: {
   lookback_days?: number;
   conversion_type?: string;
   use_click_date?: boolean;
-}) {
+}, signal?: AbortSignal) {
   const sp = new URLSearchParams();
   sp.set("parent_tab", params.parent_tab);
   sp.set("parent_id", params.parent_id);
@@ -153,7 +181,7 @@ export async function fetchChildren(params: {
   if (params.lookback_days) sp.set("lookback_days", String(params.lookback_days));
   if (params.conversion_type) sp.set("conversion_type", params.conversion_type);
   if (params.use_click_date) sp.set("use_click_date", "true");
-  const res = await apiFetch(`${API_BASE}/api/report/children?${sp.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/report/children?${sp.toString()}`, {}, signal);
   if (!res.ok) throw new Error(`Children fetch failed: ${res.status}`);
   return res.json();
 }
@@ -430,10 +458,14 @@ export async function fetchStripeStatus() {
 export async function syncGhl(params: {
   start_date?: string;
   end_date?: string;
+  include_forms?: boolean;
+  include_opportunities?: boolean;
 } = {}, signal?: AbortSignal) {
   const sp = new URLSearchParams();
   if (params.start_date) sp.set("start_date", params.start_date);
   if (params.end_date) sp.set("end_date", params.end_date);
+  if (typeof params.include_forms === "boolean") sp.set("include_forms", String(params.include_forms));
+  if (typeof params.include_opportunities === "boolean") sp.set("include_opportunities", String(params.include_opportunities));
   const url = `${API_BASE}/api/ghl/sync${sp.toString() ? `?${sp.toString()}` : ""}`;
   const res = await apiFetch(url, { method: "POST" }, signal);
   if (!res.ok) throw new Error(`GHL sync failed: ${res.status}`);

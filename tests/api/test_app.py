@@ -17,7 +17,12 @@ def _seed_basic(db: str) -> None:
 def test_health(client, api_db):
     r = client.get("/api/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok", "db": api_db}
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["db"] == api_db
+    # Health now also advertises the reporting timezone so the dashboard can
+    # compute preset date ranges in the same zone the backend buckets days into.
+    assert isinstance(body.get("timezone"), str) and body["timezone"]
 
 
 def test_root_returns_service_banner(client):

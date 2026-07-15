@@ -18,11 +18,18 @@ per process+path so the app pays the cost at most once per database.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 
+logger = logging.getLogger(__name__)
+
 _ensured_lock = threading.Lock()
 _ensured_paths: set[str] = set()
+# Last migration failure per DB path, surfaced via /api/health so a persistently
+# broken migration (the root cause of downstream all-zero reports) is visible in
+# monitoring rather than only in logs that may not be tailed.
+_last_migration_error: dict[str, str] = {}
 
 
 ORDER_SEMANTIC_COLUMNS: dict[str, str] = {
@@ -413,9 +420,19 @@ def ensure_schema(db_path: str) -> None:
             conn.execute("PRAGMA busy_timeout=5000;")
             apply_migrations(conn)
             conn.commit()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
         # Never let a migration hiccup crash startup; the individual lazy
-        # ensure_* helpers will retry on first use.
+        # ensure_* helpers will retry on first use. But DO record it — a failed
+        # migration leaves report queries referencing columns that never got
+        # added, which then silently zeroes the whole report downstream.
+        logger.exception("ensure_schema migration failed for %s", db_path)
+        _last_migration_error[db_path] = str(exc)
         return
+    _last_migration_error.pop(db_path, None)
     with _ensured_lock:
         _ensured_paths.add(db_path)
+
+
+def last_migration_error(db_path: str) -> str | None:
+    """Return the most recent migration failure message for ``db_path`` (or None)."""
+    return _last_migration_error.get(db_path)

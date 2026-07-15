@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -12,6 +13,11 @@ from attributionops.tools.attribution import attribution_run_and_day_totals
 from attributionops.tools.campaign_filter import ensure_campaign_settings_table, not_excluded_sql
 from attributionops.tools.integrations import integrations_status
 from attributionops.tools.tracking import tracking_health_check
+from attributionops.report_integrity import (
+    build_dimension_coverage,
+    resolve_attribution_dimensions,
+    visible_report_columns,
+)
 from attributionops.util import (
     local_day_bounds_utc,
     normalize_campaign_key,
@@ -22,6 +28,8 @@ from attributionops.util import (
     to_int,
     try_parse_iso_ts,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _ts_end_exclusive(end_date: str) -> str:
@@ -675,9 +683,23 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     ensure_campaign_settings_table(db_path)
     start_utc, end_excl_utc = local_day_bounds_utc(inputs.start_date, inputs.end_date)
 
+    # Collects non-fatal data errors (a failed sub-query that we degrade past)
+    # so the response can tell the UI "a query failed" instead of silently
+    # rendering an all-zero report that looks identical to "no data".
+    data_errors: list[dict[str, str]] = []
+
     # 1) integrations.status + tracking.health_check
     integrations = integrations_status(db_path)
-    health = tracking_health_check(db_path)
+    # Scope the health check to the SELECTED report window. Called unscoped it
+    # scans full lifetime sessions/orders/touchpoints/conversions on every build,
+    # which dominated report latency and made every date-range switch equally slow
+    # regardless of how much data the window actually contains.
+    health = tracking_health_check(
+        db_path,
+        start_date=inputs.start_date,
+        end_date=inputs.end_date,
+        lookback_days_for_order_source=inputs.lookback_days,
+    )
 
     cov = health.get("coverage", {})
     orders_with_source = int(cov.get("orders_with_source", 0))
@@ -725,7 +747,15 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         value_type="revenue",
         date_basis=date_basis,
     )
-    attrib_rows = _attr["run"]["rows"]
+    attrib_rows = resolve_attribution_dimensions(
+        spend_rows,
+        list(_attr["run"]["rows"]),
+        active_tab=inputs.active_tab,
+    )
+    dimension_coverage = build_dimension_coverage(
+        attrib_rows,
+        active_tab=inputs.active_tab,
+    )
     attrib_by_day = _attr["day_totals"]["rows"]
 
     # 4) reported
@@ -1050,6 +1080,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     # window for Customer/AOV measures, and excludes recurring groups from the
     # New Customers widget. NET CAC uses genuinely first-ever identities.
     order_rows: list[dict[str, Any]] = []
+    customer_order_rows: list[dict[str, Any]] = []
     first_customer_rows: list[dict[str, Any]] = []
     first_by_identity: dict[str, str] = {}
     all_orders_count = 0
@@ -1063,6 +1094,9 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     unique_customers = 0
     net_new_customers = 0
     returning_customers = 0
+    # Stage 1 — base order aggregates (cheap, robust). A failure here logs and
+    # degrades to zeros, but must NOT be masked as "no orders": it's recorded in
+    # data_errors so the UI can distinguish a query error from an empty range.
     try:
         order_rows = query(
             db_path,
@@ -1100,7 +1134,27 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         # while Total Customers still excludes refunded sales.
         recurring_customers = sum(to_int(row.get("is_recurring")) != 0 for row in order_rows)
         new_customers = max(total_customers - recurring_customers, 0)
+    except Exception as exc:
+        logger.exception(
+            "order base metrics query failed for %s %s..%s",
+            db_path, inputs.start_date, inputs.end_date,
+        )
+        data_errors.append({"component": "orders", "error": str(exc)})
+        order_rows = []
+        customer_order_rows = []
+        all_orders_count = 0
+        all_orders_gross_revenue = 0.0
+        all_orders_revenue = 0.0
+        all_orders_cogs = 0.0
+        all_orders_fees = 0.0
+        total_customers = 0
+        new_customers = 0
+        recurring_customers = 0
 
+    # Stage 2 — customer identity / net-new acquisition (needs a first-ever
+    # identity scan and is more fragile). Isolated so a failure here can't wipe
+    # the base aggregates that already succeeded in stage 1.
+    try:
         # Hyros NET CAC uses distinct non-refunded processor customers. Stripe
         # charges without a Stripe customer id are not added to that denominator.
         # Non-Stripe/manual imports fall back to the warehouse identity so their
@@ -1135,23 +1189,50 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             if start_utc <= first_by_identity.get(identity, "") < end_excl_utc
         )
         returning_customers = max(len(window_identities) - net_new_customers, 0)
-    except Exception:
-        order_rows = []
+    except Exception as exc:
+        logger.exception(
+            "order identity metrics failed for %s %s..%s",
+            db_path, inputs.start_date, inputs.end_date,
+        )
+        data_errors.append({"component": "orders_identity", "error": str(exc)})
         first_customer_rows = []
         first_by_identity = {}
+        unique_customers = 0
+        net_new_customers = 0
+        returning_customers = 0
 
     # New vs returning customers + leads — these power true NET CAC and Cost-per-Lead.
     # A "new customer" is one whose first-ever order falls inside the window (not just
     # any order in the window), so CAC reflects net-new acquisition rather than CPA.
+    lead_rows: list[dict[str, Any]] = []
     leads_count = 0
     lead_contacts = 0
     new_leads = 0
     lead_optins = 0
+    lead_types = "'lead','formsubmission','form_submission','signup','optin','opt_in'"
+    # Resolve which identity columns the conversions table actually has ONCE, and
+    # build every lead query from only those columns. A warehouse missing
+    # session_id/visitor_id then degrades gracefully instead of raising
+    # "no such column" and losing lead metrics.
     try:
-        lead_types = "'lead','formsubmission','form_submission','signup','optin','opt_in'"
+        lead_cols = {str(r.get("name") or "") for r in query(db_path, "PRAGMA table_info(conversions)").rows}
+    except Exception:
+        lead_cols = set()
+    lead_sid = "session_id" if "session_id" in lead_cols else "'' AS session_id"
+    lead_vid = "visitor_id" if "visitor_id" in lead_cols else "'' AS visitor_id"
+    _identity_parts = ["NULLIF(customer_key, '')"]
+    if "visitor_id" in lead_cols:
+        _identity_parts.append("NULLIF(visitor_id, '')")
+    if "session_id" in lead_cols:
+        _identity_parts.append("NULLIF(session_id, '')")
+    _identity_parts.append("conversion_id")
+    lead_identity_expr = "COALESCE(" + ", ".join(_identity_parts) + ")"
+
+    # Stage 1 — in-window lead counts.
+    try:
         lead_rows = query(
             db_path,
-            f"""SELECT conversion_id, ts, LOWER(type) AS type, customer_key, session_id, visitor_id
+            f"""SELECT conversion_id, ts, LOWER(type) AS type, customer_key, {lead_sid}, {lead_vid}
                 FROM conversions
                 WHERE ts >= :start_utc AND ts < :end_excl_utc
                   AND LOWER(type) IN ({lead_types})""",
@@ -1170,11 +1251,24 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
 
         lead_contacts = len({lead_identity(row) for row in lead_rows if lead_identity(row)})
         lead_optins = sum(1 for row in lead_rows if str(row.get("type") or "") != "lead")
+    except Exception as exc:
+        logger.exception(
+            "lead metrics query failed for %s %s..%s",
+            db_path, inputs.start_date, inputs.end_date,
+        )
+        data_errors.append({"component": "leads", "error": str(exc)})
+        lead_rows = []
+        leads_count = 0
+        lead_contacts = 0
+        lead_optins = 0
+
+    # Stage 2 — net-new leads (first-ever opt-in falls in window). Isolated so a
+    # failure of the first-lead scan doesn't discard the counts from stage 1.
+    try:
         first_leads = query(
             db_path,
             f"""SELECT identity, MIN(ts) AS first_ts FROM (
-                    SELECT COALESCE(NULLIF(customer_key, ''), NULLIF(visitor_id, ''),
-                                    NULLIF(session_id, ''), conversion_id) AS identity, ts
+                    SELECT {lead_identity_expr} AS identity, ts
                     FROM conversions WHERE LOWER(type) IN ({lead_types})
                 ) GROUP BY identity""",
         ).rows
@@ -1183,11 +1277,13 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             for row in first_leads
             if start_utc <= str(row.get("first_ts") or "") < end_excl_utc
         )
-    except Exception:
-        leads_count = 0
-        lead_contacts = 0
+    except Exception as exc:
+        logger.exception(
+            "net-new lead scan failed for %s %s..%s",
+            db_path, inputs.start_date, inputs.end_date,
+        )
+        data_errors.append({"component": "leads_net_new", "error": str(exc)})
         new_leads = 0
-        lead_optins = 0
 
     # Hyros labels this NET CAC but divides spend by distinct non-refunded
     # processor customers in the selected window (not by raw sales).
@@ -1335,6 +1431,20 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         new_cust_day_map = {}
         net_new_cust_day_map = {}
 
+    # Per-day lead counts so the dashboard's Cost-per-Lead trend plots real
+    # leads/day (cost / leads) instead of reusing the cost-per-order proxy.
+    leads_day_map: dict[str, int] = {}
+    try:
+        tz_leads = report_timezone()
+        for row in lead_rows:
+            parsed_ts = try_parse_iso_ts(row.get("ts"))
+            if parsed_ts is None:
+                continue
+            day = parsed_ts.astimezone(tz_leads).date().isoformat()
+            leads_day_map[day] = leads_day_map.get(day, 0) + 1
+    except Exception:
+        leads_day_map = {}
+
     start_d = date.fromisoformat(inputs.start_date)
     end_d = date.fromisoformat(inputs.end_date)
     all_days: list[str] = []
@@ -1359,6 +1469,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         tracked_sale_groups = to_int(t.get("sale_groups"))
         new_customers_day = int(new_cust_day_map.get(day, 0))
         net_new_customers_day = int(net_new_cust_day_map.get(day, 0))
+        leads_day = int(leads_day_map.get(day, 0))
         attributed_sale_groups_day = to_int(a.get("sale_groups"))
         attributed_aov_day = safe_div(revenue, float(attributed_sale_groups_day))
         source_attributed_orders_day = to_int(a.get("source_attributed_orders"))
@@ -1382,6 +1493,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
                 "tracked_sale_groups": tracked_sale_groups,
                 "new_customers": new_customers_day,
                 "net_new_customers": net_new_customers_day,
+                "leads": leads_day,
                 "attributed_sale_groups": attributed_sale_groups_day,
                 "attributed_aov": round_money(attributed_aov_day) if attributed_aov_day is not None else None,
                 "source_attributed_orders": source_attributed_orders_day,
@@ -1406,6 +1518,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         "data_freshness": {
             "last_event_ts": last_event_ts,
             "last_spend_ts": last_spend_ts,
+            "spend_by_platform": integrations.get("ads", {}).get("platforms", {}),
             "notes": "Computed from local warehouse tables (sessions, touchpoints, orders, spend).",
         },
         "attribution_notes": [
@@ -1418,11 +1531,38 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             "For non-paid sources, clicks may be approximated from sessions.",
         ],
         "anomalies": [],
+        # Non-fatal query failures we degraded past. Empty in the normal case;
+        # the UI uses this to explain an all-zero report caused by a data error
+        # rather than an empty range.
+        "data_errors": data_errors,
     }
 
     if inputs.use_date_of_click_attribution:
         diagnostics["assumptions"].append(
             "reported value is typically stored by conversion date; reported_delta may not be perfectly comparable under click-date attribution."
+        )
+
+    for platform_name, platform_status in integrations.get("ads", {}).get("platforms", {}).items():
+        platform_last_date = str((platform_status or {}).get("last_date") or "")
+        if platform_last_date and platform_last_date < inputs.end_date:
+            diagnostics["anomalies"].append(
+                {
+                    "what": f"{platform_name.title()} spend is stale at {platform_last_date} for a report ending {inputs.end_date}.",
+                    "likely_cause": "That platform did not refresh through the current sync path or its external push has not arrived.",
+                    "verification_step": "Run the platform sync/push and confirm its latest spend date reaches the report end date.",
+                }
+            )
+
+    if dimension_coverage.get("unmapped_orders", 0) > 0:
+        diagnostics["anomalies"].append(
+            {
+                "what": (
+                    f"{dimension_coverage['unmapped_orders']} source-attributed orders "
+                    f"are not uniquely mapped to the selected {inputs.active_tab.replace('_', ' ')}."
+                ),
+                "likely_cause": "Source/identity is known but the platform dimension ID was not captured or uniquely resolvable.",
+                "verification_step": "Inspect GHL UTM/click-ID fields and campaign aliases; ambiguous names remain unmapped by design.",
+            }
         )
 
     if tracking_percentage < 85:
@@ -1495,7 +1635,8 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         "tabs": _tabs(),
         "table": {
             "active_tab": inputs.active_tab,
-            "columns": [
+            "coverage": dimension_coverage,
+            "columns": visible_report_columns([
                 {
                     "key": "name",
                     "label": {
@@ -1525,7 +1666,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
                 {"key": "net_profit", "label": "Net Profit", "type": "money"},
                 {"key": "reported", "label": "Ads Reported", "type": "money"},
                 {"key": "reported_delta", "label": "Ads Delta", "type": "money"},
-            ],
+            ], reported_rows=reported_rows),
             "rows": table_rows,
             "totals_row": totals_metrics,
             "sort": {"by": "profit", "dir": "desc"},

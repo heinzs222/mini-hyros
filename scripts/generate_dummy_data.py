@@ -598,6 +598,20 @@ def generate_dummy_data(
         },
     )
 
+    # Backfill the canonical production columns + indexes onto the freshly-seeded
+    # tables (processor / processor_customer_id / payment_fingerprint /
+    # sale_group_id / is_recurring on orders, plus report indexes) exactly as the
+    # backend does on boot. Without this, the documented demo command produces a
+    # DB whose orders table is missing columns the report engine SELECTs, which
+    # crashed / silently zeroed every report built against the demo warehouse.
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from attributionops.schema import ensure_schema
+
+        ensure_schema(str(sqlite_path))
+    except Exception as exc:  # pragma: no cover - demo tooling, best effort
+        print(f"warning: could not apply schema migrations to demo DB: {exc}", file=sys.stderr)
+
     return {
         "seed": seed,
         "date_range": {"start": _iso_date(start_date), "end": _iso_date(end_date)},

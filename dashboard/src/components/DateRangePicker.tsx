@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Info, BookOpen } from "lucide-react";
+import { reportTodayIso } from "@/lib/utils";
 
 /* ──────────────────────────── date helpers ──────────────────────────── */
 
@@ -54,7 +55,9 @@ function firstOfMonthIso(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`;
 }
 function todayIso(): string {
-  return toIso(new Date());
+  // "Today" in the reporting timezone so presets align with the backend's day
+  // boundaries (see reportTodayIso). Prevents a future-dated "Today" window.
+  return reportTodayIso();
 }
 /** "06.10" style label used on the trigger pills. */
 function fmtPill(iso: string): string {

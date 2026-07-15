@@ -30,7 +30,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 from attributionops.config import default_db_path
 from attributionops.report import ReportInputs, build_hyros_like_report
 from attributionops.schema import ensure_schema
-from attributionops.util import report_timezone, local_day_bounds_utc, normalize_campaign_key
+from attributionops.util import report_timezone, report_timezone_name, local_day_bounds_utc, normalize_campaign_key
 from attributionops.tools.ads import ads_get_spend, ads_get_reported_value, ads_list_platforms
 from attributionops.tools.attribution import attribution_run, attribution_day_totals
 from attributionops.tools.campaign_filter import ensure_campaign_settings_table, not_excluded_sql
@@ -318,7 +318,20 @@ async def root(auth_code: str = Query(default=""), state: str = Query(default=""
 
 @app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health():
-    return {"status": "ok", "db": _db()}
+    # Expose the reporting timezone so the dashboard computes preset windows
+    # (Today/Yesterday/7d/30d) in the SAME zone the backend buckets days into,
+    # and surface any migration failure that would otherwise silently zero reports.
+    payload: dict[str, Any] = {"status": "ok", "db": _db(), "timezone": report_timezone_name()}
+    try:
+        from attributionops.schema import last_migration_error
+
+        mig_err = last_migration_error(_db())
+        if mig_err:
+            payload["status"] = "degraded"
+            payload["migration_error"] = mig_err
+    except Exception:
+        pass
+    return payload
 
 
 # NOTE: the report/data endpoints below are declared as sync `def` (not `async
@@ -344,6 +357,20 @@ def get_report(
         start_date = s
     if not end_date:
         end_date = e
+
+    # Clamp a future window down to "today" in the reporting timezone. A dashboard
+    # that computed "Today" in a timezone ahead of the reporting zone would
+    # otherwise request a window entirely in the server's future and legitimately
+    # get zero rows — the report then looks mysteriously empty. The flag lets the
+    # UI explain the adjustment instead of silently showing nothing.
+    today_iso = datetime.now(report_timezone()).date().isoformat()
+    future_window_clamped = False
+    if start_date > today_iso:
+        start_date = today_iso
+        future_window_clamped = True
+    if end_date > today_iso:
+        end_date = today_iso
+        future_window_clamped = True
 
     cache_key = (
         _db(), start_date, end_date, model, lookback_days, active_tab,
@@ -417,6 +444,9 @@ def get_report(
             row["thumbnail_url"] = creative.get("thumbnail_url", "")
             row["creative_type"] = creative.get("creative_type", "")
             row["video_id"] = creative.get("video_id", "")
+
+    if future_window_clamped:
+        report.setdefault("report_meta", {})["future_window_clamped"] = True
 
     _report_cache_put(cache_key, report)
     return report

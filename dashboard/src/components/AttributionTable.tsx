@@ -76,6 +76,10 @@ interface Props {
     [key: string]: number | null | undefined;
   };
   activeTab: string;
+  /** The tab the CURRENT report payload was built for. If it disagrees with
+   * activeTab the rows belong to a previous tab (mid-refetch) and must not be
+   * interpreted through the new tab's lens. */
+  dataTab?: string;
   onTabChange: (tab: string) => void;
   startDate?: string;
   endDate?: string;
@@ -195,21 +199,33 @@ const LEVEL_LABELS: Record<string, string> = {
 
 function CellValue({ col, metrics }: { col: Column; metrics: any }) {
   const val = metrics[col.key];
+  // Zero / empty cells are dimmed so a sparse row reads as "no data here" rather
+  // than as broken output competing visually with real numbers.
+  const isEmpty =
+    val == null ||
+    (typeof val === "number" && val === 0) ||
+    (typeof val === "string" && (val === "0" || val === ""));
+  const dim = isEmpty ? "text-ink-faint" : "";
   if (col.type === "money") {
-    return (
-      <span className={col.key === "profit" || col.key === "net_profit" ? profitColor(val) : ""}>
-        {formatMoney(val)}
-      </span>
-    );
+    const colorCls = col.key === "profit" || col.key === "net_profit" ? profitColor(val) : dim;
+    return <span className={colorCls}>{formatMoney(val)}</span>;
   }
   if (col.type === "percent") {
-    return <span>{formatPercentValue(val, 2)}</span>;
+    return <span className={dim}>{formatPercentValue(val, 2)}</span>;
   }
   if (col.type === "ratio") {
-    return <span>{formatRatio(val, 2)}</span>;
+    // ROAS has a universal 1.0x breakeven — color it green/red like profit so the
+    // owner can read winners/losers at a glance (matching HYROS).
+    const roasCls =
+      col.key === "roas" && val != null
+        ? Number(val) >= 1
+          ? "text-emerald-400"
+          : "text-rose-400"
+        : dim;
+    return <span className={roasCls}>{formatRatio(val, 2)}</span>;
   }
-  if (col.type === "number") return <span>{formatNumber(val)}</span>;
-  return <span>{val ?? "—"}</span>;
+  if (col.type === "number") return <span className={dim}>{formatNumber(val)}</span>;
+  return <span className={dim}>{val ?? "—"}</span>;
 }
 
 function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; currentMetrics: any; compareMetrics: any }) {
@@ -239,7 +255,11 @@ function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; curr
 
 type FilterOp = ">=" | "<=";
 
-function AttributionTable({ columns, rows, totals, activeTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "", platformFilter = "all", onPlatformFilterChange, embedded = false, densityValue, searchValue, hiddenColumnKeys }: Props) {
+function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChange, startDate, endDate, model, lookbackDays, useClickDate, compareRows = [], compareLabel = "", platformFilter = "all", onPlatformFilterChange, embedded = false, densityValue, searchValue, hiddenColumnKeys }: Props) {
+  // Defense-in-depth against rendering the previous tab's rows under the new tab
+  // (ReportsView already gates on this, but guard here too so the traffic-source
+  // badge collapse is never applied to a mismatched payload).
+  const rowsTabMatchesView = dataTab === undefined || dataTab === activeTab;
   const [sortKey, setSortKey] = useState("profit");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [search, setSearch] = useState("");
@@ -253,6 +273,9 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
   const videoRef = useRef<HTMLVideoElement>(null);
   // Cache fetched lightbox video URLs by video_id so reopening doesn't refetch.
   const videoUrlCacheRef = useRef<Record<string, string>>({});
+  // In-flight child-row fetches, so a report tab/range/model change can cancel
+  // them and a slow expand can't land data from the wrong query afterwards.
+  const childAbortRef = useRef<Record<string, AbortController>>({});
 
   // When embedded in ReportsView the search box is a controlled prop; otherwise
   // the table owns its own search state.
@@ -321,6 +344,12 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
   const totalsLabel = isFiltering ? "Total (visible)" : "Total";
 
   useEffect(() => {
+    // A new tab/range/model invalidates every expanded child set. Cancel any
+    // in-flight child fetch so its (now stale) result can't land after the switch.
+    for (const controller of Object.values(childAbortRef.current)) {
+      try { controller.abort(); } catch {}
+    }
+    childAbortRef.current = {};
     setExpanded({});
     setChildRows({});
     setLoadingChildren({});
@@ -376,6 +405,9 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
     }
 
     setLoadingChildren((prev) => ({ ...prev, [key]: true }));
+    childAbortRef.current[key]?.abort();
+    const controller = new AbortController();
+    childAbortRef.current[key] = controller;
     try {
       const data = await fetchChildren({
         parent_tab: row.level,
@@ -385,12 +417,14 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
         model,
         lookback_days: lookbackDays,
         use_click_date: useClickDate,
-      });
+      }, controller.signal);
       setChildRows((prev) => ({ ...prev, [key]: data.rows || [] }));
       setExpanded((prev) => ({ ...prev, [key]: true }));
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === "AbortError" || controller.signal.aborted) return;
       console.error("Failed to fetch children:", err);
     } finally {
+      if (childAbortRef.current[key] === controller) delete childAbortRef.current[key];
       setLoadingChildren((prev) => ({ ...prev, [key]: false }));
     }
   }, [expanded, childRows, startDate, endDate, model, lookbackDays, useClickDate]);
@@ -410,6 +444,9 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
     }
 
     setLoadingChildren((prev) => ({ ...prev, [key]: true }));
+    childAbortRef.current[key]?.abort();
+    const controller = new AbortController();
+    childAbortRef.current[key] = controller;
     try {
       const data = await fetchChildren({
         parent_tab: row.level,
@@ -419,12 +456,14 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
         model,
         lookback_days: lookbackDays,
         use_click_date: useClickDate,
-      });
+      }, controller.signal);
       setChildRows((prev) => ({ ...prev, [key]: data.rows || [] }));
       setExpanded((prev) => ({ ...prev, [key]: true }));
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === "AbortError" || controller.signal.aborted) return;
       console.error("Failed to fetch grandchildren:", err);
     } finally {
+      if (childAbortRef.current[key] === controller) delete childAbortRef.current[key];
       setLoadingChildren((prev) => ({ ...prev, [key]: false }));
     }
   }, [expanded, childRows, startDate, endDate, model, lookbackDays, useClickDate]);
@@ -542,7 +581,7 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
                   <ImageIcon size={11} className="text-ink-faint" />
                 </span>
               )}
-              {depth === 0 && activeTab === "traffic_source" ? (
+              {depth === 0 && activeTab === "traffic_source" && rowsTabMatchesView ? (
                 // Traffic-source tab: the row IS the platform — show logo + the
                 // canonical platform name ("Google Ads" / "Meta Ads" / "TikTok Ads").
                 (() => {
@@ -600,8 +639,8 @@ function AttributionTable({ columns, rows, totals, activeTab, onTabChange, start
   };
 
   const TotalsRow = () => (
-    <tr className="border-b border-white/10 bg-white/[0.02]">
-      <td className={`px-4 ${cellPad} text-[13px] font-semibold text-ink-bright sticky left-0 bg-[var(--surface)] z-10`}>{totalsLabel}</td>
+    <tr className="border-b border-white/10 bg-white/[0.05]">
+      <td className={`px-4 ${cellPad} text-[13px] font-semibold text-ink-bright sticky left-0 bg-[var(--surface-2)] z-10`}>{totalsLabel}</td>
       {shownCols.map((col) => (
         <td key={col.key} className={`text-right px-3 ${cellPad} whitespace-nowrap tabular font-semibold text-ink-bright`}>
           <CellValue col={col} metrics={visibleTotals} />
