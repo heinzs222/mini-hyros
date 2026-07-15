@@ -121,7 +121,7 @@ describe("fetchReport", () => {
     expect(data).toEqual({ rows: [] });
     const [url] = lastFetchCall();
     expect(url).toBe(
-      `${API_BASE}/api/report?start_date=2026-01-01&end_date=2026-01-31&model=last_touch&lookback_days=30&active_tab=campaigns&conversion_type=purchase&use_click_date=true`,
+      `${API_BASE}/api/report?start_date=2026-01-01&end_date=2026-01-31&defer_history=true&model=last_touch&lookback_days=30&active_tab=campaigns&conversion_type=purchase&use_click_date=true`,
     );
   });
 
@@ -132,7 +132,7 @@ describe("fetchReport", () => {
     await fetchReport({ start_date: "2026-01-01", use_click_date: false });
 
     const [url] = lastFetchCall();
-    expect(url).toBe(`${API_BASE}/api/report?start_date=2026-01-01`);
+    expect(url).toBe(`${API_BASE}/api/report?start_date=2026-01-01&defer_history=true`);
     expect(url).not.toContain("use_click_date");
     expect(url).not.toContain("end_date");
   });
