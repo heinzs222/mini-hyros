@@ -8,8 +8,9 @@ COPY scripts/ /app/scripts/
 COPY backend/ /app/backend/
 COPY .env.example /app/.env.example
 
-# Apply the idempotent lightweight GHL sync patch before dependencies/tests/runtime.
-RUN python /app/scripts/apply_backend_sync_fix.py /app/backend/api/ghl_sync.py
+# Apply the idempotent source patches before dependencies/tests/runtime.
+RUN python /app/scripts/apply_backend_sync_fix.py /app/backend/api/ghl_sync.py && \
+    python /app/scripts/apply_report_integrity_fixes.py /app/attributionops/report.py
 
 # Install Python dependencies from the pinned requirements file (reproducible).
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
