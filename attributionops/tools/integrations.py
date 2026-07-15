@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from attributionops.db import query
-from attributionops.util import parse_iso_ts
+from attributionops.util import parse_iso_ts, to_float, to_int
 
 
 def integrations_status(db_path: str) -> dict[str, object]:
@@ -29,6 +29,30 @@ def integrations_status(db_path: str) -> dict[str, object]:
         max_date = (rows[0] or {}).get("max_date")
         return str(max_date) if max_date else None
 
+    def _spend_platforms() -> dict[str, dict[str, object]]:
+        if "spend" not in table_names:
+            return {}
+        rows = query(
+            db_path,
+            """
+            SELECT LOWER(COALESCE(platform, 'unknown')) AS platform,
+                   MAX(date) AS last_date,
+                   COUNT(*) AS rows,
+                   SUM(CAST(COALESCE(cost, '0') AS REAL)) AS cost
+            FROM spend
+            GROUP BY LOWER(COALESCE(platform, 'unknown'))
+            ORDER BY platform
+            """,
+        ).rows
+        return {
+            str(row.get("platform") or "unknown"): {
+                "last_date": str(row.get("last_date")) if row.get("last_date") else None,
+                "rows": to_int(row.get("rows")),
+                "cost": round(to_float(row.get("cost")), 2),
+            }
+            for row in rows
+        }
+
     return {
         "connected": True,
         "mode": "local_warehouse",
@@ -46,9 +70,9 @@ def integrations_status(db_path: str) -> dict[str, object]:
         "ads": {
             "spend_last_date": _max_date("spend", "date"),
             "reported_value_last_date": _max_date("reported_value", "date"),
+            "platforms": _spend_platforms(),
         },
         "notes": [
             "Local warehouse status based on available SQLite tables and timestamps.",
         ],
     }
-
