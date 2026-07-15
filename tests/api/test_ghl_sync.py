@@ -106,6 +106,38 @@ def test_src_info_and_attribution_flags():
     assert gs._has_attribution({"utm_source": "", "gclid": "", "fbclid": "", "ttclid": ""}) is False
 
 
+def test_src_infos_read_real_ghl_attribution_history():
+    contact = {
+        "id": "c-history",
+        "email": "history@example.com",
+        "source": "Website",
+        "attributions": [
+            {
+                "isFirst": True,
+                "utmSource": "google",
+                "utmGclid": "google-click-1",
+                "pageUrl": "https://funnel.example/landing",
+            },
+            {
+                "isLast": True,
+                "utmSource": "facebook",
+                "utmFbclid": "meta-click-1",
+                "fbc": "fb.1.123.meta-click-1",
+                "pageUrl": "https://funnel.example/checkout",
+            },
+        ],
+    }
+
+    infos = gs._src_infos_from_attribution(contact)
+
+    assert len(infos) == 2
+    assert infos[0]["gclid"] == "google-click-1"
+    assert infos[0]["url"] == "https://funnel.example/landing"
+    assert infos[1]["fbclid"] == "meta-click-1"
+    assert infos[1]["fbc_id"] == "fb.1.123.meta-click-1"
+    assert gs._src_info_from_attribution(contact) == infos[1]
+
+
 def test_contact_ts_normalises_iso():
     ts = gs._contact_ts({"dateAdded": "2026-06-15T12:00:00.000Z"}, "fallback")
     assert ts == "2026-06-15T12:00:00Z"
@@ -134,6 +166,29 @@ def test_write_contacts_creates_leads_and_touchpoints(api_db):
     touches = sql_rows(api_db, "SELECT * FROM touchpoints")
     assert len(touches) == 1
     assert touches[0]["customer_key"] == gs._sha256("lead1@example.com")
+
+
+def test_write_contacts_replaces_imported_attribution_history(api_db):
+    contact = {
+        "id": "c-history",
+        "email": "history@example.com",
+        "dateAdded": "2026-06-15T12:00:00Z",
+        "source": "Website",
+        "attributions": [
+            {"isFirst": True, "utmSource": "google", "utmGclid": "g-1"},
+            {"isLast": True, "utmSource": "facebook", "utmFbclid": "f-1"},
+        ],
+    }
+
+    gs._write_contacts(api_db, [contact], "2026-06-01", "2026-06-30")
+    gs._write_contacts(api_db, [contact], "2026-06-01", "2026-06-30")
+
+    touches = sql_rows(api_db, "SELECT * FROM touchpoints ORDER BY ts")
+    assert len(touches) == 2
+    assert touches[0]["platform"] == "google"
+    assert touches[0]["gclid"] == "g-1"
+    assert touches[1]["platform"] == "meta"
+    assert touches[1]["fbclid"] == "f-1"
 
 
 def test_write_opportunities_won_creates_order(api_db):

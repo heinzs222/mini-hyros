@@ -148,36 +148,112 @@ def _contact_ts(contact: dict, fallback: str) -> str:
     return _iso_ts(dt)
 
 
-def _src_info_from_attribution(contact: dict) -> dict:
-    """Build the src_info dict that _resolve_platform / _insert_touchpoint expect
-    from a GHL contact's attributionSource block."""
-    attr = contact.get("attributionSource") or contact.get("lastAttributionSource") or {}
+def _src_info_from_block(contact: dict, attr: dict | None) -> dict:
+    """Map one LeadConnector attribution record to a Vigil source record."""
     if not isinstance(attr, dict):
         attr = {}
 
-    utm_source = str(attr.get("utmSource") or attr.get("sessionSource") or contact.get("source") or "")
+    utm_source = str(
+        attr.get("utmSource")
+        or attr.get("utmSessionSource")
+        or attr.get("sessionSource")
+        or contact.get("source")
+        or ""
+    )
     utm_medium = str(attr.get("utmMedium") or attr.get("medium") or "")
+    page_url = str(attr.get("pageUrl") or attr.get("url") or "")
     return {
         "utm_source": utm_source,
         "utm_medium": utm_medium,
         "utm_campaign": str(attr.get("campaign") or attr.get("utmCampaign") or ""),
         "utm_content": str(attr.get("utmContent") or ""),
-        "gclid": str(attr.get("gclid") or ""),
-        "fbclid": str(attr.get("fbclid") or ""),
-        "ttclid": str(attr.get("ttclid") or ""),
+        "utm_term": str(attr.get("utmTerm") or ""),
+        "gclid": str(attr.get("gclid") or attr.get("utmGclid") or ""),
+        "wbraid": str(attr.get("wbraid") or ""),
+        "gbraid": str(attr.get("gbraid") or ""),
+        "fbclid": str(attr.get("fbclid") or attr.get("utmFbclid") or ""),
+        "ttclid": str(attr.get("ttclid") or attr.get("utmTtclid") or ""),
         "source": str(contact.get("source") or utm_source or ""),
         "referrer": str(attr.get("referrer") or ""),
-        "url": str(attr.get("url") or ""),
-        "fbc_id": "", "ttc_id": "", "gc_id": "", "h_ad_id": "",
-        "g_special_campaign": "", "detected_platform": "",
+        "url": page_url,
+        "landing_page": page_url,
+        "campaign_id": str(attr.get("campaignId") or ""),
+        "adset_id": str(attr.get("adSetId") or attr.get("adGroupId") or ""),
+        "ad_id": str(attr.get("adId") or ""),
+        "creative_id": str(attr.get("creativeId") or ""),
+        "fbc_id": str(attr.get("fbc") or ""),
+        "ttc_id": str(attr.get("ttc") or ""),
+        # gaClientId identifies the browser, not a Google Ads click. Do not map
+        # it to gc_id because that would falsely classify organic traffic.
+        "gc_id": "",
+        "h_ad_id": "",
+        "g_special_campaign": str(attr.get("gbraid") or ""),
+        "detected_platform": "",
     }
+
+
+def _attribution_blocks(contact: dict) -> list[dict]:
+    """Return GHL attribution history in first-to-last order."""
+    blocks = [item for item in (contact.get("attributions") or []) if isinstance(item, dict)]
+    for key in ("attributionSource", "lastAttributionSource"):
+        item = contact.get(key)
+        if isinstance(item, dict) and item:
+            blocks.append(item)
+
+    def rank(item: dict) -> int:
+        if item.get("isFirst") is True:
+            return 0
+        if item.get("isLast") is True:
+            return 2
+        return 1
+
+    return sorted(blocks, key=rank)
+
+
+def _src_infos_from_attribution(contact: dict) -> list[dict]:
+    blocks = _attribution_blocks(contact)
+    infos = [_src_info_from_block(contact, block) for block in blocks]
+    if not infos:
+        infos = [_src_info_from_block(contact, None)]
+
+    deduped: list[dict] = []
+    seen: set[tuple[str, ...]] = set()
+    keys = (
+        "utm_source", "utm_medium", "utm_campaign", "utm_content", "gclid",
+        "wbraid", "gbraid", "fbclid", "ttclid", "fbc_id", "campaign_id",
+        "adset_id", "ad_id", "url",
+    )
+    for info in infos:
+        signature = tuple(str(info.get(key) or "") for key in keys)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        deduped.append(info)
+    return deduped
+
+
+def _src_info_from_attribution(contact: dict) -> dict:
+    """Return the latest GHL attribution for the contact/session summary."""
+    return _src_infos_from_attribution(contact)[-1]
 
 
 def _has_attribution(src_info: dict) -> bool:
     return bool(
-        src_info.get("utm_source") or src_info.get("gclid")
+        src_info.get("utm_source") or src_info.get("utm_medium")
+        or src_info.get("gclid")
+        or src_info.get("wbraid") or src_info.get("gbraid")
         or src_info.get("fbclid") or src_info.get("ttclid")
+        or src_info.get("fbc_id") or src_info.get("ttc_id")
     )
+
+
+def _ordered_attribution_ts(contact_ts: str, index: int, total: int) -> str:
+    """Preserve GHL first/last ordering when attribution rows lack timestamps."""
+    dt = try_parse_iso_ts(contact_ts)
+    if dt is None:
+        return contact_ts
+    seconds_before_contact = max(total - index - 1, 0)
+    return _iso_ts(dt - timedelta(seconds=seconds_before_contact))
 
 
 def _within(ts: str, start_date: str, end_date: str) -> bool:
@@ -408,10 +484,8 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
 
         customer_key = _sha256(email)
         contact_id = str(c.get("id") or customer_key)
-        src_info = _src_info_from_attribution(c)
-        platform, channel = _resolve_platform(
-            src_info["utm_source"], src_info["utm_medium"], src_info["source"], src_info=src_info,
-        )
+        src_infos = _src_infos_from_attribution(c)
+        src_info = src_infos[-1]
 
         # Same canonical key as the webhook path so a lead captured by both the
         # webhook and this sync is counted once, not twice.
@@ -421,9 +495,28 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
         session_id = _sha256(f"ghl_api_session|{contact_id}")
         _write_session(db_path, session_id, ts, src_info,
                        src_info.get("url", "") or "GHL Form", customer_key)
-        if _has_attribution(src_info):
-            _insert_touchpoint(db_path, ts, channel or "crm", platform, src_info,
-                               customer_key, session_id)
+        # This session id belongs exclusively to this importer. Replacing its
+        # touchpoints keeps recurring syncs idempotent while allowing GHL's
+        # attribution history to be refreshed.
+        with connect(db_path) as conn:
+            conn.execute("DELETE FROM touchpoints WHERE session_id = ?", (session_id,))
+            conn.commit()
+        for index, info in enumerate(src_infos):
+            if not _has_attribution(info):
+                continue
+            info_platform, info_channel = _resolve_platform(
+                info["utm_source"], info["utm_medium"], info["source"], src_info=info,
+            )
+            attr_ts = _ordered_attribution_ts(ts, index, len(src_infos))
+            _insert_touchpoint(
+                db_path,
+                attr_ts,
+                info_channel or "crm",
+                info_platform,
+                info,
+                customer_key,
+                session_id,
+            )
         leads += 1
     return {"leads": leads, "skipped": skipped}
 
