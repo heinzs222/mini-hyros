@@ -123,7 +123,17 @@ def ads_get_spend(
         if not agg[key]["metadata"] and md:
             agg[key]["metadata"] = md
 
-    out_rows = list(agg.values())
+    # Platform APIs sometimes return inactive entities whose aggregate is exactly
+    # zero for every metric. They add no information and previously produced rows
+    # full of zeros. Attribution-only entities are still added later by report.py,
+    # so filtering these spend-only ghosts cannot hide real sales.
+    out_rows = [
+        row
+        for row in agg.values()
+        if to_int(row.get("clicks")) != 0
+        or abs(to_float(row.get("cost"))) > 0.000001
+        or to_int(row.get("impressions")) != 0
+    ]
     for row in out_rows:
         row["cost"] = float(f"{float(row['cost']):.2f}")
         row["metadata"] = json.dumps(row["metadata"], separators=(",", ":"))
