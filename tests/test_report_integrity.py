@@ -148,7 +148,7 @@ def test_tracking_health_uses_selected_range_not_lifetime(tmp_path) -> None:
                 gclid TEXT, fbclid TEXT, ttclid TEXT
             );
             CREATE TABLE conversions (
-                order_id TEXT, customer_key TEXT, session_id TEXT, visitor_id TEXT
+                order_id TEXT, ts TEXT, customer_key TEXT, session_id TEXT, visitor_id TEXT
             );
             CREATE TABLE touchpoints (
                 ts TEXT, channel TEXT, platform TEXT, campaign_id TEXT,
