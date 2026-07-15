@@ -314,10 +314,24 @@ def _load_orders_and_touchpoints(
     # requiring customer_key on every order.
     win_start = local_day_start_utc(start_d - timedelta(days=lookback_days))
     touchpoint_cols = _table_columns(db_path, "touchpoints")
+    session_cols = _table_columns(db_path, "sessions")
     touchpoint_visitor_expr = (
         "COALESCE(NULLIF(t.visitor_id, ''), s.visitor_id, '') AS visitor_id"
         if "visitor_id" in touchpoint_cols
         else "COALESCE(s.visitor_id, '') AS visitor_id"
+    )
+    # Guard the sessions aggregates by actual column presence: a sessions table
+    # missing visitor_id otherwise raises "misuse of aggregate: MAX()" and crashes
+    # the whole attribution run (mirrors the same fix in tools/tracking.py).
+    session_visitor_agg = (
+        "MAX(NULLIF(visitor_id, '')) AS visitor_id"
+        if "visitor_id" in session_cols
+        else "'' AS visitor_id"
+    )
+    session_customer_agg = (
+        "MAX(NULLIF(customer_key, '')) AS customer_key"
+        if "customer_key" in session_cols
+        else "'' AS customer_key"
     )
     touchpoints = query(
         db_path,
@@ -330,8 +344,8 @@ def _load_orders_and_touchpoints(
         FROM touchpoints t
         LEFT JOIN (
             SELECT session_id,
-                   MAX(NULLIF(visitor_id, '')) AS visitor_id,
-                   MAX(NULLIF(customer_key, '')) AS customer_key
+                   {session_visitor_agg},
+                   {session_customer_agg}
             FROM sessions
             WHERE COALESCE(session_id, '') != ''
             GROUP BY session_id

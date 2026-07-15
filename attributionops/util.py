@@ -90,8 +90,19 @@ def try_parse_iso_ts(value: Any) -> datetime | None:
 # that a merchant's "July 2" means local July 2, not the UTC calendar day.
 # Configure via REPORT_TIMEZONE (IANA name). This account defaults to the same
 # fixed UTC-06 reporting offset configured in Hyros.
+def report_timezone_name() -> str:
+    """Configured IANA reporting-timezone name (what report_timezone() resolves).
+
+    Exposed so the dashboard can compute preset dates (Today/Yesterday/...) in the
+    SAME zone the backend buckets days into, instead of the browser's local zone —
+    otherwise a user far from UTC-6 can request a window that is entirely in the
+    server's future and legitimately gets zero rows for "Today".
+    """
+    return os.environ.get("REPORT_TIMEZONE", "Etc/GMT+6").strip() or "Etc/GMT+6"
+
+
 def report_timezone() -> timezone:
-    name = os.environ.get("REPORT_TIMEZONE", "Etc/GMT+6").strip() or "Etc/GMT+6"
+    name = report_timezone_name()
     if ZoneInfo is not None:
         try:
             return ZoneInfo(name)  # type: ignore[return-value]

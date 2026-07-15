@@ -714,6 +714,8 @@ async def ghl_sync(
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),
     limit: int = Query(default=500, ge=1, le=2000),
+    include_forms: bool = Query(default=True),
+    include_opportunities: bool = Query(default=True),
 ):
     """Pull GHL contacts (leads) + opportunities for a date range into the warehouse."""
     db_path = _db()
@@ -734,14 +736,18 @@ async def ghl_sync(
 
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            async def _empty_result() -> list[dict]:
+                return []
+
             contacts_result, submissions_result, opportunities_result = await asyncio.gather(
                 _fetch_contacts(
                     client, token, location_id, limit, start_date=start_date, end_date=end_date
                 ),
                 _fetch_form_submissions(
                     client, token, location_id, limit, start_date, end_date
-                ),
-                _fetch_opportunities(client, token, location_id, limit),
+                ) if include_forms else _empty_result(),
+                _fetch_opportunities(client, token, location_id, limit)
+                if include_opportunities else _empty_result(),
                 return_exceptions=True,
             )
 
@@ -797,5 +803,7 @@ async def ghl_sync(
         "skipped": lead_stats["skipped"] + form_stats["skipped"] + opp_stats["skipped"],
         "start_date": start_date,
         "end_date": end_date,
+        "include_forms": include_forms,
+        "include_opportunities": include_opportunities,
         "errors": errors,
     }
