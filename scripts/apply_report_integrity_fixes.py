@@ -64,6 +64,18 @@ def apply_report_integrity_fixes(target: Path) -> bool:
 
     text = _replace_once(
         text,
+        '''            "last_spend_ts": last_spend_ts,
+            "notes": "Computed from local warehouse tables (sessions, touchpoints, orders, spend).",
+''',
+        '''            "last_spend_ts": last_spend_ts,
+            "spend_by_platform": integrations.get("ads", {}).get("platforms", {}),
+            "notes": "Computed from local warehouse tables (sessions, touchpoints, orders, spend).",
+''',
+        "per-platform spend freshness",
+    )
+
+    text = _replace_once(
+        text,
         '''        "table": {
             "active_tab": inputs.active_tab,
             "columns": [
@@ -94,12 +106,23 @@ def apply_report_integrity_fixes(target: Path) -> bool:
         '''    if tracking_percentage < 85:
         diagnostics["anomalies"].append(
 ''',
-        '''    if dimension_coverage.get("unmapped_orders", 0) > 0:
+        '''    for platform_name, platform_status in integrations.get("ads", {}).get("platforms", {}).items():
+        platform_last_date = str((platform_status or {}).get("last_date") or "")
+        if platform_last_date and platform_last_date < inputs.end_date:
+            diagnostics["anomalies"].append(
+                {
+                    "what": f"{platform_name.title()} spend is stale at {platform_last_date} for a report ending {inputs.end_date}.",
+                    "likely_cause": "That platform did not refresh through the current sync path or its external push has not arrived.",
+                    "verification_step": "Run the platform sync/push and confirm its latest spend date reaches the report end date.",
+                }
+            )
+
+    if dimension_coverage.get("unmapped_orders", 0) > 0:
         diagnostics["anomalies"].append(
             {
                 "what": (
                     f"{dimension_coverage['unmapped_orders']} source-attributed orders "
-                    f"lack the selected {inputs.active_tab.replace('_', ' ')} identifier."
+                    f"are not uniquely mapped to the selected {inputs.active_tab.replace('_', ' ')}."
                 ),
                 "likely_cause": "Source/identity is known but the platform dimension ID was not captured or uniquely resolvable.",
                 "verification_step": "Inspect GHL UTM/click-ID fields and campaign aliases; ambiguous names remain unmapped by design.",
@@ -109,7 +132,7 @@ def apply_report_integrity_fixes(target: Path) -> bool:
     if tracking_percentage < 85:
         diagnostics["anomalies"].append(
 ''',
-        "dimension mapping diagnostic",
+        "staleness and dimension mapping diagnostics",
     )
 
     if text == original:
