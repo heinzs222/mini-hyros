@@ -7,6 +7,7 @@ const dashboardRoot = path.resolve(scriptDir, "..");
 
 function replaceExact(text, oldText, newText, label) {
   if (newText && text.includes(newText)) return text;
+  if (!newText && !text.includes(oldText)) return text;
   if (!text.includes(oldText)) {
     throw new Error(`Cannot apply ${label}: expected source text was not found.`);
   }
@@ -83,6 +84,61 @@ patchFile("src/app/page.tsx", (input) => {
     "sync success message",
   );
 
+  text = replaceExact(
+    text,
+    '  const compareAbortRef = useRef<AbortController | null>(null);',
+    `  const compareAbortRef = useRef<AbortController | null>(null);
+  // Prevent the same comparison period from being fetched repeatedly while
+  // React effects and primary refreshes settle.
+  const compareInFlightKeyRef = useRef("");
+  const compareCompletedKeyRef = useRef("");`,
+    "comparison request guards",
+  );
+
+  text = replaceExact(
+    text,
+    `    const abortController = new AbortController();
+    compareAbortRef.current = abortController;
+    setCompareUnavailable(false);`,
+    `    const compareKey = JSON.stringify(compareParams);
+    if (
+      compareInFlightKeyRef.current === compareKey ||
+      compareCompletedKeyRef.current === compareKey
+    ) {
+      return;
+    }
+
+    const abortController = new AbortController();
+    compareAbortRef.current = abortController;
+    compareInFlightKeyRef.current = compareKey;
+    setCompareUnavailable(false);`,
+    "comparison request de-duplication",
+  );
+
+  text = replaceExact(
+    text,
+    `      setCompareReport(compareData);
+      setCompareLabel(nextCompareLabel);`,
+    `      setCompareReport(compareData);
+      setCompareLabel(nextCompareLabel);
+      compareCompletedKeyRef.current = compareKey;`,
+    "completed comparison key",
+  );
+
+  text = replaceExact(
+    text,
+    `      if (compareAbortRef.current === abortController) {
+        compareAbortRef.current = null;
+      }`,
+    `      if (compareAbortRef.current === abortController) {
+        compareAbortRef.current = null;
+      }
+      if (compareInFlightKeyRef.current === compareKey) {
+        compareInFlightKeyRef.current = "";
+      }`,
+    "comparison request cleanup",
+  );
+
   text = replacePattern(
     text,
     /  const handleManualSync = useCallback\(async \(\) => \{\r?\n[\s\S]*?\r?\n  \}, \[loadReport, syncSpendData, windowEnd, windowStart\]\);/,
@@ -90,8 +146,12 @@ patchFile("src/app/page.tsx", (input) => {
     await syncSpendData({ start_date: windowStart, end_date: windowEnd }, { notify: true });
     // One force-fresh report build after every sync operation has settled.
     await loadReport({ fresh: true });
-  }, [loadReport, syncSpendData, windowEnd, windowStart]);`,
-    "One force-fresh report build after every sync operation has settled.",
+    // A sync may backfill the comparison period too. Invalidate exactly once,
+    // then the request-key guard prevents duplicate comparison calls.
+    compareCompletedKeyRef.current = "";
+    await loadCompare();
+  }, [loadCompare, loadReport, syncSpendData, windowEnd, windowStart]);`,
+    "A sync may backfill the comparison period too.",
     "manual sync refresh order",
   );
 
@@ -127,8 +187,20 @@ patchFile("src/components/ReportsView.tsx", (input) => {
   let text = replaceExact(
     input,
     "                const unattrRev = Number(s.unattributed_revenue ?? 0);",
-    "                const unattrRev = Number(s.unattributed_revenue ?? 0);\n                const campaignAttributed = Number(report?.table?.totals_row?.orders ?? 0);",
-    "campaign coverage calculation",
+    `                const unattrRev = Number(s.unattributed_revenue ?? 0);
+                const tableCoverage = report?.table?.coverage || {};
+                const dimensionAttributed = Number(
+                  tableCoverage.dimension_attributed_orders ?? report?.table?.totals_row?.orders ?? 0,
+                );
+                const dimensionSourceOrders = Number(
+                  tableCoverage.source_attributed_orders ?? attributed,
+                );
+                const dimensionUnmapped = Number(
+                  tableCoverage.unmapped_orders ??
+                    Math.max(dimensionSourceOrders - dimensionAttributed, 0),
+                );
+                const dimensionLabel = String(activeTab || "dimension").replaceAll("_", " ");`,
+    "dimension coverage calculation",
   );
 
   text = replaceExact(
@@ -150,14 +222,20 @@ patchFile("src/components/ReportsView.tsx", (input) => {
                       qualifying source touchpoint inside the attribution window. This is not
                       automatically a sync failure: direct, recurring, offline, and identity-unmatched
                       sales can remain unattributed.
-                      {activeTab === "campaign" && Number.isFinite(campaignAttributed) && (
+                      {activeTab !== "traffic_source" && dimensionSourceOrders > 0 && (
                         <>
-                          {" "}Campaign coverage in this view: <span className="font-semibold">
-                            {campaignAttributed.toLocaleString(undefined, { maximumFractionDigits: 2 })} of {total} orders
-                          </span>. A source touchpoint can exist without a campaign ID.
+                          {" "}<span className="font-semibold">
+                            {dimensionAttributed.toLocaleString(undefined, { maximumFractionDigits: 2 })} of{" "}
+                            {dimensionSourceOrders.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                          </span>{" "}
+                          source-attributed orders carry a {dimensionLabel} ID;{" "}
+                          <span className="font-semibold">
+                            {dimensionUnmapped.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                          </span>{" "}
+                          remain source-known but {dimensionLabel}-unmapped.
                         </>
                       )}`,
-    "source coverage explanation",
+    "source and dimension coverage explanation",
   );
 
   return text;
