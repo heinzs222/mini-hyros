@@ -86,6 +86,21 @@ patchFile("src/app/page.tsx", (input) => {
 
   text = replaceExact(
     text,
+    `            if (info && typeof info === "object" && info.error) {
+              errors.push(\`${scope} (\${name}): \${info.error}\`);
+            }`,
+    `            if (info && typeof info === "object" && info.error) {
+              errors.push(\`${scope} (\${name}): \${info.error}\`);
+            } else if (info && typeof info === "object" && info.skipped) {
+              errors.push(
+                \`${scope} (\${name}): \${info.reason || "Platform refresh was skipped"}\`,
+              );
+            }`,
+    "skipped platform sync warning",
+  );
+
+  text = replaceExact(
+    text,
     '  const compareAbortRef = useRef<AbortController | null>(null);',
     `  const compareAbortRef = useRef<AbortController | null>(null);
   // Prevent the same comparison period from being fetched repeatedly while
