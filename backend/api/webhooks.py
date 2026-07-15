@@ -190,14 +190,20 @@ def _compact_params(params: dict[str, Any]) -> dict[str, str]:
     }
 
 
-async def _forward_purchase_to_stape(payload: dict[str, Any], order_id: str, session_id: str, value: float) -> None:
+async def _forward_conversion_to_stape(
+    payload: dict[str, Any],
+    order_id: str,
+    session_id: str,
+    value: float,
+    event_name: str,
+) -> None:
     endpoint = _stape_endpoint()
     if not endpoint:
         return
 
     params = _compact_params({
         "v": os.environ.get("STAPE_VERSION", "2").strip() or "2",
-        "event": "purchase",
+        "event": event_name,
         "value": value,
         "currency": payload.get("currency", "USD"),
         "transaction_id": order_id,
@@ -226,7 +232,8 @@ async def _forward_purchase_to_stape(payload: dict[str, Any], order_id: str, ses
 
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.get(f"{endpoint}/data", params=params)
+            response = await client.get(f"{endpoint}/data", params=params)
+            response.raise_for_status()
     except Exception:
         # Stape forwarding must never make the conversion endpoint fail.
         return
@@ -806,7 +813,20 @@ async def track_conversion(request: Request):
         "ts": now,
         "source": "pixel",
     }))
-    if is_purchase:
-        asyncio.create_task(_forward_purchase_to_stape(payload, order_id, session_id, gross))
+    stape_event = {
+        "purchase": "purchase",
+        "payment": "purchase",
+        "lead": "generate_lead",
+        "formsubmission": "generate_lead",
+        "form_submission": "generate_lead",
+        "signup": "generate_lead",
+        "booking": "book_appointment",
+        "appointmentbooked": "book_appointment",
+        "appointment_booked": "book_appointment",
+    }.get(conv_lower)
+    if stape_event:
+        asyncio.create_task(
+            _forward_conversion_to_stape(payload, order_id, session_id, gross, stape_event)
+        )
 
     return {"ok": True, "order_id": order_id, "customer_key": customer_key}

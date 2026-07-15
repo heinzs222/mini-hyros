@@ -251,6 +251,28 @@ def test_push_tiktok_success(client, api_db, monkeypatch):
     assert rows[0]["status"] == "success"
 
 
+def test_push_tiktok_omits_empty_customer_identifiers(client, api_db, monkeypatch):
+    _set_tiktok(monkeypatch)
+    event = {
+        "platform": "tiktok",
+        "event_name": "SubmitForm",
+        "ts": "2026-01-12T10:00:00Z",
+        "customer_key": "",
+        "order_id": "lead-tt-no-identity",
+        "value": 0,
+        "ttclid": "",
+    }
+    with respx.mock(assert_all_mocked=False) as router:
+        route = router.post(url__startswith="https://business-api.tiktok.com/").mock(
+            return_value=Response(200, json=TIKTOK_OK)
+        )
+        body = client.post("/api/capi/push", json=event).json()
+
+    assert body["ok"] is True
+    payload = __import__("json").loads(route.calls.last.request.content)
+    assert payload["context"]["user"] == {}
+
+
 def test_push_tiktok_nonzero_code_is_failure(client, api_db, monkeypatch):
     _set_tiktok(monkeypatch)
     event = {

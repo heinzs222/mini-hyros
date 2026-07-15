@@ -517,6 +517,28 @@ def test_conversion_forwards_purchase_to_stape(client, api_db, monkeypatch):
     assert len(_rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("conv-stape-1",))) == 1
 
 
+def test_conversion_forwards_lead_to_stape_once(client, api_db, monkeypatch):
+    monkeypatch.setenv("STAPE_ENDPOINT", "https://stape.example.com/")
+    payload = {
+        "order_id": "conv-stape-lead-1",
+        "value": "0",
+        "type": "Lead",
+        "visitor_id": "v-stape-lead",
+        "session_id": "s-stape-lead",
+    }
+    with respx.mock(assert_all_mocked=False) as router:
+        route = router.get(url__startswith="https://stape.example.com").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        resp = client.post("/api/webhooks/conversion", json=payload)
+        assert resp.status_code == 200
+        assert route.call_count == 1
+        assert route.calls.last.request.url.params["event"] == "generate_lead"
+
+    assert _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("conv-stape-lead-1",)) == []
+    assert len(_rows(api_db, "SELECT * FROM conversions WHERE order_id = ?", ("conv-stape-lead-1",))) == 1
+
+
 def test_conversion_stape_failure_does_not_break_endpoint(client, api_db, monkeypatch):
     monkeypatch.setenv("STAPE_ENDPOINT", "https://stape.example.com/")
     payload = {

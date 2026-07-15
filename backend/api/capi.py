@@ -224,8 +224,12 @@ async def _push_tiktok(event: dict) -> dict:
     if not access_token or not pixel_id:
         return {"ok": False, "error": "TIKTOK_ACCESS_TOKEN and TIKTOK_PIXEL_ID env vars required"}
 
-    customer_key = event.get("customer_key", "")
-    email_hash = customer_key if len(customer_key) == 64 else _sha256(customer_key)
+    customer_key = str(event.get("customer_key") or "").strip()
+    user = {}
+    if customer_key:
+        user["email"] = customer_key if len(customer_key) == 64 else _sha256(customer_key)
+    if event.get("ttclid"):
+        user["ttclid"] = event["ttclid"]
 
     payload = {
         "pixel_code": pixel_id,
@@ -233,10 +237,7 @@ async def _push_tiktok(event: dict) -> dict:
         "event_id": event.get("order_id", ""),
         "timestamp": event["ts"],
         "context": {
-            "user": {
-                "email": email_hash,
-                "ttclid": event.get("ttclid", ""),
-            },
+            "user": user,
             "page": {
                 "url": event.get("landing_page", ""),
             },

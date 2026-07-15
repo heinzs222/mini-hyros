@@ -315,62 +315,6 @@
     }
   }
 
-  function sendStapeEvent(eventName, data) {
-    if (!STAPE_ENDPOINT || !eventName) return;
-
-    var url;
-    try {
-      url = new URL("/data", STAPE_ENDPOINT);
-    } catch (e) {
-      return;
-    }
-
-    function setParam(key, value) {
-      if (value === undefined || value === null || value === "") return;
-      url.searchParams.set(key, String(value));
-    }
-
-    setParam("v", STAPE_VERSION);
-    setParam("event", eventName);
-
-    [
-      "value",
-      "currency",
-      "transaction_id",
-      "order_id",
-      "event_id",
-      "visitor_id",
-      "session_id",
-      "utm_source",
-      "utm_medium",
-      "utm_campaign",
-      "utm_content",
-      "utm_term",
-      "gclid",
-      "wbraid",
-      "gbraid",
-      "fbclid",
-      "ttclid",
-      "ad_id",
-      "adset_id",
-      "campaign_id",
-      "creative_id",
-      "landing_page",
-      "referrer",
-      "device"
-    ].forEach(function (key) {
-      setParam(key, data[key]);
-    });
-
-    try {
-      var img = new Image(1, 1);
-      img.referrerPolicy = "no-referrer-when-downgrade";
-      img.src = url.toString();
-    } catch (e) {
-      fetch(url.toString(), { method: "GET", mode: "no-cors", keepalive: true }).catch(function () {});
-    }
-  }
-
   // ── Pageview ────────────────────────────────────────────────────────────────
   function trackPageview() {
     var params = mergedParams();
@@ -501,34 +445,6 @@
 
     send("/api/webhooks/conversion", conversionPayload);
 
-    if (String(conversionType).toLowerCase() === "purchase") {
-      sendStapeEvent("purchase", {
-        value: conversionValue,
-        currency: conversionPayload.currency,
-        transaction_id: orderId,
-        order_id: orderId,
-        event_id: orderId || (sessionId + "|" + conversionPayload.timestamp),
-        visitor_id: visitorId,
-        session_id: sessionId,
-        utm_source: params.utm_source,
-        utm_medium: params.utm_medium,
-        utm_campaign: params.utm_campaign,
-        utm_content: params.utm_content,
-        utm_term: params.utm_term,
-        gclid: params.gclid,
-        wbraid: params.wbraid,
-        gbraid: params.gbraid,
-        fbclid: params.fbclid,
-        ttclid: params.ttclid,
-        ad_id: params.ad_id,
-        adset_id: params.adset_id,
-        campaign_id: params.campaign_id,
-        creative_id: params.creative_id,
-        landing_page: window.location.pathname,
-        referrer: document.referrer || "",
-        device: getDevice(),
-      });
-    }
   };
 
   /**
