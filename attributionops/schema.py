@@ -9,6 +9,8 @@ integrity constraints the ingestion layer relies on are guaranteed to exist:
   is a silent no-op without a UNIQUE constraint (duplicate deliveries would
   otherwise double-count revenue).
 * the ``campaign_settings`` table backing the per-campaign tracked/excluded flag.
+* recurring Stripe orders keep their latest known acquisition source instead of
+  becoming unattributed when a later API sync returns less tracking metadata.
 
 Everything here is idempotent and cheap to re-run; ``ensure_schema`` is memoized
 per process+path so the app pays the cost at most once per database.
@@ -32,6 +34,20 @@ ORDER_SEMANTIC_COLUMNS: dict[str, str] = {
     "is_recurring": "INTEGER DEFAULT 0",
     "sale_group_id": "TEXT DEFAULT ''",
 }
+
+ORDER_ATTRIBUTION_COLUMNS: tuple[str, ...] = (
+    "session_id",
+    "visitor_id",
+    "channel",
+    "platform",
+    "campaign_id",
+    "adset_id",
+    "ad_id",
+    "creative_id",
+    "gclid",
+    "fbclid",
+    "ttclid",
+)
 
 
 # These account-specific exclusions mirror the campaigns omitted by the source
@@ -95,6 +111,221 @@ def _dedupe_and_unique_index(
     # Drop the redundant non-unique index (superseded by the unique one).
     conn.execute(f"DROP INDEX IF EXISTS {legacy_index}")
     conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table}({key})")
+
+
+def _backfill_linked_purchase_identities(conn: sqlite3.Connection) -> None:
+    """Fill blank order/conversion identities from the matching purchase row."""
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    if not {"orders", "conversions"}.issubset(tables):
+        return
+
+    order_columns = _table_columns(conn, "orders")
+    conversion_columns = _table_columns(conn, "conversions")
+    if "order_id" not in order_columns or "order_id" not in conversion_columns:
+        return
+
+    for column in ("customer_key", "session_id", "visitor_id"):
+        if column not in order_columns or column not in conversion_columns:
+            continue
+        conn.execute(
+            f"""
+            UPDATE orders
+               SET {column} = COALESCE(
+                   NULLIF({column}, ''),
+                   (
+                       SELECT NULLIF(c.{column}, '')
+                         FROM conversions c
+                        WHERE c.order_id = orders.order_id
+                          AND COALESCE(c.{column}, '') != ''
+                        ORDER BY c.ts DESC, c.rowid DESC
+                        LIMIT 1
+                   ),
+                   ''
+               )
+             WHERE COALESCE({column}, '') = ''
+               AND COALESCE(order_id, '') != ''
+            """
+        )
+        conn.execute(
+            f"""
+            UPDATE conversions
+               SET {column} = COALESCE(
+                   NULLIF({column}, ''),
+                   (
+                       SELECT NULLIF(o.{column}, '')
+                         FROM orders o
+                        WHERE o.order_id = conversions.order_id
+                          AND COALESCE(o.{column}, '') != ''
+                        ORDER BY o.ts DESC, o.rowid DESC
+                        LIMIT 1
+                   ),
+                   ''
+               )
+             WHERE COALESCE({column}, '') = ''
+               AND COALESCE(order_id, '') != ''
+            """
+        )
+
+
+def _touchpoint_signal_sql(alias: str, columns: set[str]) -> str:
+    clauses: list[str] = []
+    if "channel" in columns:
+        clauses.append(
+            f"LOWER(COALESCE({alias}.channel, '')) NOT IN ('', 'organic', 'direct')"
+        )
+    for column in (
+        "platform",
+        "campaign_id",
+        "adset_id",
+        "ad_id",
+        "creative_id",
+        "gclid",
+        "fbclid",
+        "ttclid",
+    ):
+        if column in columns:
+            clauses.append(f"COALESCE({alias}.{column}, '') != ''")
+    return "(" + " OR ".join(clauses) + ")" if clauses else "0"
+
+
+def _recurring_attribution_assignments(
+    order_ref: str,
+    columns: tuple[str, ...],
+    touchpoint_columns: set[str],
+) -> str:
+    signal_sql = _touchpoint_signal_sql("t", touchpoint_columns)
+    assignments: list[str] = []
+    for column in columns:
+        assignments.append(
+            f"""{column} = COALESCE(
+                NULLIF({column}, ''),
+                (
+                    SELECT t.{column}
+                      FROM touchpoints t
+                     WHERE COALESCE(t.customer_key, '') = COALESCE({order_ref}.customer_key, '')
+                       AND COALESCE({order_ref}.customer_key, '') != ''
+                       AND t.ts <= {order_ref}.ts
+                       AND {signal_sql}
+                     ORDER BY t.ts DESC, t.rowid DESC
+                     LIMIT 1
+                ),
+                ''
+            )"""
+        )
+    return ",\n".join(assignments)
+
+
+def ensure_order_attribution_integrity(conn: sqlite3.Connection) -> None:
+    """Repair and preserve source data used by the reporting-gap calculation.
+
+    Stripe's charge API can return less metadata on a later sync than the realtime
+    purchase event originally carried. The old update path replaced populated
+    session/click/source columns with empty strings, making already-attributed
+    orders fall back into the yellow reporting-gap banner. Recurring charges also
+    legitimately happen long after the normal click lookback window, so they keep
+    the buyer's latest known source from before the charge.
+    """
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    if "orders" not in tables:
+        return
+
+    _backfill_linked_purchase_identities(conn)
+
+    if "touchpoints" not in tables:
+        return
+
+    order_columns = _table_columns(conn, "orders")
+    touchpoint_columns = _table_columns(conn, "touchpoints")
+    required_order_columns = {"customer_key", "ts", "is_recurring"}
+    required_touchpoint_columns = {"customer_key", "ts"}
+    if not required_order_columns.issubset(order_columns):
+        return
+    if not required_touchpoint_columns.issubset(touchpoint_columns):
+        return
+
+    shared_columns = tuple(
+        column
+        for column in ORDER_ATTRIBUTION_COLUMNS
+        if column in order_columns and column in touchpoint_columns
+    )
+    if not shared_columns:
+        return
+
+    # Repair existing recurring orders. This is lifetime carry-forward only for
+    # recurring charges; normal first-time purchases continue to obey the report's
+    # configured lookback window inside the attribution engine.
+    conn.execute(
+        f"""
+        UPDATE orders
+           SET {_recurring_attribution_assignments('orders', shared_columns, touchpoint_columns)}
+         WHERE COALESCE(is_recurring, 0) = 1
+           AND COALESCE(customer_key, '') != ''
+        """
+    )
+
+    # Never let a sparse re-sync erase attribution already captured by the pixel,
+    # webhook, or an earlier richer Stripe response.
+    preserve_when = " OR ".join(
+        f"(COALESCE(NEW.{column}, '') = '' AND COALESCE(OLD.{column}, '') != '')"
+        for column in shared_columns
+    )
+    preserve_set = ",\n".join(
+        f"{column} = CASE WHEN COALESCE(NEW.{column}, '') = '' "
+        f"THEN OLD.{column} ELSE NEW.{column} END"
+        for column in shared_columns
+    )
+    conn.execute("DROP TRIGGER IF EXISTS trg_orders_preserve_attribution_after_update")
+    conn.execute(
+        f"""
+        CREATE TRIGGER trg_orders_preserve_attribution_after_update
+        AFTER UPDATE OF {', '.join(shared_columns)} ON orders
+        WHEN {preserve_when}
+        BEGIN
+            UPDATE orders
+               SET {preserve_set}
+             WHERE rowid = NEW.rowid;
+        END
+        """
+    )
+
+    trigger_assignments = _recurring_attribution_assignments(
+        "NEW", shared_columns, touchpoint_columns
+    )
+    conn.execute("DROP TRIGGER IF EXISTS trg_orders_backfill_recurring_after_insert")
+    conn.execute(
+        f"""
+        CREATE TRIGGER trg_orders_backfill_recurring_after_insert
+        AFTER INSERT ON orders
+        WHEN COALESCE(NEW.is_recurring, 0) = 1
+         AND COALESCE(NEW.customer_key, '') != ''
+        BEGIN
+            UPDATE orders
+               SET {trigger_assignments}
+             WHERE rowid = NEW.rowid;
+        END
+        """
+    )
+
+    conn.execute("DROP TRIGGER IF EXISTS trg_orders_backfill_recurring_after_update")
+    conn.execute(
+        f"""
+        CREATE TRIGGER trg_orders_backfill_recurring_after_update
+        AFTER UPDATE OF is_recurring, customer_key, ts ON orders
+        WHEN COALESCE(NEW.is_recurring, 0) = 1
+         AND COALESCE(NEW.customer_key, '') != ''
+        BEGIN
+            UPDATE orders
+               SET {trigger_assignments}
+             WHERE rowid = NEW.rowid;
+        END
+        """
+    )
 
 
 def ensure_campaign_settings(conn: sqlite3.Connection) -> None:
@@ -166,6 +397,8 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
             "uq_conversions_conversion_id",
             "idx_conversions_conversion_id_legacy",
         )
+    if "orders" in tables:
+        ensure_order_attribution_integrity(conn)
     ensure_campaign_settings(conn)
     ensure_refund_log(conn)
 
