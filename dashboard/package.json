@@ -3,10 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/apply-sync-fix.mjs",
     "dev": "next dev --port 3000",
+    "prebuild": "node scripts/apply-sync-fix.mjs",
     "build": "next build",
     "start": "next start",
+    "pretest": "node scripts/apply-sync-fix.mjs",
     "test": "vitest run",
+    "pretest:cov": "node scripts/apply-sync-fix.mjs",
     "test:cov": "vitest run --coverage"
   },
   "dependencies": {
