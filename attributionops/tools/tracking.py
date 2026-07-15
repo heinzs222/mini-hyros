@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from attributionops.db import query
+from attributionops.util import local_day_bounds_utc
 
 
 def _table_columns(db_path: str, table: str) -> set[str]:
@@ -10,18 +11,61 @@ def _table_columns(db_path: str, table: str) -> set[str]:
         return set()
 
 
-def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int = 30) -> dict[str, object]:
-    sessions_total = query(db_path, "SELECT COUNT(*) AS n FROM sessions;").rows[0]["n"]
+def tracking_health_check(
+    db_path: str,
+    *,
+    lookback_days_for_order_source: int = 30,
+    start_date: str = "",
+    end_date: str = "",
+) -> dict[str, object]:
+    """Measure tracking coverage, optionally inside one report date range.
+
+    The old report mixed selected-period revenue with lifetime tracking counts,
+    which made the health percentage look unrelated to the report on screen.
+    Supplying both dates scopes sessions, orders, source coverage, and freshness to
+    the same local-day boundaries used by the report builder. Callers that omit
+    dates retain the original lifetime behavior.
+    """
+
+    scoped = bool(start_date and end_date)
+    params: dict[str, str] = {"lookback": f"-{int(lookback_days_for_order_source)} days"}
+    session_where = ""
+    order_where = ""
+    touch_where = ""
+    if scoped:
+        start_utc, end_excl_utc = local_day_bounds_utc(start_date, end_date)
+        params.update({"start_utc": start_utc, "end_excl_utc": end_excl_utc})
+        session_where = "WHERE ts >= :start_utc AND ts < :end_excl_utc"
+        order_where = "WHERE o.ts >= :start_utc AND o.ts < :end_excl_utc"
+        # Include the source lookback before the first selected day, but never
+        # scan touchpoints after the report window.
+        touch_where = (
+            "WHERE t.ts >= strftime('%Y-%m-%dT%H:%M:%SZ', :start_utc, :lookback) "
+            "AND t.ts < :end_excl_utc"
+        )
+
+    sessions_total = query(
+        db_path,
+        f"SELECT COUNT(*) AS n FROM sessions {session_where};",
+        params,
+    ).rows[0]["n"]
     sessions_with_click_id = query(
         db_path,
-        """
+        f"""
         SELECT COUNT(*) AS n
         FROM sessions
-        WHERE COALESCE(gclid,'') <> '' OR COALESCE(fbclid,'') <> '' OR COALESCE(ttclid,'') <> '';
+        {session_where}
+        {"AND" if session_where else "WHERE"}
+          (COALESCE(gclid,'') <> '' OR COALESCE(fbclid,'') <> '' OR COALESCE(ttclid,'') <> '');
         """,
+        params,
     ).rows[0]["n"]
 
-    orders_total = query(db_path, "SELECT COUNT(*) AS n FROM orders;").rows[0]["n"]
+    orders_total = query(
+        db_path,
+        f"SELECT COUNT(*) AS n FROM orders o {order_where};",
+        params,
+    ).rows[0]["n"]
 
     order_cols = _table_columns(db_path, "orders")
     conversion_cols = _table_columns(db_path, "conversions")
@@ -72,6 +116,7 @@ def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int =
                    ({order_direct_source}) AS has_direct_source
             FROM orders o
             LEFT JOIN conversion_identity c ON c.order_id = o.order_id
+            {order_where}
         ),
         touch_identity AS (
             SELECT t.ts, t.channel, t.platform, t.campaign_id, t.adset_id, t.ad_id, t.creative_id,
@@ -88,11 +133,12 @@ def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int =
                 WHERE COALESCE(session_id, '') <> ''
                 GROUP BY session_id
             ) s ON s.session_id = t.session_id
+            {touch_where}
         )
         SELECT COUNT(*) AS n
         FROM order_identity o
         WHERE o.has_direct_source
-          OR EXISTS (
+           OR EXISTS (
             SELECT 1 FROM touch_identity t
             WHERE (
                 (COALESCE(o.customer_key, '') <> '' AND t.customer_key = o.customer_key)
@@ -114,13 +160,28 @@ def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int =
               )
           );
         """,
-        {"lookback": f"-{int(lookback_days_for_order_source)} days"},
+        params,
     ).rows[0]["n"]
 
-    last_session_ts = query(db_path, "SELECT MAX(ts) AS max_ts FROM sessions;").rows[0]["max_ts"]
-    last_order_ts = query(db_path, "SELECT MAX(ts) AS max_ts FROM orders;").rows[0]["max_ts"]
-    last_touch_ts = query(db_path, "SELECT MAX(ts) AS max_ts FROM touchpoints;").rows[0]["max_ts"]
-    last_conv_ts = query(db_path, "SELECT MAX(ts) AS max_ts FROM conversions;").rows[0]["max_ts"]
+    last_session_ts = query(
+        db_path, f"SELECT MAX(ts) AS max_ts FROM sessions {session_where};", params
+    ).rows[0]["max_ts"]
+    last_order_ts = query(
+        db_path, f"SELECT MAX(ts) AS max_ts FROM orders o {order_where};", params
+    ).rows[0]["max_ts"]
+    last_touch_ts = query(
+        db_path,
+        f"SELECT MAX(t.ts) AS max_ts FROM touchpoints t {touch_where};",
+        params,
+    ).rows[0]["max_ts"]
+    conversion_where = (
+        "WHERE ts >= :start_utc AND ts < :end_excl_utc" if scoped else ""
+    )
+    last_conv_ts = query(
+        db_path,
+        f"SELECT MAX(ts) AS max_ts FROM conversions {conversion_where};",
+        params,
+    ).rows[0]["max_ts"]
 
     gaps: list[dict[str, str]] = []
     if int(sessions_total) > 0:
@@ -151,6 +212,11 @@ def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int =
     return {
         "status": status,
         "mode": "local_warehouse",
+        "scope": {
+            "type": "date_range" if scoped else "lifetime",
+            "start_date": start_date or None,
+            "end_date": end_date or None,
+        },
         "coverage": {
             "orders_with_source": int(orders_with_source),
             "orders_total": int(orders_total),
@@ -167,5 +233,6 @@ def tracking_health_check(db_path: str, *, lookback_days_for_order_source: int =
         "top_tracking_gaps": gaps,
         "notes": [
             "Tracking health computed from live local SQLite warehouse tables.",
+            "Coverage is scoped to the selected report range." if scoped else "Coverage is lifetime.",
         ],
     }
