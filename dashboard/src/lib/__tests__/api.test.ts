@@ -209,3 +209,40 @@ describe("fetchLtvBySource", () => {
     await expect(fetchLtvBySource()).rejects.toThrow("LTV fetch failed: 502");
   });
 });
+
+describe("api activity counter (top progress bar)", () => {
+  it("increments while a request is in flight and returns to zero on success", async () => {
+    const { getApiActivitySnapshot } = await import("@/lib/api");
+    let release: (value: Response) => void = () => {};
+    const gate = new Promise<Response>((resolve) => { release = resolve; });
+    vi.stubGlobal("fetch", vi.fn(() => gate));
+
+    expect(getApiActivitySnapshot()).toBe(0);
+    const pending = apiFetch("http://localhost:8000/api/x");
+    expect(getApiActivitySnapshot()).toBe(1);
+
+    release(makeResponse({}));
+    await pending;
+    // REGRESSION: the counter must return to zero or the progress bar animates forever.
+    expect(getApiActivitySnapshot()).toBe(0);
+  });
+
+  it("returns to zero when the request fails", async () => {
+    const { getApiActivitySnapshot } = await import("@/lib/api");
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("network down"); }));
+
+    await expect(apiFetch("http://localhost:8000/api/x")).rejects.toThrow("network down");
+    expect(getApiActivitySnapshot()).toBe(0);
+  });
+
+  it("notifies subscribers on both increment and decrement", async () => {
+    const { subscribeApiActivity, getApiActivitySnapshot } = await import("@/lib/api");
+    const seen: number[] = [];
+    const unsubscribe = subscribeApiActivity(() => seen.push(getApiActivitySnapshot()));
+    vi.stubGlobal("fetch", vi.fn(async () => makeResponse({})));
+
+    await apiFetch("http://localhost:8000/api/x");
+    unsubscribe();
+    expect(seen).toEqual([1, 0]);
+  });
+});
