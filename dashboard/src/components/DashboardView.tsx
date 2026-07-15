@@ -235,6 +235,8 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
           goodWhenUp
           caption={caption}
           data={d.series.map((r) => r.revenue)}
+          labels={d.series.map((r) => r.label)}
+          valueFormatter={formatMoney}
           color={COLORS.green}
         />
         <KpiCard
@@ -244,6 +246,8 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
           goodWhenUp={false}
           caption={caption}
           data={d.series.map((r) => r.cost)}
+          labels={d.series.map((r) => r.label)}
+          valueFormatter={formatMoney}
           color={COLORS.red}
         />
         <KpiCard
@@ -253,6 +257,8 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
           goodWhenUp
           caption={caption}
           data={d.series.map((r) => r.roas)}
+          labels={d.series.map((r) => r.label)}
+          valueFormatter={(v) => formatRatio(v)}
           color={COLORS.yellow}
         />
         <KpiCard
@@ -262,6 +268,8 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
           goodWhenUp={false}
           caption={caption}
           data={d.series.map((r) => r.cpa)}
+          labels={d.series.map((r) => r.label)}
+          valueFormatter={formatMoney}
           color={COLORS.red}
         />
         <KpiCard
@@ -271,6 +279,8 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
           goodWhenUp={false}
           caption={caption}
           data={d.series.map((r) => r.cpa)}
+          labels={d.series.map((r) => r.label)}
+          valueFormatter={formatMoney}
           color={COLORS.red}
         />
       </div>
