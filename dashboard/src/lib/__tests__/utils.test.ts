@@ -145,9 +145,9 @@ describe("formatSeconds", () => {
 });
 
 describe("profitColor", () => {
-  it("returns gray for null/undefined", () => {
-    expect(profitColor(null)).toBe("text-gray-400");
-    expect(profitColor(undefined)).toBe("text-gray-400");
+  it("returns muted for null/undefined", () => {
+    expect(profitColor(null)).toBe("text-ink-faint");
+    expect(profitColor(undefined)).toBe("text-ink-faint");
   });
 
   it("returns emerald for positive values", () => {
@@ -155,13 +155,13 @@ describe("profitColor", () => {
     expect(profitColor(0.01)).toBe("text-emerald-400");
   });
 
-  it("returns red for negative values", () => {
-    expect(profitColor(-1)).toBe("text-red-400");
-    expect(profitColor(-0.01)).toBe("text-red-400");
+  it("returns rose for negative values", () => {
+    expect(profitColor(-1)).toBe("text-rose-400");
+    expect(profitColor(-0.01)).toBe("text-rose-400");
   });
 
-  it("returns gray for exactly zero", () => {
-    expect(profitColor(0)).toBe("text-gray-400");
+  it("returns muted for exactly zero", () => {
+    expect(profitColor(0)).toBe("text-ink-faint");
   });
 });
 

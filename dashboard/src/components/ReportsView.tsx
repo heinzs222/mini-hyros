@@ -251,10 +251,10 @@ export default function ReportsView(props: Props) {
             >
               <RefreshCw size={13} className={syncing ? "animate-spin" : ""} /> Sync
             </button>
-            <button title="More" className="flex h-[34px] w-9 items-center justify-center rounded-lg border border-[var(--card-border)] bg-[var(--surface)] text-ink-dim hover:text-ink">
+            <button disabled title="More options — coming soon" className="flex h-[34px] w-9 cursor-not-allowed items-center justify-center rounded-lg border border-[var(--card-border)] bg-[var(--surface)] text-ink-faint opacity-60">
               <MoreHorizontal size={16} />
             </button>
-            <button title="Save report" className="flex h-[34px] w-9 items-center justify-center rounded-lg border border-[var(--card-border)] bg-[var(--surface)] text-ink-dim hover:text-ink">
+            <button disabled title="Save report — coming soon" className="flex h-[34px] w-9 cursor-not-allowed items-center justify-center rounded-lg border border-[var(--card-border)] bg-[var(--surface)] text-ink-faint opacity-60">
               <Save size={15} />
             </button>
             <button
@@ -294,7 +294,7 @@ export default function ReportsView(props: Props) {
                 Attribute filters <ChevronDown size={13} className="text-ink-faint" />
               </div>
               <p className="mt-1 text-[11px] leading-snug text-ink-dim">Filter results by certain sources, products, tags, etc</p>
-              <button className="mt-2 w-full rounded-lg border border-dashed border-[var(--card-border)] py-2 text-[12px] text-ink-dim hover:text-ink">
+              <button disabled title="Custom attribute filters — coming soon" className="mt-2 w-full cursor-not-allowed rounded-lg border border-dashed border-[var(--card-border)] py-2 text-[12px] text-ink-faint opacity-60">
                 + Specify Attributes
               </button>
             </div>

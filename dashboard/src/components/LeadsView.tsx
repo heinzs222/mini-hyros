@@ -511,11 +511,18 @@ export default function LeadsView({ startDate, endDate }: Props) {
             </thead>
             <tbody>
               {loading ? (
-                <tr>
-                  <td colSpan={COLS.length + 1} className="px-4 py-16 text-center text-ink-dim">
-                    <RefreshCw size={20} className="mx-auto animate-spin text-brand-500" />
-                  </td>
-                </tr>
+                // Skeleton rows keep the table layout stable instead of
+                // collapsing to a bare spinner, so a refetch reads as "updating".
+                Array.from({ length: Math.min(pageSize, 10) }).map((_, i) => (
+                  <tr key={`sk-${i}`} className="border-b border-[var(--card-border)]/60" style={{ opacity: 1 - i * 0.06 }}>
+                    <td className="px-4 py-3"><div className="skeleton h-4 w-4" /></td>
+                    {COLS.map((_c, ci) => (
+                      <td key={ci} className="px-4 py-3">
+                        <div className="skeleton h-3.5" style={{ width: `${45 + ((i * 7 + ci * 13) % 45)}%` }} />
+                      </td>
+                    ))}
+                  </tr>
+                ))
               ) : error ? (
                 <tr>
                   <td colSpan={COLS.length + 1} className="px-4 py-16 text-center text-rose-400">{error}</td>
