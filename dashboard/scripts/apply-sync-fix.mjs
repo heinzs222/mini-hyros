@@ -6,7 +6,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const dashboardRoot = path.resolve(scriptDir, "..");
 
 function replaceExact(text, oldText, newText, label) {
-  if (text.includes(newText)) return text;
+  if (newText && text.includes(newText)) return text;
   if (!text.includes(oldText)) {
     throw new Error(`Cannot apply ${label}: expected source text was not found.`);
   }
