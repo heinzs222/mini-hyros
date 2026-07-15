@@ -116,7 +116,8 @@ patchFile("src/app/page.tsx", (input) => {
     compareRequestSeqRef.current = requestSeq;
     compareAbortRef.current?.abort();
 
-    // No comparison requested — clear any stale result and stop.
+    // No comparison requested (disabled, unsupported mode, or model matches):
+    // clear any stale comparison state and stop.
     if (!compareParams) {
       compareAbortRef.current = null;
       setCompareReport(null);
@@ -124,7 +125,8 @@ patchFile("src/app/page.tsx", (input) => {
       setCompareUnavailable(false);
       return;
     }`,
-    `    // No comparison requested — clear any stale result and stop.
+    `    // No comparison requested (disabled, unsupported mode, or model matches):
+    // clear any stale comparison state and stop.
     if (!compareParams) {
       compareRequestSeqRef.current += 1;
       compareAbortRef.current?.abort();
