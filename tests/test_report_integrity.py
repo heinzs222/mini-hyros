@@ -82,11 +82,14 @@ def test_ambiguous_campaign_name_is_not_guessed() -> None:
 
     assert resolved[0]["campaign_id"] == "Sales"
     assert resolved[0]["account_id"] == ""
+    assert resolved[0]["_dimension_resolution"] == "unmatched"
     coverage = build_dimension_coverage(resolved, active_tab="campaign")
-    # The source supplied a campaign token, so it is dimension-known even though
-    # it cannot be joined to one platform campaign. The separate table row keeps
-    # the ambiguity visible rather than silently assigning it to campaign 100/200.
-    assert coverage["dimension_attributed_orders"] == 1
+    # The alias remains visible for investigation, but it is not counted as
+    # platform-mapped because two real campaigns share the same display name.
+    assert coverage["dimension_identifier_orders"] == 1
+    assert coverage["dimension_attributed_orders"] == 0
+    assert coverage["unmatched_identifier_orders"] == 1
+    assert coverage["unmapped_orders"] == 1
 
 
 def test_reported_columns_hide_without_reported_feed() -> None:
