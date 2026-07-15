@@ -97,6 +97,34 @@ patchFile("src/app/page.tsx", (input) => {
 
   text = replaceExact(
     text,
+    `    const requestSeq = compareRequestSeqRef.current + 1;
+    compareRequestSeqRef.current = requestSeq;
+    compareAbortRef.current?.abort();
+
+    // No comparison requested — clear any stale result and stop.
+    if (!compareParams) {
+      compareAbortRef.current = null;
+      setCompareReport(null);
+      setCompareLabel("");
+      setCompareUnavailable(false);
+      return;
+    }`,
+    `    // No comparison requested — clear any stale result and stop.
+    if (!compareParams) {
+      compareRequestSeqRef.current += 1;
+      compareAbortRef.current?.abort();
+      compareAbortRef.current = null;
+      compareInFlightKeyRef.current = "";
+      setCompareReport(null);
+      setCompareLabel("");
+      setCompareUnavailable(false);
+      return;
+    }`,
+    "comparison request ordering",
+  );
+
+  text = replaceExact(
+    text,
     `    const abortController = new AbortController();
     compareAbortRef.current = abortController;
     setCompareUnavailable(false);`,
@@ -108,6 +136,9 @@ patchFile("src/app/page.tsx", (input) => {
       return;
     }
 
+    const requestSeq = compareRequestSeqRef.current + 1;
+    compareRequestSeqRef.current = requestSeq;
+    compareAbortRef.current?.abort();
     const abortController = new AbortController();
     compareAbortRef.current = abortController;
     compareInFlightKeyRef.current = compareKey;
@@ -228,11 +259,11 @@ patchFile("src/components/ReportsView.tsx", (input) => {
                             {dimensionAttributed.toLocaleString(undefined, { maximumFractionDigits: 2 })} of{" "}
                             {dimensionSourceOrders.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                           </span>{" "}
-                          source-attributed orders carry a {dimensionLabel} ID;{" "}
+                          source-attributed orders map to a platform {dimensionLabel};{" "}
                           <span className="font-semibold">
                             {dimensionUnmapped.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                           </span>{" "}
-                          remain source-known but {dimensionLabel}-unmapped.
+                          remain source-known but platform-unmapped at this level.
                         </>
                       )}`,
     "source and dimension coverage explanation",
