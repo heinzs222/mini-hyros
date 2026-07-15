@@ -81,18 +81,16 @@ def resolve_attribution_dimensions(
     """Canonicalize attribution rows against the selected spend breakdown.
 
     A match is accepted only when the platform plus normalized ID/display-name
-    alias identifies exactly one spend entity. Existing non-empty canonical IDs
-    are preserved unless they themselves uniquely resolve to a platform row.
+    alias identifies exactly one spend entity. Existing non-empty aliases remain
+    visible when no unique platform match exists, but are marked unmatched so the
+    coverage diagnostic does not pretend they are joined to spend.
     """
 
     field = _DIMENSION_FIELD.get(active_tab, "")
-    if not field or not spend_rows or not attrib_rows:
+    if not field or not attrib_rows:
         return [dict(row) for row in attrib_rows]
 
     alias_map = _unique_alias_map(spend_rows, id_field=field)
-    if not alias_map:
-        return [dict(row) for row in attrib_rows]
-
     resolved: list[dict[str, Any]] = []
     for raw in attrib_rows:
         row = dict(raw)
@@ -130,6 +128,11 @@ def resolve_attribution_dimensions(
                 row["adset_id"] = canonical["adset_id"] or row.get("adset_id", "")
             if active_tab == "ad":
                 row["ad_id"] = canonical["ad_id"] or row.get("ad_id", "")
+            row["_dimension_resolution"] = "matched"
+        elif alias:
+            row["_dimension_resolution"] = "unmatched"
+        else:
+            row["_dimension_resolution"] = "missing"
 
         resolved.append(row)
     return resolved
@@ -140,34 +143,48 @@ def build_dimension_coverage(
     *,
     active_tab: str,
 ) -> dict[str, Any]:
-    """Describe how much source-attributed value carries the selected dimension."""
+    """Describe identifier capture and deterministic mapping for one dimension."""
 
     field = _DIMENSION_FIELD.get(active_tab, "")
     source_orders = sum(to_float(row.get("orders")) for row in attrib_rows)
     source_revenue = sum(to_float(row.get("revenue")) for row in attrib_rows)
 
     if active_tab == "traffic_source":
-        mapped_rows = [
+        identifier_rows = [
             row for row in attrib_rows
             if str(row.get("platform") or row.get("channel") or "").strip()
         ]
+        mapped_rows = identifier_rows
     elif field:
-        mapped_rows = [row for row in attrib_rows if str(row.get(field) or "").strip()]
+        identifier_rows = [row for row in attrib_rows if str(row.get(field) or "").strip()]
+        mapped_rows = [
+            row for row in attrib_rows
+            if row.get("_dimension_resolution") == "matched"
+        ]
     else:
+        identifier_rows = []
         mapped_rows = []
 
+    identifier_orders = sum(to_float(row.get("orders")) for row in identifier_rows)
+    identifier_revenue = sum(to_float(row.get("revenue")) for row in identifier_rows)
     mapped_orders = sum(to_float(row.get("orders")) for row in mapped_rows)
     mapped_revenue = sum(to_float(row.get("revenue")) for row in mapped_rows)
     unmapped_orders = max(source_orders - mapped_orders, 0.0)
     unmapped_revenue = max(source_revenue - mapped_revenue, 0.0)
+    unmatched_identifier_orders = max(identifier_orders - mapped_orders, 0.0)
+    missing_identifier_orders = max(source_orders - identifier_orders, 0.0)
 
     rate = (mapped_orders / source_orders * 100.0) if source_orders else None
     return {
         "dimension": active_tab,
         "source_attributed_orders": round(source_orders, 2),
+        "dimension_identifier_orders": round(identifier_orders, 2),
         "dimension_attributed_orders": round(mapped_orders, 2),
+        "unmatched_identifier_orders": round(unmatched_identifier_orders, 2),
+        "missing_identifier_orders": round(missing_identifier_orders, 2),
         "unmapped_orders": round(unmapped_orders, 2),
         "source_attributed_revenue": round(source_revenue, 2),
+        "dimension_identifier_revenue": round(identifier_revenue, 2),
         "dimension_attributed_revenue": round(mapped_revenue, 2),
         "unmapped_revenue": round(unmapped_revenue, 2),
         "dimension_attribution_rate": round(rate, 2) if rate is not None else None,
