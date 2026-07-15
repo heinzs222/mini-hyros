@@ -24,16 +24,12 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run pytest with coverage
-        shell: bash
         run: |
-          set +e
           python -m pytest \
             --cov=attributionops --cov=backend \
             --cov-report=term-missing \
             --cov-report=xml \
-            --cov-fail-under=${{ env.COV_MIN }} 2>&1 | tee pytest-output.txt
-          status=${PIPESTATUS[0]}
-          exit "$status"
+            --cov-fail-under=${{ env.COV_MIN }}
         env:
           COV_MIN: "85"
 
@@ -42,9 +38,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: python-coverage
-          path: |
-            coverage.xml
-            pytest-output.txt
+          path: coverage.xml
 
   frontend-tests:
     name: Dashboard tests (Vitest)
