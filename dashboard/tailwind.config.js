@@ -36,6 +36,8 @@ module.exports = {
         coral: {
           DEFAULT: "#ff6b7a",
         },
+        positive: "#3ee0a1",
+        negative: "#ff6b7a",
       },
     },
   },

@@ -29,6 +29,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from attributionops.config import default_db_path
 from attributionops.report import ReportInputs, build_hyros_like_report
+from attributionops.report_integrity import resolve_attribution_dimensions
 from attributionops.schema import ensure_schema
 from attributionops.util import report_timezone, report_timezone_name, local_day_bounds_utc, normalize_campaign_key
 from attributionops.tools.ads import ads_get_spend, ads_get_reported_value, ads_list_platforms
@@ -118,6 +119,15 @@ async def lifespan(app: FastAPI):
     # Apply idempotent migrations (unique indexes, campaign_settings) to any
     # pre-existing database so read-time guarantees hold on older DBs too.
     ensure_schema(db)
+    # Warm the default dashboard windows into the report cache in the background
+    # so the first request after a (re)boot — exactly when a Render cold start
+    # already makes things feel slow — is served from cache instead of paying a
+    # full report build on top. Disable with REPORT_WARM_ON_BOOT=0.
+    if (
+        (os.environ.get("REPORT_WARM_ON_BOOT", "1").strip() or "1") != "0"
+        and _REPORT_CACHE_TTL > 0
+    ):
+        threading.Thread(target=_warm_default_reports, daemon=True, name="report-boot-warm").start()
     yield
 
 app = FastAPI(title="AttributionOps – Mini Hyros", version="0.1.0", lifespan=lifespan)
@@ -239,38 +249,81 @@ async def _report_slot():
         yield
 
 
-# ── Short-TTL report cache ───────────────────────────────────────────────────
+# ── Tiered-TTL report cache ──────────────────────────────────────────────────
 # Report assembly is the heaviest per-request work. The dashboard auto-refreshes
 # and multiple open tabs all request the same (start,end,model,tab,...) window,
 # so without a cache the backend rebuilds an identical report over and over,
 # which on a modest instance is exactly what makes the dashboard "load sometimes".
-# A small time-bounded cache serves those repeats instantly; it self-heals within
-# REPORT_CACHE_TTL seconds after new data is synced. Set REPORT_CACHE_TTL=0 to
-# disable.
+#
+# Two tiers:
+#  - Windows that INCLUDE today keep the short REPORT_CACHE_TTL (default 45s) —
+#    live numbers must refresh quickly.
+#  - Windows that END BEFORE today are historical: nothing changes them except a
+#    sync/backfill, so they cache for REPORT_CACHE_HISTORICAL_TTL (default 6h).
+# Every entry additionally stamps the SQLite file state (mtime/size of db + wal)
+# at build time; any write to the warehouse changes the stamp and instantly
+# invalidates stale entries, so the long tier can never serve pre-sync numbers.
 _REPORT_CACHE_TTL = float(os.environ.get("REPORT_CACHE_TTL", "45") or 0)
-_report_cache: dict[tuple, tuple[float, Any]] = {}
+_REPORT_CACHE_HISTORICAL_TTL = float(
+    os.environ.get("REPORT_CACHE_HISTORICAL_TTL", "21600") or 0
+)
+_report_cache: dict[tuple, tuple[float, float, tuple, Any]] = {}
 _report_cache_lock = threading.Lock()
 
 
-def _report_cache_get(key: tuple):
+def _db_write_stamp(db_path: str) -> tuple:
+    """Cheap fingerprint of the warehouse file state; changes on any write."""
+    stamp = []
+    for suffix in ("", "-wal"):
+        try:
+            st = os.stat(db_path + suffix)
+            stamp.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            stamp.append(None)
+    return tuple(stamp)
+
+
+def _cache_ttl_for_window(end_date: str) -> float:
+    try:
+        today = datetime.now(report_timezone()).date().isoformat()
+    except Exception:
+        return _REPORT_CACHE_TTL
+    if end_date and end_date < today:
+        return max(_REPORT_CACHE_HISTORICAL_TTL, _REPORT_CACHE_TTL)
+    return _REPORT_CACHE_TTL
+
+
+def _report_cache_get(key: tuple, db_path: str):
     if _REPORT_CACHE_TTL <= 0:
         return None
     with _report_cache_lock:
         hit = _report_cache.get(key)
-        if hit and (time.time() - hit[0]) < _REPORT_CACHE_TTL:
-            return hit[1]
-    return None
+    if not hit:
+        return None
+    put_at, ttl, stamp, value = hit
+    if (time.time() - put_at) >= ttl:
+        return None
+    if stamp != _db_write_stamp(db_path):
+        # Warehouse changed since this was built (sync/webhook/import) — drop it.
+        with _report_cache_lock:
+            _report_cache.pop(key, None)
+        return None
+    return value
 
 
-def _report_cache_put(key: tuple, value: Any) -> None:
+def _report_cache_put(key: tuple, value: Any, *, db_path: str, end_date: str) -> None:
     if _REPORT_CACHE_TTL <= 0:
         return
     now = time.time()
+    ttl = _cache_ttl_for_window(end_date)
+    stamp = _db_write_stamp(db_path)
     with _report_cache_lock:
-        _report_cache[key] = (now, value)
+        _report_cache[key] = (now, ttl, stamp, value)
         # Prune expired entries so the cache can't grow unbounded.
         if len(_report_cache) > 64:
-            for k in [k for k, v in _report_cache.items() if (now - v[0]) >= _REPORT_CACHE_TTL]:
+            for k in [
+                k for k, v in _report_cache.items() if (now - v[0]) >= v[1]
+            ]:
                 _report_cache.pop(k, None)
 
 
@@ -280,6 +333,46 @@ def _default_dates() -> tuple[str, str]:
     end = datetime.now(report_timezone()).date()
     start = end - timedelta(days=30)
     return start.isoformat(), end.isoformat()
+
+
+def _clamp_future_window(start_date: str, end_date: str) -> tuple[str, str, bool]:
+    """Clamp a future window down to "today" in the reporting timezone.
+
+    A dashboard that computed "Today" in a timezone ahead of the reporting zone
+    would otherwise request a window entirely in the server's future and
+    legitimately get zero rows — the report then looks mysteriously empty. The
+    returned flag lets the UI explain the adjustment instead of silently showing
+    nothing.
+    """
+    today_iso = datetime.now(report_timezone()).date().isoformat()
+    clamped = False
+    if start_date > today_iso:
+        start_date = today_iso
+        clamped = True
+    if end_date > today_iso:
+        end_date = today_iso
+        clamped = True
+    return start_date, end_date, clamped
+
+
+def _validate_date_order(start_date: str, end_date: str) -> None:
+    if start_date > end_date:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid date range: start_date {start_date} is after end_date {end_date}.",
+        )
+
+
+def _with_clamp_meta(report: Any, clamped: bool) -> Any:
+    """Stamp the clamp flag onto a shallow copy of the response.
+
+    The flag is per-request presentation state: the same cache entry serves both
+    a clamped future request and a genuine "today" request, so the cached object
+    itself must never carry the flag.
+    """
+    if not clamped:
+        return report
+    return {**report, "report_meta": {**report.get("report_meta", {}), "future_window_clamped": True}}
 
 
 def _report_currency() -> str:
@@ -358,29 +451,59 @@ def get_report(
     if not end_date:
         end_date = e
 
-    # Clamp a future window down to "today" in the reporting timezone. A dashboard
-    # that computed "Today" in a timezone ahead of the reporting zone would
-    # otherwise request a window entirely in the server's future and legitimately
-    # get zero rows — the report then looks mysteriously empty. The flag lets the
-    # UI explain the adjustment instead of silently showing nothing.
-    today_iso = datetime.now(report_timezone()).date().isoformat()
-    future_window_clamped = False
-    if start_date > today_iso:
-        start_date = today_iso
-        future_window_clamped = True
-    if end_date > today_iso:
-        end_date = today_iso
-        future_window_clamped = True
+    start_date, end_date, future_window_clamped = _clamp_future_window(start_date, end_date)
+    _validate_date_order(start_date, end_date)
 
     cache_key = (
         _db(), start_date, end_date, model, lookback_days, active_tab,
         str(conversion_type or "").lower(), bool(use_click_date),
     )
     if not no_cache:
-        cached = _report_cache_get(cache_key)
+        cached = _report_cache_get(cache_key, _db())
         if cached is not None:
-            return cached
+            return _with_clamp_meta(cached, future_window_clamped)
 
+    report = _build_report_payload(
+        start_date=start_date,
+        end_date=end_date,
+        model=model,
+        lookback_days=lookback_days,
+        active_tab=active_tab,
+        conversion_type=conversion_type,
+        use_click_date=use_click_date,
+    )
+
+    _report_cache_put(cache_key, report, db_path=_db(), end_date=end_date)
+    _kick_sibling_tab_prewarm(
+        start_date=start_date,
+        end_date=end_date,
+        model=model,
+        lookback_days=lookback_days,
+        active_tab=active_tab,
+        conversion_type=conversion_type,
+        use_click_date=use_click_date,
+    )
+    # The clamp flag decorates a per-request copy AFTER the cache write: the
+    # cached object is shared across requests whose clamp state differs.
+    return _with_clamp_meta(report, future_window_clamped)
+
+
+def _build_report_payload(
+    *,
+    start_date: str,
+    end_date: str,
+    model: str,
+    lookback_days: int,
+    active_tab: str,
+    conversion_type: str,
+    use_click_date: bool,
+) -> dict:
+    """Build the full report response (engine + name/thumbnail resolution).
+
+    Shared by the /api/report endpoint, the boot-time cache warmer, and the
+    sibling-tab prewarm so all three produce byte-identical cache entries.
+    """
+    build_started = time.time()
     inputs = ReportInputs(
         report_name="Mini Hyros Report",
         start_date=start_date,
@@ -445,11 +568,102 @@ def get_report(
             row["creative_type"] = creative.get("creative_type", "")
             row["video_id"] = creative.get("video_id", "")
 
-    if future_window_clamped:
-        report.setdefault("report_meta", {})["future_window_clamped"] = True
-
-    _report_cache_put(cache_key, report)
+    # Production diagnosability: how long THIS build took, visible in the JSON
+    # payload (report_meta.build_ms) and the server log — so "the dashboard is
+    # slow" can be split into build time vs network/cold-start without guessing.
+    build_ms = int((time.time() - build_started) * 1000)
+    report.setdefault("report_meta", {})["build_ms"] = build_ms
+    logging.getLogger("vigil.report").info(
+        "report build %dms window=%s..%s tab=%s model=%s", build_ms, start_date, end_date, active_tab, model,
+    )
     return report
+
+
+# ── Cache warming ─────────────────────────────────────────────────────────────
+# One background thread at a time; tracks in-flight keys so a burst of requests
+# can't stack duplicate prewarm builds behind the semaphore-protected foreground.
+_prewarm_lock = threading.Lock()
+_prewarm_inflight: set[tuple] = set()
+_REPORT_PREWARM = (os.environ.get("REPORT_PREWARM_TABS", "1").strip() or "1") != "0"
+
+
+def _warm_report_into_cache(
+    *, start_date: str, end_date: str, model: str, lookback_days: int,
+    active_tab: str, conversion_type: str, use_click_date: bool,
+) -> None:
+    if _REPORT_CACHE_TTL <= 0:
+        return
+    key = (
+        _db(), start_date, end_date, model, lookback_days, active_tab,
+        str(conversion_type or "").lower(), bool(use_click_date),
+    )
+    with _prewarm_lock:
+        if key in _prewarm_inflight:
+            return
+        _prewarm_inflight.add(key)
+    try:
+        if _report_cache_get(key, _db()) is not None:
+            return
+        report = _build_report_payload(
+            start_date=start_date, end_date=end_date, model=model,
+            lookback_days=lookback_days, active_tab=active_tab,
+            conversion_type=conversion_type, use_click_date=use_click_date,
+        )
+        _report_cache_put(key, report, db_path=_db(), end_date=end_date)
+    except Exception:
+        logging.getLogger("vigil.report").exception(
+            "cache warm failed for %s..%s tab=%s", start_date, end_date, active_tab,
+        )
+    finally:
+        with _prewarm_lock:
+            _prewarm_inflight.discard(key)
+
+
+def _kick_sibling_tab_prewarm(
+    *, start_date: str, end_date: str, model: str, lookback_days: int,
+    active_tab: str, conversion_type: str, use_click_date: bool,
+) -> None:
+    """After a foreground build, pre-build the tab the user most likely clicks
+    next (traffic_source <-> campaign) for the SAME window in the background, so
+    the first tab switch is a cache hit instead of a full rebuild. One sibling
+    only — deliberately conservative on small instances."""
+    if not _REPORT_PREWARM or _REPORT_CACHE_TTL <= 0:
+        return
+    sibling = "traffic_source" if active_tab != "traffic_source" else "campaign"
+    threading.Thread(
+        target=_warm_report_into_cache,
+        kwargs=dict(
+            start_date=start_date, end_date=end_date, model=model,
+            lookback_days=lookback_days, active_tab=sibling,
+            conversion_type=conversion_type, use_click_date=use_click_date,
+        ),
+        daemon=True,
+        name="report-prewarm",
+    ).start()
+
+
+def _warm_default_reports() -> None:
+    """Boot-time warm of the windows the dashboard requests first (last 7 days
+    ending yesterday, its previous-period comparison, and the 30-day preset).
+    These end before today, so they land in the long-TTL historical tier and
+    survive until the next sync. Runs in a daemon thread; failures only log."""
+    try:
+        today = datetime.now(report_timezone()).date()
+        d = lambda n: (today - timedelta(days=n)).isoformat()  # noqa: E731
+        windows = [
+            (d(7), d(1), "campaign"),
+            (d(7), d(1), "traffic_source"),
+            (d(14), d(8), "campaign"),
+            (d(30), d(1), "campaign"),
+        ]
+        for start, end, tab in windows:
+            _warm_report_into_cache(
+                start_date=start, end_date=end, model="last_click",
+                lookback_days=30, active_tab=tab,
+                conversion_type="Purchase", use_click_date=False,
+            )
+    except Exception:
+        logging.getLogger("vigil.report").exception("boot cache warm failed")
 
 
 @app.get("/api/report/children")
@@ -476,6 +690,11 @@ def get_report_children(
         start_date = s
     if not end_date:
         end_date = e
+
+    # Clamp exactly like get_report, so an expanded parent row (built from the
+    # clamped window) queries the same window instead of an empty future one.
+    start_date, end_date, _ = _clamp_future_window(start_date, end_date)
+    _validate_date_order(start_date, end_date)
 
     db_path = _db()
     ensure_campaign_settings_table(db_path)
@@ -648,6 +867,36 @@ def get_report_children(
         attrib_rows = attrib_result.get("rows", [])
     except Exception:
         attrib_rows = []
+
+    # Touchpoints may carry display-name aliases (e.g. GHL) while spend and
+    # the parent row IDs carry canonical numeric IDs. Canonicalize before
+    # filtering by parent_id segments, mirroring build_hyros_like_report —
+    # including its LIFETIME alias catalog, so parent and child rows agree on
+    # whether an alias maps. Kept outside the attribution try above, and
+    # falling back to the unresolved rows, so a spend-catalog failure cannot
+    # discard attribution data that is already in hand.
+    if attrib_rows:
+        try:
+            attrib_rows = resolve_attribution_dimensions(
+                ads_get_spend(
+                    db_path,
+                    platform="all",
+                    start_date=start_date,
+                    end_date=end_date,
+                    breakdown=child_tab,
+                )["rows"],
+                attrib_rows,
+                active_tab=child_tab,
+                alias_rows=ads_get_spend(
+                    db_path,
+                    platform="all",
+                    start_date="0000-01-01",
+                    end_date="9999-12-31",
+                    breakdown=child_tab,
+                )["rows"],
+            )
+        except Exception:
+            pass
 
     # Build attribution lookup by child key
     attrib_by_child: dict[str, dict[str, float]] = defaultdict(lambda: {

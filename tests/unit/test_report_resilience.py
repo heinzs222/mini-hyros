@@ -60,6 +60,36 @@ def test_order_query_failure_is_reported_not_silently_zeroed(empty_db):
     assert any(e["component"] == "orders" for e in errors)
     # Attribution-side metrics are computed independently and still populate.
     assert "summary_totals" in report
+    # Blended metrics fed by the zeroed order aggregates must read as unknown,
+    # not as convincing 0.0 ratios / profit == -cost.
+    summary = report["summary_totals"]
+    assert summary["mer"] is None
+    assert summary["blended_roas"] is None
+    assert summary["blended_profit"] is None
+
+
+def test_freshness_reflects_events_after_report_window(empty_db):
+    _seed_basic(empty_db)
+    # Tracking is still live after this historical window: the most recent
+    # session lands a month past the window end and must drive freshness even
+    # though the health check itself stays scoped to the window.
+    insert_rows(
+        empty_db,
+        "sessions",
+        [
+            {
+                "session_id": "s_recent",
+                "visitor_id": "",
+                "ts": "2026-03-01T09:00:00Z",
+                "gclid": "",
+                "fbclid": "",
+                "ttclid": "",
+                "customer_key": "c1",
+            }
+        ],
+    )
+    report = build_hyros_like_report(empty_db, _inputs())
+    assert report["diagnostics"]["data_freshness"]["last_event_ts"] == "2026-03-01T09:00:00Z"
 
 
 def test_leads_series_present_in_time_series(empty_db):

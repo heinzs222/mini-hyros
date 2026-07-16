@@ -38,6 +38,10 @@
   --yellow: #eab308;
   --blue: #22d3ee;
   --purple: #8b5cf6;
+  --positive: #3ee0a1;
+  --negative: #ff6b7a;
+  --positive-tint: rgba(62, 224, 161, 0.12);
+  --negative-tint: rgba(255, 107, 122, 0.12);
   --mint: #3ee0a1;
   --coral: #ff6b7a;
   --stripe: #635bff;
