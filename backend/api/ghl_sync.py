@@ -37,13 +37,17 @@ from attributionops.util import try_parse_iso_ts, utc_ts_to_local_date
 logger = logging.getLogger("ghl_sync")
 
 # Reuse the webhook write-helpers so GHL leads stitch to the same customer_key
-# (sha256 of email) as Stripe orders and the tracking pixel.
+# (sha256 of email, or the shared normalized-phone key) as Stripe orders and
+# the tracking pixel.
 from api.ghl import (
     _sha256,
     _iso_ts,
+    _lead_conversion_id,
+    _migrate_legacy_lead_conversion,
     _resolve_platform,
     _insert_conversion,
     _insert_touchpoint,
+    normalized_phone_key,
 )
 
 router = APIRouter()
@@ -474,7 +478,10 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
     now = _now()
     for c in contacts:
         email = _contact_email(c)
-        if not email:
+        # Phone-only contacts are a real lead segment; skip only when the
+        # contact carries NEITHER identity.
+        phone_key = normalized_phone_key(str(c.get("phone") or ""))
+        if not email and not phone_key:
             skipped += 1
             continue
         ts = _contact_ts(c, now)
@@ -482,14 +489,17 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
             skipped += 1
             continue
 
-        customer_key = _sha256(email)
+        customer_key = _sha256(email) if email else phone_key
         contact_id = str(c.get("id") or customer_key)
         src_infos = _src_infos_from_attribution(c)
         src_info = src_infos[-1]
 
         # Same canonical key as the webhook path so a lead captured by both the
-        # webhook and this sync is counted once, not twice.
-        conv_id = _sha256(f"ghl_lead|{contact_id}")
+        # webhook and this sync is counted once, not twice. Keyed per local day
+        # so a later-day re-engagement is a new Lead event; rows written under
+        # the older contact-only key are rekeyed in place first.
+        _migrate_legacy_lead_conversion(db_path, contact_id)
+        conv_id = _lead_conversion_id(contact_id, ts)
         _insert_conversion(db_path, conv_id, ts, LEAD_TYPE, 0.0, conv_id, customer_key)
 
         session_id = _sha256(f"ghl_api_session|{contact_id}")

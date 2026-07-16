@@ -14,8 +14,11 @@ the ``orders`` / ``conversions`` / ``touchpoints`` / ``sessions`` /
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
+
+from attributionops.util import utc_ts_to_local_date
 
 
 def _rows(db_path: str, sql: str, params=()):
@@ -117,6 +120,61 @@ def test_form_submission_creates_lead_session_touchpoint(client, api_db):
     assert _count(api_db, "touchpoints", "customer_key = ?", (ck,)) == 1
     # The form path logs to webhook_log.
     assert _count(api_db, "webhook_log", "source = 'ghl'") >= 1
+
+
+def test_form_submission_phone_only_creates_lead(client, api_db):
+    from api.ghl import normalized_phone_key
+
+    resp = client.post(
+        "/api/webhooks/ghl",
+        json={
+            "type": "FormSubmission",
+            "phone": "+1 (514) 555-0134",
+            "contact_id": "c-phone",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["action"] == "lead_tracked"
+    ck = body["customer_key"]
+    # Identity falls back to the shared normalized-phone key (same as the sync).
+    assert ck == normalized_phone_key("5145550134")
+    assert _count(api_db, "conversions", "customer_key = ? AND type = 'Lead'", (ck,)) == 1
+
+
+def test_form_submission_dedupes_same_day_but_counts_later_day_reengagement(client, api_db):
+    from api.ghl import _sha256 as ghl_sha256
+
+    # A legacy (contact-only-keyed) Lead row from an old deployment, dated in a
+    # past window.
+    legacy_id = ghl_sha256("ghl_lead|c-re")
+    with sqlite3.connect(api_db) as conn:
+        conn.execute(
+            "INSERT INTO conversions (conversion_id, ts, type, value, order_id, customer_key)"
+            " VALUES (?,?,?,?,?,?)",
+            (legacy_id, "2026-06-15T12:00:00Z", "Lead", "0", legacy_id,
+             ghl_sha256("re@example.com")),
+        )
+        conn.commit()
+
+    payload = {"type": "FormSubmission", "email": "re@example.com", "contact_id": "c-re"}
+    first = client.post("/api/webhooks/ghl", json=payload)
+    second = client.post("/api/webhooks/ghl", json=payload)  # same-day retry
+    assert first.status_code == 200 and second.status_code == 200
+
+    today_local = utc_ts_to_local_date(
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+    rows = _rows(
+        api_db,
+        "SELECT conversion_id FROM conversions WHERE type = 'Lead' ORDER BY ts",
+    )
+    # The legacy row is rekeyed to its own local day; today's re-engagement is a
+    # NEW Lead event; the retry dedupes against it.
+    assert [r["conversion_id"] for r in rows] == [
+        ghl_sha256("ghl_lead|c-re|2026-06-15"),
+        ghl_sha256(f"ghl_lead|c-re|{today_local}"),
+    ]
 
 
 # ── Appointment / booking ───────────────────────────────────────────────────────
@@ -284,7 +342,7 @@ def test_unknown_event_without_email_is_only_logged(client, api_db):
     assert resp.status_code == 200
     body = resp.json()
     assert body["action"] == "logged"
-    assert "no email found" in body["note"]
+    assert "no email or phone found" in body["note"]
     assert _count(api_db, "orders") == 0
     assert _count(api_db, "conversions") == 0
     # Still logged for debugging.

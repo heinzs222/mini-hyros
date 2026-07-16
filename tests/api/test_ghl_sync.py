@@ -8,6 +8,8 @@ hits the real network.
 
 from __future__ import annotations
 
+import sqlite3
+
 import respx
 from httpx import Response
 
@@ -21,10 +23,11 @@ GHL = "https://services.leadconnectorhq.com"
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 def _contact(cid, email, *, date_added="2026-06-15T12:00:00.000Z", utm_source="facebook",
-             utm_medium="paid_social", fbclid="", gclid=""):
+             utm_medium="paid_social", fbclid="", gclid="", phone=""):
     return {
         "id": cid,
         "email": email,
+        "phone": phone,
         "firstName": "Jane",
         "lastName": "Doe",
         "dateAdded": date_added,
@@ -189,6 +192,91 @@ def test_write_contacts_replaces_imported_attribution_history(api_db):
     assert touches[0]["gclid"] == "g-1"
     assert touches[1]["platform"] == "meta"
     assert touches[1]["fbclid"] == "f-1"
+
+
+def test_write_contacts_lead_key_is_per_local_day(api_db, monkeypatch):
+    # Reporting uses Hyros's fixed UTC-06 day boundary; 12:00Z is 06:00 local.
+    monkeypatch.setenv("REPORT_TIMEZONE", "Etc/GMT+6")
+    first = _contact("c1", "re@example.com", date_added="2026-06-15T12:00:00Z")
+    gs._write_contacts(api_db, [first], "2026-06-01", "2026-06-30")
+    # Re-running the same sync must not duplicate the same-day lead.
+    gs._write_contacts(api_db, [first], "2026-06-01", "2026-06-30")
+    # A later-day re-engagement is a NEW lead event for the same contact.
+    later = _contact("c1", "re@example.com", date_added="2026-06-20T12:00:00Z")
+    gs._write_contacts(api_db, [later], "2026-06-01", "2026-06-30")
+
+    rows = sql_rows(
+        api_db,
+        "SELECT conversion_id FROM conversions WHERE LOWER(type)='lead' ORDER BY ts",
+    )
+    assert [r["conversion_id"] for r in rows] == [
+        gs._sha256("ghl_lead|c1|2026-06-15"),
+        gs._sha256("ghl_lead|c1|2026-06-20"),
+    ]
+
+
+def test_write_contacts_migrates_legacy_lead_key_in_place(api_db, monkeypatch):
+    monkeypatch.setenv("REPORT_TIMEZONE", "Etc/GMT+6")
+    legacy_id = gs._sha256("ghl_lead|c1")
+    with sqlite3.connect(api_db) as conn:
+        conn.execute(
+            "INSERT INTO conversions (conversion_id, ts, type, value, order_id, customer_key)"
+            " VALUES (?,?,?,?,?,?)",
+            (legacy_id, "2026-06-15T12:00:00Z", "Lead", "0", legacy_id,
+             gs._sha256("re@example.com")),
+        )
+        conn.commit()
+
+    contact = _contact("c1", "re@example.com", date_added="2026-06-15T12:00:00Z")
+    stats = gs._write_contacts(api_db, [contact], "2026-06-01", "2026-06-30")
+    assert stats["leads"] == 1
+
+    rows = sql_rows(
+        api_db,
+        "SELECT conversion_id, order_id FROM conversions WHERE LOWER(type)='lead'",
+    )
+    # The legacy row is rekeyed (from its OWN ts), not duplicated.
+    assert rows == [{
+        "conversion_id": gs._sha256("ghl_lead|c1|2026-06-15"),
+        "order_id": gs._sha256("ghl_lead|c1|2026-06-15"),
+    }]
+
+
+def test_migrate_legacy_lead_key_deletes_duplicate_when_dated_exists(api_db, monkeypatch):
+    monkeypatch.setenv("REPORT_TIMEZONE", "Etc/GMT+6")
+    legacy_id = gs._sha256("ghl_lead|c1")
+    dated_id = gs._sha256("ghl_lead|c1|2026-06-15")
+    with sqlite3.connect(api_db) as conn:
+        for conv_id in (legacy_id, dated_id):
+            conn.execute(
+                "INSERT INTO conversions (conversion_id, ts, type, value, order_id, customer_key)"
+                " VALUES (?,?,?,?,?,?)",
+                (conv_id, "2026-06-15T12:00:00Z", "Lead", "0", conv_id,
+                 gs._sha256("re@example.com")),
+            )
+        conn.commit()
+
+    gs._migrate_legacy_lead_conversion(api_db, "c1")
+
+    rows = sql_rows(api_db, "SELECT conversion_id FROM conversions WHERE LOWER(type)='lead'")
+    assert [r["conversion_id"] for r in rows] == [dated_id]
+
+
+def test_write_contacts_phone_only_uses_normalized_phone_key(api_db):
+    contacts = [
+        _contact("c-phone", "", phone="+1 (514) 555-0134"),
+        _contact("c-none", ""),  # neither email nor phone -> skipped
+    ]
+    stats = gs._write_contacts(api_db, contacts, "2026-06-01", "2026-06-30")
+    assert stats["leads"] == 1
+    assert stats["skipped"] == 1
+
+    rows = sql_rows(api_db, "SELECT customer_key FROM conversions WHERE LOWER(type)='lead'")
+    assert [r["customer_key"] for r in rows] == [gs._sha256("phone:5145550134")]
+    # Formatting/country-code variants of the same phone hash identically.
+    assert gs.normalized_phone_key("514-555-0134") == gs._sha256("phone:5145550134")
+    assert gs.normalized_phone_key("15145550134") == gs._sha256("phone:5145550134")
+    assert gs.normalized_phone_key("") == ""
 
 
 def test_write_opportunities_won_creates_order(api_db):

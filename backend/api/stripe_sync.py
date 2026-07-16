@@ -598,6 +598,20 @@ def _infer_recurring_from_history(
     return bool(row)
 
 
+def _sale_group_window_seconds() -> int:
+    """Identity-window fallback for grouping same-buyer charges into one sale.
+
+    Hyros's real multi-line bundles spread up to ~11 minutes, so the default is
+    900s (a fixed 600s split 10/509 of the reference export's groups). Invoiced
+    charges never rely on this window.
+    """
+    raw = str(os.environ.get("STRIPE_SALE_GROUP_WINDOW_SECONDS", "900") or "900").strip()
+    try:
+        return max(0, min(int(raw), 86400))
+    except ValueError:
+        return 900
+
+
 def _sale_group_id(
     conn: sqlite3.Connection,
     *,
@@ -606,16 +620,25 @@ def _sale_group_id(
     customer_key: str,
     processor_customer_id: str,
     fingerprint: str,
+    invoice_id: str = "",
 ) -> str:
-    """Collapse same-buyer charges within the configured 10-minute window."""
+    """Collapse the charges of one checkout into a single sale group.
+
+    An invoice unambiguously identifies one checkout, so invoiced charges group
+    on it directly; bare charges fall back to same-buyer identity within the
+    configured time window.
+    """
+    if invoice_id:
+        return f"inv:{invoice_id}"
     identity_sql, identity_params = _matching_identity_sql(
         customer_key, processor_customer_id, fingerprint
     )
     if identity_sql == "0":
         return order_id
     current = parse_iso_ts(ts)
-    lower = (current - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    upper = (current + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    window = timedelta(seconds=_sale_group_window_seconds())
+    lower = (current - window).strftime("%Y-%m-%dT%H:%M:%SZ")
+    upper = (current + window).strftime("%Y-%m-%dT%H:%M:%SZ")
     row = conn.execute(
         f"""SELECT COALESCE(NULLIF(sale_group_id, ''), order_id) AS group_id
             FROM orders
@@ -773,6 +796,9 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
                 or charge.get("subscription")
                 or ""
             )
+            invoice_id = str(
+                (invoice.get("id") if isinstance(invoice, dict) else invoice) or ""
+            )
             product_key = _product_key(charge, amount_cents, currency)
             is_recurring = (
                 _explicit_recurring(charge)
@@ -803,6 +829,7 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
                 customer_key=customer_key,
                 processor_customer_id=processor_customer_id,
                 fingerprint=fingerprint,
+                invoice_id=invoice_id,
             )
             recurring += int(is_recurring)
 
@@ -827,6 +854,11 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
                 existed = conn.execute(
                     "SELECT 1 FROM refund_log WHERE id = ?", (refund_id,)
                 ).fetchone()
+                # The realtime webhook logs the same refund under a provisional
+                # "wh:" id; this upsert supersedes it — keep exactly one row.
+                conn.execute(
+                    "DELETE FROM refund_log WHERE id = ?", (f"wh:{refund_id}",)
+                )
                 conn.execute(
                     """INSERT INTO refund_log
                        (id, ts, order_id, customer_key, type, amount, reason, source)

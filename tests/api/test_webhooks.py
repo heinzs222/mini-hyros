@@ -247,6 +247,130 @@ def test_stripe_secret_set_with_signature_accepted(client, api_db, monkeypatch):
     assert len(_rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("stripe|ch_ok",))) == 1
 
 
+def _charge_refunded_event(charge_id, amount_refunded, refunds, event_id="evt_1"):
+    return {
+        "type": "charge.refunded",
+        "id": event_id,
+        "data": {
+            "object": {
+                "id": charge_id,
+                "amount": 10000,
+                "amount_refunded": amount_refunded,
+                "refunds": {"object": "list", "data": refunds, "has_more": False},
+            }
+        },
+    }
+
+
+def test_stripe_charge_refunded_sets_cumulative_refund_and_logs(client, api_db, monkeypatch):
+    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    # Seed the order via the normal payment flow ($100).
+    client.post("/api/webhooks/stripe", json={
+        "type": "charge.succeeded",
+        "data": {"object": {"id": "ch_ref", "receipt_email": "r@example.com", "amount": 10000}},
+    })
+
+    partial = _charge_refunded_event("ch_ref", 2500, [
+        {"id": "re_1", "amount": 2500, "created": 1767225600,
+         "status": "succeeded", "reason": "requested_by_customer"},
+    ])
+    resp = client.post("/api/webhooks/stripe", json=partial)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["order_id"] == "stripe|ch_ref"
+    assert body["refund_events"] == 1
+
+    o = _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("stripe|ch_ref",))[0]
+    assert float(o["refunds"]) == 25.0
+    assert float(o["net"]) == 75.0
+
+    # Redelivery is idempotent: amount_refunded is Stripe's cumulative total and
+    # is SET, never added; the ledger row dedupes on the refund id.
+    resp = client.post("/api/webhooks/stripe", json=partial)
+    assert resp.json()["refund_events"] == 0
+    o = _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("stripe|ch_ref",))[0]
+    assert float(o["refunds"]) == 25.0
+
+    logs = _rows(api_db, "SELECT * FROM refund_log WHERE order_id = ?", ("stripe|ch_ref",))
+    assert len(logs) == 1
+    assert logs[0]["id"] == "wh:re_1"
+    assert logs[0]["ts"] == "2026-01-01T00:00:00Z"
+    assert logs[0]["source"] == "stripe_webhook"
+    assert float(logs[0]["amount"]) == 25.0
+    assert logs[0]["customer_key"] == _sha256("r@example.com")
+
+    # A second partial refund raises the cumulative total to the full amount.
+    full = _charge_refunded_event("ch_ref", 10000, [
+        {"id": "re_1", "amount": 2500, "created": 1767225600, "status": "succeeded"},
+        {"id": "re_2", "amount": 7500, "created": 1767312000, "status": "succeeded"},
+    ], event_id="evt_2")
+    resp = client.post("/api/webhooks/stripe", json=full)
+    assert resp.json()["refund_events"] == 1
+    o = _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("stripe|ch_ref",))[0]
+    assert float(o["refunds"]) == 100.0
+    assert float(o["net"]) == 0.0
+    logs = _rows(api_db, "SELECT id FROM refund_log WHERE order_id = ? ORDER BY ts", ("stripe|ch_ref",))
+    assert [r["id"] for r in logs] == ["wh:re_1", "wh:re_2"]
+
+
+def test_stripe_charge_refunded_without_embedded_list_logs_delta(client, api_db, monkeypatch):
+    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    client.post("/api/webhooks/stripe", json={
+        "type": "charge.succeeded",
+        "data": {"object": {"id": "ch_bare", "receipt_email": "b@example.com", "amount": 4000}},
+    })
+    event = {
+        "type": "charge.refunded",
+        "id": "evt_bare",
+        "data": {"object": {"id": "ch_bare", "amount": 4000, "amount_refunded": 1500}},
+    }
+    resp = client.post("/api/webhooks/stripe", json=event)
+    assert resp.status_code == 200
+    assert resp.json()["refund_events"] == 1
+
+    o = _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("stripe|ch_bare",))[0]
+    assert float(o["refunds"]) == 15.0
+    logs = _rows(api_db, "SELECT * FROM refund_log WHERE order_id = ?", ("stripe|ch_bare",))
+    assert len(logs) == 1
+    assert logs[0]["id"] == "wh:evt_bare"
+    assert float(logs[0]["amount"]) == 15.0
+
+    # Replay: cumulative unchanged -> delta 0 -> nothing new logged.
+    resp = client.post("/api/webhooks/stripe", json=event)
+    assert resp.json()["refund_events"] == 0
+    assert len(_rows(api_db, "SELECT * FROM refund_log WHERE order_id = ?", ("stripe|ch_bare",))) == 1
+
+
+def test_stripe_refund_created_logs_without_touching_order_total(client, api_db, monkeypatch):
+    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    client.post("/api/webhooks/stripe", json={
+        "type": "charge.succeeded",
+        "data": {"object": {"id": "ch_rc", "receipt_email": "rc@example.com", "amount": 2000}},
+    })
+    event = {
+        "type": "refund.created",
+        "id": "evt_rc",
+        "data": {"object": {
+            "id": "re_rc1", "charge": "ch_rc", "amount": 1000,
+            "created": 1767225600, "status": "succeeded", "reason": "duplicate",
+        }},
+    }
+    resp = client.post("/api/webhooks/stripe", json=event)
+    assert resp.status_code == 200
+    assert resp.json()["refund_events"] == 1
+
+    logs = _rows(api_db, "SELECT * FROM refund_log WHERE order_id = ?", ("stripe|ch_rc",))
+    assert len(logs) == 1
+    assert logs[0]["id"] == "wh:re_rc1"
+    assert float(logs[0]["amount"]) == 10.0
+    assert logs[0]["reason"] == "duplicate"
+    # A bare Refund object has no cumulative total; the paired charge.refunded
+    # event carries it, so the order row is left untouched here.
+    o = _rows(api_db, "SELECT * FROM orders WHERE order_id = ?", ("stripe|ch_rc",))[0]
+    assert float(o["refunds"]) == 0.0
+
+
 # ── /track ─────────────────────────────────────────────────────────────────────
 
 def test_track_pageview_writes_session_and_touchpoint(client, api_db):
@@ -306,6 +430,26 @@ def test_track_tiktok_h_ad_id_maps_to_campaign(client, api_db):
     assert tp["channel"] == "paid_social"
     # for tiktok, h_ad_id -> campaign_id
     assert tp["campaign_id"] == "hh-123"
+
+
+def test_track_gbraid_classifies_google_paid(client, api_db):
+    # gbraid arrives with no gclid/utm_source (iOS consented tracking) and must
+    # still classify as Google paid.
+    payload = {"session_id": "sess-track-gbraid", "gbraid": "gb-123"}
+    resp = client.post("/api/webhooks/track", json=payload)
+    assert resp.status_code == 200
+    tp = _rows(api_db, "SELECT * FROM touchpoints WHERE session_id = ?", ("sess-track-gbraid",))[0]
+    assert tp["platform"] == "google"
+    assert tp["channel"] == "paid_search"
+
+
+def test_track_wbraid_classifies_google_paid(client, api_db):
+    payload = {"session_id": "sess-track-wbraid", "wbraid": "wb-123"}
+    resp = client.post("/api/webhooks/track", json=payload)
+    assert resp.status_code == 200
+    tp = _rows(api_db, "SELECT * FROM touchpoints WHERE session_id = ?", ("sess-track-wbraid",))[0]
+    assert tp["platform"] == "google"
+    assert tp["channel"] == "paid_search"
 
 
 def test_track_email_medium_channel(client, api_db):
@@ -655,6 +799,38 @@ def test_conversion_google_h_ad_id_maps_to_ad_id(client, api_db, monkeypatch):
     assert tp["platform"] == "google"
     assert tp["channel"] == "paid_search"
     assert tp["ad_id"] == "g-hh"
+
+
+def test_conversion_wbraid_classifies_google_paid(client, api_db, monkeypatch):
+    monkeypatch.delenv("STAPE_ENDPOINT", raising=False)
+    payload = {
+        "order_id": "conv-wbraid",
+        "value": "0",
+        "type": "Lead",
+        "session_id": "s-wbraid",
+        "wbraid": "wb-1",
+    }
+    resp = client.post("/api/webhooks/conversion", json=payload)
+    assert resp.status_code == 200
+    tp = _rows(api_db, "SELECT * FROM touchpoints WHERE session_id = ?", ("s-wbraid",))[0]
+    assert tp["platform"] == "google"
+    assert tp["channel"] == "paid_search"
+
+
+def test_conversion_gbraid_classifies_google_paid(client, api_db, monkeypatch):
+    monkeypatch.delenv("STAPE_ENDPOINT", raising=False)
+    payload = {
+        "order_id": "conv-gbraid",
+        "value": "8",
+        "type": "Purchase",
+        "session_id": "s-gbraid",
+        "gbraid": "gb-1",
+    }
+    resp = client.post("/api/webhooks/conversion", json=payload)
+    assert resp.status_code == 200
+    tp = _rows(api_db, "SELECT * FROM touchpoints WHERE session_id = ?", ("s-gbraid",))[0]
+    assert tp["platform"] == "google"
+    assert tp["channel"] == "paid_search"
 
 
 def test_conversion_lookup_customer_key_by_session_only(client, api_db, monkeypatch):

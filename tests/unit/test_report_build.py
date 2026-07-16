@@ -233,8 +233,15 @@ def test_report_matches_hyros_customer_and_net_cac_denominators(empty_db):
     assert totals["total_customers"] == 4  # refunded sale excluded
     assert totals["new_customers"] == 3
     assert totals["recurring_customers"] == 1
-    assert totals["unique_customers"] == 2  # distinct non-refunded Stripe customer ids
-    assert totals["cac"] == 50.0
+    # Distinct non-refunded buyers: cus-1, cus-2, plus the Stripe order without a
+    # customer id, which now falls back to its warehouse identity (email-4)
+    # instead of being dropped from the denominator.
+    assert totals["unique_customers"] == 3
+    # NET CAC = cost / first-ever buyers in window. All four buyer identities
+    # (email-1..email-4) make their first-ever purchase inside the window, so
+    # CAC = 100 / 4. (Validated HYROS semantics: denominator is net-new buyers,
+    # not distinct window buyers.)
+    assert totals["cac"] == 25.0
 
 
 def test_refunded_recurring_sale_stays_in_hyros_recurring_split(empty_db):

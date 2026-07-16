@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
@@ -117,6 +118,73 @@ def test_get_spend_ad_set_and_ad_use_metadata_names(spend_db):
 def test_get_spend_invalid_breakdown_raises(spend_db):
     with pytest.raises(ValueError, match="breakdown must be one of"):
         ads_get_spend(spend_db, platform="all", start_date=JAN, end_date=JAN_END, breakdown="nope")
+
+
+# ── read-time FX conversion ───────────────────────────────────────────────────
+@pytest.fixture
+def fx_spend_db(empty_db):
+    """Spend rows in mixed billing currencies on a migrated (currency-column) DB."""
+    with sqlite3.connect(empty_db) as conn:
+        conn.execute("ALTER TABLE spend ADD COLUMN currency TEXT DEFAULT ''")
+        conn.commit()
+    insert_rows(
+        empty_db,
+        "spend",
+        [
+            spend(date="2026-01-10", platform="meta", campaign_id="cmp_usd", adset_id="set_u",
+                  ad_id="ad_usd", clicks=10, cost=10, impressions=100, currency="USD"),
+            spend(date="2026-01-10", platform="meta", campaign_id="cmp_cad", adset_id="set_c",
+                  ad_id="ad_cad", clicks=5, cost=5, impressions=50, currency="CAD"),
+            spend(date="2026-01-10", platform="google", account_id="acc_google",
+                  campaign_id="cmp_eur", adset_id="set_e", ad_id="ad_eur",
+                  clicks=2, cost=4, impressions=20, currency="EUR"),
+            # No currency argument -> column default '' (unknown billing currency).
+            spend(date="2026-01-10", platform="tiktok", account_id="acc_tt",
+                  campaign_id="cmp_unknown", adset_id="set_t", ad_id="ad_tt",
+                  clicks=1, cost=2, impressions=10),
+        ],
+    )
+    return empty_db
+
+
+def test_get_spend_converts_foreign_currency_with_configured_rate(fx_spend_db, monkeypatch):
+    monkeypatch.delenv("REPORT_CURRENCY", raising=False)  # default: CAD
+    monkeypatch.setenv("SPEND_FX_RATES", "USD:1.40")
+
+    result = ads_get_spend(fx_spend_db, platform="meta", start_date=JAN, end_date=JAN_END, breakdown="campaign")
+    rows = _by_name(result)
+    assert rows["cmp_usd"]["cost"] == 14.0  # 10 USD * 1.40 -> CAD
+    assert rows["cmp_cad"]["cost"] == 5.0   # already the report currency, untouched
+    assert result["report_currency"] == "CAD"
+    # spend_by_currency reports the RAW (pre-conversion) sums.
+    assert result["spend_by_currency"]["USD"] == {"cost": 10.0, "converted": True, "rate": 1.4}
+    assert result["spend_by_currency"]["CAD"] == {"cost": 5.0, "converted": False, "rate": None}
+
+
+def test_get_spend_missing_rate_stays_unconverted_and_is_surfaced(fx_spend_db, monkeypatch):
+    monkeypatch.delenv("REPORT_CURRENCY", raising=False)
+    monkeypatch.setenv("SPEND_FX_RATES", "USD:1.40")  # no EUR rate configured
+
+    result = ads_get_spend(fx_spend_db, platform="all", start_date=JAN, end_date=JAN_END, breakdown="platform")
+    rows = _by_name(result)
+    assert rows["google"]["cost"] == 4.0  # EUR spend left exactly as stored
+    assert rows["meta"]["cost"] == 19.0   # converted USD (14) + native CAD (5)
+    by_ccy = result["spend_by_currency"]
+    assert by_ccy["EUR"] == {"cost": 4.0, "converted": False, "rate": None}
+    # Rows with no stored currency are never converted either.
+    assert by_ccy[""] == {"cost": 2.0, "converted": False, "rate": None}
+
+
+def test_get_spend_survives_pre_currency_column_schema(spend_db, monkeypatch):
+    # spend_db's schema predates the currency column entirely: the SELECT must
+    # not crash, no conversion can apply, and totals stay byte-identical.
+    monkeypatch.setenv("SPEND_FX_RATES", "USD:1.40")
+    result = ads_get_spend(spend_db, platform="all", start_date=JAN, end_date=JAN_END, breakdown="platform")
+    rows = _by_name(result)
+    assert rows["meta"]["cost"] == 12.5
+    assert rows["google"]["cost"] == 3.0
+    assert set(result["spend_by_currency"]) == {""}
+    assert result["spend_by_currency"][""]["converted"] is False
 
 
 # ── reported value ────────────────────────────────────────────────────────────

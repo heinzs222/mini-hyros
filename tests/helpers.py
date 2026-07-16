@@ -136,8 +136,9 @@ def spend(
     cost: Any = "0",
     impressions: Any = "0",
     metadata: str = "{}",
+    currency: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    row = {
         "platform": platform,
         "date": date,
         "account_id": account_id,
@@ -150,6 +151,12 @@ def spend(
         "impressions": str(impressions),
         "metadata": metadata,
     }
+    # Only included when requested: the base schema predates the currency
+    # column, so unconditional inclusion would break inserts against databases
+    # that have not run the spend-table migration.
+    if currency is not None:
+        row["currency"] = str(currency)
+    return row
 
 
 def ad_name(

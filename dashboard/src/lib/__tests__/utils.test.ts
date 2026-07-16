@@ -170,11 +170,16 @@ describe("profitColor", () => {
 });
 
 describe("daysAgo", () => {
-  // daysAgo is anchored to "today" in the REPORTING timezone, not the machine's
-  // local zone — deriving the expectation from local Date math makes the test
-  // flake for the hours of the day when the two zones disagree on the date.
+  // daysAgo computes "today" in the REPORTING timezone (Etc/GMT+6 by default),
+  // not the machine's local zone. The expectation is derived INDEPENDENTLY via
+  // Intl (not via the same shiftIso/reportTodayIso helpers the implementation
+  // composes) so a regression in those helpers can't silently self-verify, and
+  // local-zone Date math can't make the test flake around midnight UTC.
   function expected(n: number): string {
-    return shiftIso(reportTodayIso(), -n);
+    const todayIso = new Intl.DateTimeFormat("en-CA", { timeZone: "Etc/GMT+6" }).format(new Date());
+    const d = new Date(`${todayIso}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() - n);
+    return d.toISOString().slice(0, 10);
   }
 
   it("returns a zero-padded YYYY-MM-DD string", () => {
