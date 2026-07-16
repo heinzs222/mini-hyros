@@ -91,8 +91,10 @@ def test_new_returning_and_lead_counts(metrics_db):
 
 def test_cac_cpl_cpa_are_distinct(metrics_db):
     st = build_hyros_like_report(metrics_db, _inputs())["summary_totals"]
-    # Hyros NET CAC = spend / distinct non-refunded customers = 600 / 3.
-    assert st["cac"] == pytest.approx(200.0)
+    # HYROS NET CAC = spend / FIRST-EVER buyers in window (c2, c3) = 600 / 2.
+    # (Validated against a HYROS export: cost / CAC equals the first-ever-buyer
+    # count exactly; returning buyers like c1 are excluded.)
+    assert st["cac"] == pytest.approx(300.0)
     # Cost per Lead = spend / leads = 600 / 4 = 150.
     assert st["cpl"] == pytest.approx(150.0)
     # CPA = spend / attributed orders = 600 / 3 = 200 — a different denominator.

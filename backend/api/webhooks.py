@@ -21,7 +21,7 @@ from fastapi import APIRouter, Request, HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect
-from attributionops.schema import ensure_order_semantics
+from attributionops.schema import ensure_order_semantics, ensure_refund_log
 
 router = APIRouter()
 logger = logging.getLogger("webhooks")
@@ -386,6 +386,91 @@ def _verify_stripe_signature(body: bytes, sig_header: str, secret: str, toleranc
     return hmac.compare_digest(expected, v1)
 
 
+def _apply_stripe_refund_event(db_path: str, payload: dict[str, Any], event_type: str) -> dict[str, Any]:
+    """Apply a charge.refunded / refund.created event to orders + refund_log.
+
+    ``charge.refunded`` carries the charge with ``amount_refunded`` as Stripe's
+    CUMULATIVE total, so the order's refunds column is SET (never added to) —
+    redeliveries and out-of-order partial refunds stay idempotent. A bare
+    ``refund.created`` carries only that refund's own amount, so it feeds the
+    refund_log ledger; the paired charge.refunded updates the order total.
+    """
+    data = payload.get("data", {}).get("object", {})
+    if event_type == "refund.created":
+        charge_id = str(data.get("charge") or "")
+        payment_intent = str(data.get("payment_intent") or "")
+        refund_objects: list[dict[str, Any]] = [data]
+        refunds_total = None
+    else:
+        charge_id = str(data.get("id") or "")
+        payment_intent = str(data.get("payment_intent") or "")
+        refunds_obj = data.get("refunds") or {}
+        refund_objects = (
+            [item for item in (refunds_obj.get("data") or []) if isinstance(item, dict)]
+            if isinstance(refunds_obj, dict)
+            else []
+        )
+        refunds_total = round(float(data.get("amount_refunded", 0) or 0) / 100.0, 2)
+
+    # Same canonical order id as the payment events and /api/stripe/sync.
+    order_id = _stripe_order_id(payment_intent, charge_id)
+    event_id = str(payload.get("id") or "")
+    now = _iso_ts(datetime.now(UTC))
+    logged = 0
+
+    with connect(db_path) as conn:
+        ensure_refund_log(conn)
+        row = conn.execute(
+            "SELECT customer_key, refunds FROM orders WHERE order_id = ?", (order_id,)
+        ).fetchone()
+        customer_key = str(row[0] or "") if row else ""
+        prior_refunds = float(row[1] or 0) if row else 0.0
+        if row is not None and refunds_total is not None:
+            conn.execute(
+                """UPDATE orders
+                   SET refunds = ?, net = CAST(CAST(gross AS REAL) - ? AS TEXT)
+                   WHERE order_id = ?""",
+                (str(refunds_total), refunds_total, order_id),
+            )
+
+        for refund in refund_objects:
+            refund_id = str(refund.get("id") or "").strip()
+            amount = round(float(refund.get("amount", 0) or 0) / 100.0, 2)
+            status = str(refund.get("status") or "").strip().lower()
+            if not refund_id or amount <= 0 or status not in {"", "succeeded"}:
+                continue
+            created = int(refund.get("created", 0) or 0)
+            refund_ts = _iso_ts(datetime.fromtimestamp(created, tz=UTC)) if created else now
+            # The backfill sync records the same refund under its raw Stripe id;
+            # don't create a second ledger row for it.
+            if conn.execute("SELECT 1 FROM refund_log WHERE id = ?", (refund_id,)).fetchone():
+                continue
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO refund_log
+                   (id, ts, order_id, customer_key, type, amount, reason, source)
+                   VALUES (?, ?, ?, ?, 'refund', ?, ?, 'stripe_webhook')""",
+                (f"wh:{refund_id}", refund_ts, order_id, customer_key,
+                 str(amount), str(refund.get("reason") or "")),
+            )
+            logged += int(bool(cur.rowcount and cur.rowcount > 0))
+
+        if not refund_objects and refunds_total is not None and event_id:
+            # Degenerate charge.refunded without an embedded refund list: log
+            # the newly refunded delta once, keyed on the event id.
+            delta = round(refunds_total - prior_refunds, 2)
+            if delta > 0:
+                cur = conn.execute(
+                    """INSERT OR IGNORE INTO refund_log
+                       (id, ts, order_id, customer_key, type, amount, reason, source)
+                       VALUES (?, ?, ?, ?, 'refund', ?, '', 'stripe_webhook')""",
+                    (f"wh:{event_id}", now, order_id, customer_key, str(delta)),
+                )
+                logged += int(bool(cur.rowcount and cur.rowcount > 0))
+        conn.commit()
+
+    return {"ok": True, "order_id": order_id, "event_type": event_type, "refund_events": logged}
+
+
 @router.post("/stripe")
 async def stripe_webhook(request: Request):
     """Receive Stripe checkout.session.completed or charge.succeeded webhook."""
@@ -401,6 +486,11 @@ async def stripe_webhook(request: Request):
 
     payload = json.loads(body)
     event_type = payload.get("type", "")
+
+    # Refund events arrive on their own types; without this branch a refund
+    # only reaches the warehouse on the next manual /api/stripe/sync.
+    if event_type in ("charge.refunded", "refund.created"):
+        return await anyio.to_thread.run_sync(_apply_stripe_refund_event, _db(), payload, event_type)
 
     if event_type not in ("checkout.session.completed", "charge.succeeded", "payment_intent.succeeded"):
         return {"ok": True, "skipped": True, "event_type": event_type}
@@ -489,6 +579,10 @@ async def track_event(request: Request):
     ttc_id = str(payload.get("ttc_id", ""))
     gc_id = str(payload.get("gc_id", ""))
     g_special_campaign = str(payload.get("g_special_campaign", ""))
+    # wbraid/gbraid are Google's consented-tracking click ids (iOS/app) — their
+    # presence marks a Google paid click even with no gclid or utm_source.
+    wbraid = str(payload.get("wbraid", ""))
+    gbraid = str(payload.get("gbraid", ""))
 
     platform = ""
     channel = "organic"
@@ -498,7 +592,7 @@ async def track_event(request: Request):
     elif detected_platform == "tiktok" or ttc_id or utm_source in ("tiktok", "tt"):
         platform = "tiktok"
         channel = "paid_social"
-    elif detected_platform == "google" or gc_id or g_special_campaign or utm_source in ("google", "gads"):
+    elif detected_platform == "google" or gc_id or g_special_campaign or wbraid or gbraid or utm_source in ("google", "gads"):
         platform = "google"
         channel = "paid_search"
     elif utm_medium == "email":
@@ -688,6 +782,10 @@ async def track_conversion(request: Request):
     ttc_id = str(payload.get("ttc_id", ""))
     gc_id = str(payload.get("gc_id", ""))
     g_special_campaign = str(payload.get("g_special_campaign", ""))
+    # wbraid/gbraid are Google's consented-tracking click ids (iOS/app) — their
+    # presence marks a Google paid click even with no gclid or utm_source.
+    wbraid = str(payload.get("wbraid", ""))
+    gbraid = str(payload.get("gbraid", ""))
 
     platform = ""
     channel = "organic"
@@ -697,7 +795,7 @@ async def track_conversion(request: Request):
     elif detected_platform == "tiktok" or ttc_id or utm_source in ("tiktok", "tt"):
         platform = "tiktok"
         channel = "paid_social"
-    elif detected_platform == "google" or gc_id or g_special_campaign or utm_source in ("google", "gads"):
+    elif detected_platform == "google" or gc_id or g_special_campaign or wbraid or gbraid or utm_source in ("google", "gads"):
         platform = "google"
         channel = "paid_search"
     elif utm_medium == "email":

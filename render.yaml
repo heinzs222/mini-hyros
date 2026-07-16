@@ -29,7 +29,7 @@ services:
       - key: META_AD_ACCOUNT_ID
         sync: false
       - key: META_INCLUDE_CAMPAIGN_ADJUSTMENTS
-        value: "false"
+        value: "true"
       - key: META_PIXEL_ID
         sync: false
       - key: GOOGLE_ADS_DEVELOPER_TOKEN
@@ -37,6 +37,16 @@ services:
       - key: GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS
         value: "true"
       - key: TIKTOK_ACCESS_TOKEN
+        sync: false
+      # Spend currency handling: rows are stored in each ad account's billing
+      # currency and converted into REPORT_CURRENCY at read time using
+      # SPEND_FX_RATES (e.g. "USD:1.40"). TikTok rows are stamped with
+      # TIKTOK_ACCOUNT_CURRENCY because its report API omits currency.
+      - key: REPORT_CURRENCY
+        value: CAD
+      - key: SPEND_FX_RATES
+        sync: false
+      - key: TIKTOK_ACCOUNT_CURRENCY
         sync: false
       - key: STRIPE_RECURRING_AMOUNT_KEYS
         value: "CAD:5000"

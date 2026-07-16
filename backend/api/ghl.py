@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows as db_query
 from attributionops.schema import ensure_order_semantics
+from attributionops.util import utc_ts_to_local_date
 
 router = APIRouter()
 logger = logging.getLogger("ghl")
@@ -177,6 +178,20 @@ def _extract_phone(payload: dict) -> str:
         contact = payload.get("contact", {}) or {}
         phone = contact.get("phone", "")
     return str(phone)
+
+
+def normalized_phone_key(phone: str) -> str:
+    """Stable customer_key for phone-only identities (no email on the contact).
+
+    Normalized before hashing — digits only, and an 11-digit number's leading
+    US/CA country "1" is dropped — so "+1 (514) 555-0134" and "5145550134"
+    resolve to the same identity across the webhook and API sync paths.
+    Returns "" when the phone carries no digits.
+    """
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return _sha256("phone:" + digits) if digits else ""
 
 
 def _iter_custom_fields(payload: dict):
@@ -438,6 +453,49 @@ def _insert_conversion(db_path: str, conv_id: str, ts: str, conv_type: str,
         conn.commit()
 
 
+def _lead_conversion_id(contact_id: str, ts: str) -> str:
+    """Dedup key for GHL Lead conversions, shared by the webhook and API sync.
+
+    Keyed per contact per local calendar day (reporting timezone): webhook
+    retries and syncs re-covering the same day dedupe, while a re-engagement on
+    a later day registers a NEW Lead — Hyros's CPL denominator counts touches,
+    not lifetime identities.
+    """
+    return _sha256(f"ghl_lead|{contact_id}|{utc_ts_to_local_date(ts)}")
+
+
+def _migrate_legacy_lead_conversion(db_path: str, contact_id: str) -> None:
+    """Rekey a pre-dated Lead row (``ghl_lead|{contact_id}``) to its dated form.
+
+    The dated key is derived from the legacy row's OWN ts so the original lead
+    event keeps its identity; if that dated row already exists the legacy
+    duplicate is deleted instead. Idempotent — safe on every sync/webhook.
+    """
+    legacy_id = _sha256(f"ghl_lead|{contact_id}")
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT ts FROM conversions WHERE conversion_id = ?", (legacy_id,)
+        ).fetchone()
+        if not row:
+            return
+        dated_id = _lead_conversion_id(contact_id, str(row[0] or ""))
+        exists = conn.execute(
+            "SELECT 1 FROM conversions WHERE conversion_id = ?", (dated_id,)
+        ).fetchone()
+        if exists:
+            conn.execute("DELETE FROM conversions WHERE conversion_id = ?", (legacy_id,))
+        else:
+            # Lead rows carry order_id == conversion_id; keep them in lockstep.
+            conn.execute(
+                """UPDATE conversions
+                   SET conversion_id = ?,
+                       order_id = CASE WHEN order_id = ? THEN ? ELSE order_id END
+                   WHERE conversion_id = ?""",
+                (dated_id, legacy_id, dated_id, legacy_id),
+            )
+        conn.commit()
+
+
 def _insert_order(db_path: str, order: dict[str, Any]) -> None:
     """Insert an order record."""
     _ensure_tracking_schema(db_path)
@@ -629,9 +687,11 @@ async def ghl_webhook(request: Request):
         event_type = _infer_event_type(payload)
 
     email = _extract_email(payload)
-    customer_key = _sha256(email) if email else ""
     name = _extract_name(payload)
     phone = _extract_phone(payload)
+    # Phone-only contacts are a real lead segment; fall back to the normalized
+    # phone identity instead of dropping them for lacking an email.
+    customer_key = _sha256(email) if email else normalized_phone_key(phone)
     now = _iso_ts(datetime.now(UTC))
     db_path = _db()
 
@@ -660,7 +720,7 @@ async def ghl_webhook(request: Request):
 
     # ── Contact events (identity stitching) ──────────────────────────────
     if event_type in GHL_CONTACT_EVENTS:
-        if email:
+        if customer_key:
             _backfill_customer_key(
                 db_path,
                 customer_key,
@@ -689,7 +749,10 @@ async def ghl_webhook(request: Request):
         )
         # Stable dedup key (no receive-time) shared with the GHL API sync, so a
         # webhook retry / the sync covering the same contact don't double-count.
-        conv_id = _sha256(f"ghl_lead|{contact_id}")
+        # Keyed per local day so a later-day re-engagement is a new Lead event;
+        # rows written under the older contact-only key are rekeyed in place.
+        _migrate_legacy_lead_conversion(db_path, contact_id)
+        conv_id = _lead_conversion_id(contact_id, now)
         session_id = identity["session_id"] or _sha256(f"ghl_session|{contact_id}|{now}")
 
         _backfill_customer_key(db_path, customer_key, visitor_id=visitor_id, session_id=session_id)
@@ -936,8 +999,8 @@ async def ghl_webhook(request: Request):
         result["value"] = value
         return result
 
-    # ── Unknown / other events → still try to record if we have email ─────
-    if email and customer_key:
+    # ── Unknown / other events → still try to record if we have an identity ─
+    if customer_key:
         # Even for unknown events, record as a touchpoint so data isn't lost
         session_id = identity["session_id"] or _sha256(f"ghl_unknown|{contact_id}|{now}")
         conv_id = _sha256(f"ghl_event|{contact_id}|{now}")
@@ -976,7 +1039,7 @@ async def ghl_webhook(request: Request):
         result["action"] = "lead_tracked_fallback"
     else:
         result["action"] = "logged"
-        result["note"] = f"Event type '{event_type}' received, no email found"
+        result["note"] = f"Event type '{event_type}' received, no email or phone found"
 
     # Log all webhooks for debugging
     try:

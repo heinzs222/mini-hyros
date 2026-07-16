@@ -194,6 +194,66 @@ def test_sync_does_not_downgrade_existing_recurring_order(
     assert row["is_recurring"] == 1
 
 
+def test_sync_groups_invoiced_charges_by_invoice_id(client, api_db, monkeypatch):
+    monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
+    base = 1735689600
+    ch1 = _charge("ch_inv_a", amount=1000, email="bundle@example.com", created=base)
+    ch2 = _charge("ch_inv_b", amount=2000, email="bundle@example.com", created=base + 7200)
+    ch1["invoice"] = {"id": "in_123"}
+    # Unexpanded invoices arrive as a bare id string; both forms must group.
+    ch2["invoice"] = "in_123"
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith="https://api.stripe.com/v1/charges").mock(
+            return_value=Response(200, json=_charges_page([ch1, ch2]))
+        )
+        body = client.post("/api/stripe/sync").json()
+
+    assert body["synced"] == 2
+    rows = sql_rows(api_db, "SELECT order_id, sale_group_id FROM orders ORDER BY order_id")
+    # An invoice is one checkout: charges 2h apart still form a single group,
+    # which the identity+time-window fallback could never produce.
+    assert {row["sale_group_id"] for row in rows} == {"inv:in_123"}
+
+
+def test_sale_group_time_window_defaults_to_900s(client, api_db, monkeypatch):
+    monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
+    monkeypatch.delenv("STRIPE_SALE_GROUP_WINDOW_SECONDS", raising=False)
+    base = 1735689600
+    payload = _charges_page([
+        _charge("ch_w1", amount=1000, email="w@example.com", created=base),
+        # 11 minutes later: beyond the old 600s window, inside the 900s default.
+        _charge("ch_w2", amount=2000, email="w@example.com", created=base + 660),
+    ])
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith="https://api.stripe.com/v1/charges").mock(
+            return_value=Response(200, json=payload)
+        )
+        client.post("/api/stripe/sync")
+
+    rows = sql_rows(api_db, "SELECT order_id, sale_group_id FROM orders ORDER BY order_id")
+    assert {row["sale_group_id"] for row in rows} == {"stripe|ch_w1"}
+
+
+def test_sale_group_time_window_env_override(client, api_db, monkeypatch):
+    monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
+    monkeypatch.setenv("STRIPE_SALE_GROUP_WINDOW_SECONDS", "600")
+    base = 1735689600
+    payload = _charges_page([
+        _charge("ch_w1", amount=1000, email="w@example.com", created=base),
+        _charge("ch_w2", amount=2000, email="w@example.com", created=base + 660),
+    ])
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith="https://api.stripe.com/v1/charges").mock(
+            return_value=Response(200, json=payload)
+        )
+        client.post("/api/stripe/sync")
+
+    rows = sql_rows(api_db, "SELECT order_id, sale_group_id FROM orders ORDER BY order_id")
+    # With the window narrowed back to 600s the same charges stay separate.
+    assert {row["sale_group_id"] for row in rows} == {"stripe|ch_w1", "stripe|ch_w2"}
+
+
 def test_sync_dedupes_on_second_run(client, api_db, monkeypatch):
     monkeypatch.setenv("STRIPE_API_SECRET_KEY", "sk_test_123")
     payload = _charges_page([_charge("ch_dup", amount=7000)])

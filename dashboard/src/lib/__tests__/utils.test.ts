@@ -173,7 +173,8 @@ describe("daysAgo", () => {
   // daysAgo is anchored to "today" in the REPORTING timezone, not the machine's
   // local zone — deriving the expectation from local Date math makes the test
   // flake for the hours of the day when the two zones disagree on the date.
-  // Pin both the clock and the zone so the expected dates are literal.
+  // Pin both the clock and the zone so the expected dates are literal constants
+  // that can't self-verify through the same helpers the implementation uses.
   const defaultTz = reportTimeZone();
   beforeEach(() => {
     vi.useFakeTimers();

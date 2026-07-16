@@ -1,10 +1,39 @@
 from __future__ import annotations
 
 import json
+import os
 
 from attributionops.db import query
 from attributionops.tools.campaign_filter import excluded_campaign_keys, is_excluded
 from attributionops.util import parse_json, to_float, to_int
+
+
+def report_currency() -> str:
+    """Currency every spend total is reported in (mirrors the backend's
+    REPORT_CURRENCY handling)."""
+    return str(os.environ.get("REPORT_CURRENCY", "CAD") or "").strip().upper() or "CAD"
+
+
+def spend_fx_rates() -> dict[str, float]:
+    """Parse SPEND_FX_RATES into a {source_currency: rate} map.
+
+    Format: ``"USD:1.40,EUR:1.55"`` — each rate is how many REPORT_CURRENCY
+    units one source-currency unit is worth. Malformed or non-positive entries
+    are skipped so a typo can never zero out spend.
+    """
+    rates: dict[str, float] = {}
+    for part in str(os.environ.get("SPEND_FX_RATES", "") or "").split(","):
+        code, sep, value = part.partition(":")
+        code = code.strip().upper()
+        if not sep or not code:
+            continue
+        try:
+            rate = float(value.strip())
+        except ValueError:
+            continue
+        if rate > 0:
+            rates[code] = rate
+    return rates
 
 
 def _traffic_source_for_platform(platform: str) -> tuple[str, str]:
@@ -39,12 +68,20 @@ def ads_get_spend(
         platform_filter = "AND platform = :platform"
         params["platform"] = platform
 
+    # Older warehouses predate the spend.currency column (added by the spend
+    # sync's schema evolution); select it defensively so reads never crash on a
+    # not-yet-migrated database.
+    spend_columns = {
+        str(r.get("name") or "") for r in query(db_path, "PRAGMA table_info(spend);").rows
+    }
+    currency_select = "currency" if "currency" in spend_columns else "'' AS currency"
+
     rows = query(
         db_path,
         f"""
         SELECT
           platform, date, account_id, campaign_id, adset_id, ad_id, creative_id,
-          clicks, cost, impressions, metadata
+          clicks, cost, impressions, metadata, {currency_select}
         FROM spend
         WHERE date BETWEEN :start_date AND :end_date
         {platform_filter}
@@ -56,6 +93,14 @@ def ads_get_spend(
     # aggregation, so excluded campaigns disappear from spend totals AND every
     # breakdown this serves (day/platform/campaign/etc.).
     excluded = excluded_campaign_keys(db_path)
+
+    # Read-time FX conversion: spend rows store raw platform-billing-currency
+    # cost. Rows whose currency is known and differs from REPORT_CURRENCY are
+    # converted with the configured SPEND_FX_RATES rate; currencies without a
+    # configured rate are left unconverted and surfaced via spend_by_currency.
+    report_ccy = report_currency()
+    fx_rates = spend_fx_rates()
+    spend_by_currency: dict[str, dict[str, object]] = {}
 
     agg: dict[tuple[str, ...], dict[str, object]] = {}
 
@@ -101,6 +146,15 @@ def ads_get_spend(
         cost = to_float(r.get("cost"))
         impressions = to_int(r.get("impressions"))
 
+        currency = str(r.get("currency") or "").strip().upper()
+        rate = fx_rates.get(currency) if currency and currency != report_ccy else None
+        bucket = spend_by_currency.setdefault(
+            currency, {"cost": 0.0, "converted": rate is not None, "rate": rate}
+        )
+        bucket["cost"] = float(bucket["cost"]) + cost
+        if rate is not None:
+            cost *= rate
+
         if key not in agg:
             agg[key] = {
                 "name": name,
@@ -138,7 +192,20 @@ def ads_get_spend(
         row["cost"] = float(f"{float(row['cost']):.2f}")
         row["metadata"] = json.dumps(row["metadata"], separators=(",", ":"))
 
-    return {"rows": out_rows, "breakdown": breakdown, "start_date": start_date, "end_date": end_date}
+    # Raw (pre-conversion) cost per stored currency, plus whether/at what rate
+    # each was converted into REPORT_CURRENCY — additive so sync/report layers
+    # can expose exactly what happened, including currencies missing a rate.
+    for bucket in spend_by_currency.values():
+        bucket["cost"] = float(f"{float(bucket['cost']):.2f}")
+
+    return {
+        "rows": out_rows,
+        "breakdown": breakdown,
+        "start_date": start_date,
+        "end_date": end_date,
+        "report_currency": report_ccy,
+        "spend_by_currency": spend_by_currency,
+    }
 
 
 def ads_get_reported_value(
