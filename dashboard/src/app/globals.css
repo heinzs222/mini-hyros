@@ -1,6 +1,7 @@
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
 @import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap");
 @import url("https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap");
 
 @tailwind base;
 @tailwind components;
@@ -8,20 +9,28 @@
 
 /*
  * Hyros-style design tokens.
- * Typeface: Inter. Primary text #CED0DD. KPI numerals: Inter 600, -0.6px tracking.
+ * Type system: Hanken Grotesk is the primary UI typeface (Inter + system-ui remain as
+ * fallbacks); JetBrains Mono renders ids, timestamps, emails, IPs and URLs. Primary text
+ * #B9BCC8, bright text #ECEEF4. KPI numerals: Hanken Grotesk 600, -0.6px tracking, tabular
+ * nums. Fraunces remains the serif display face for page titles (.h-title).
  */
 :root {
   --background: #08080b;
   --surface: #0e0e13;
   --surface-2: #15151c;
   --surface-3: #1b1b23;
-  --foreground: #ced0dd;
-  --foreground-bright: #e9eaf0;
-  --muted: #80838f;
-  --muted-2: #595c68;
+  --surface-modal: #0f0f14;
+  --surface-event: #14141b;
+  --surface-hover: #17171f;
+  --surface-head: #101017;
+  --foreground: #b9bcc8;
+  --foreground-bright: #eceef4;
+  --muted: #7e828f;
+  --muted-2: #565a67;
   --card: #0e0e13;
   --card-border: #1d1d27;
   --border-soft: rgba(255, 255, 255, 0.06);
+  --border-strong: #24242f;
   --accent: #8b5cf6;
   --accent-600: #7c3aed;
   --green: #22c55e;
@@ -33,6 +42,9 @@
   --negative: #ff6b7a;
   --positive-tint: rgba(62, 224, 161, 0.12);
   --negative-tint: rgba(255, 107, 122, 0.12);
+  --mint: #3ee0a1;
+  --coral: #ff6b7a;
+  --stripe: #635bff;
 }
 
 * {
@@ -51,7 +63,7 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Hyros KPI numerals: Inter 600, tight tracking. */
+/* Hyros KPI numerals: Hanken Grotesk 600, tight tracking. */
 .h-num {
   font-weight: 600;
   letter-spacing: -0.6px;

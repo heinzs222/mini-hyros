@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   cn,
   formatMoney,
@@ -170,27 +170,31 @@ describe("profitColor", () => {
 });
 
 describe("daysAgo", () => {
-  // daysAgo computes "today" in the REPORTING timezone (Etc/GMT+6 by default),
-  // not the machine's local zone. The expectation is derived INDEPENDENTLY via
-  // Intl (not via the same shiftIso/reportTodayIso helpers the implementation
-  // composes) so a regression in those helpers can't silently self-verify, and
-  // local-zone Date math can't make the test flake around midnight UTC.
-  function expected(n: number): string {
-    const todayIso = new Intl.DateTimeFormat("en-CA", { timeZone: "Etc/GMT+6" }).format(new Date());
-    const d = new Date(`${todayIso}T00:00:00Z`);
-    d.setUTCDate(d.getUTCDate() - n);
-    return d.toISOString().slice(0, 10);
-  }
+  // daysAgo is anchored to "today" in the REPORTING timezone, not the machine's
+  // local zone — deriving the expectation from local Date math makes the test
+  // flake for the hours of the day when the two zones disagree on the date.
+  // Pin both the clock and the zone so the expected dates are literal constants
+  // that can't self-verify through the same helpers the implementation uses.
+  const defaultTz = reportTimeZone();
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-15T12:00:00Z"));
+    setReportTimeZone("UTC");
+  });
+  afterEach(() => {
+    setReportTimeZone(defaultTz);
+    vi.useRealTimers();
+  });
 
   it("returns a zero-padded YYYY-MM-DD string", () => {
     const result = daysAgo(0);
     expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(result).toBe(expected(0));
+    expect(result).toBe("2026-03-15");
   });
 
   it("offsets backwards by the given number of days", () => {
-    expect(daysAgo(7)).toBe(expected(7));
-    expect(daysAgo(30)).toBe(expected(30));
+    expect(daysAgo(7)).toBe("2026-03-08");
+    expect(daysAgo(30)).toBe("2026-02-13");
   });
 
   it("produces an earlier date for a larger offset", () => {
