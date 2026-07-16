@@ -266,7 +266,7 @@ patchFile("src/components/ReportsView.tsx", (input) => {
                       capture a click for those sales, or a platform’s spend/clicks haven’t synced
                       yet — press <span className="font-semibold">Sync</span>, and confirm the
                       tracking script is firing on both your funnel and checkout pages.`,
-    `                      <span className="font-semibold">
+    `                      <span className="font-bold text-[#f0dfa0]">
                         Source coverage — {pct}% of orders matched to a source touchpoint.
                       </span>{" "}
                       {unattrOrders} of {total} order{total === 1 ? "" : "s"}
