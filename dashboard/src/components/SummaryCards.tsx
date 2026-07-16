@@ -171,9 +171,9 @@ function SummaryCards({ totals, compareTotals, compareLabel, showCompareBanner =
   const compareClicks = Number(compareTotals?.clicks ?? 0);
   const blendedRoas = totals.blended_roas ?? (cost > 0 ? Math.round((currentTrackedRevenue / cost) * 100) / 100 : null);
   const blendedCvr = totals.blended_cvr ?? (clicks > 0 ? Math.round((currentTrackedOrders / clicks) * 100000) / 1000 : null);
-  // Source AOV is the only value comparable to Hyros' source-filtered widget.
-  // Leave it unavailable when historical source links cannot be reconstructed.
-  const sourceAov = totals.source_aov ?? null;
+  // HYROS AOV = revenue over ALL sale groups (validated against a HYROS
+  // export); fall back to the old attribution-filtered value on stale payloads.
+  const sourceAov = (totals as any).all_orders_aov ?? totals.source_aov ?? null;
   const blendedProfit = totals.blended_profit ?? Math.round((currentTrackedRevenue - cost) * 100) / 100;
   const blendedCpa = totals.blended_cpa ?? (currentTrackedOrders > 0 ? Math.round((cost / currentTrackedOrders) * 100) / 100 : null);
   const mer = totals.mer ?? (cost > 0 ? Math.round((currentTrackedRevenue / cost) * 100) / 100 : null);

@@ -166,13 +166,16 @@ describe("profitColor", () => {
 });
 
 describe("daysAgo", () => {
+  // daysAgo computes "today" in the REPORTING timezone (Etc/GMT+6 by default),
+  // not the machine's local zone. Computing the expectation with a local-zone
+  // `new Date()` made this test flake for a few hours around midnight UTC when
+  // the two zones sit on different calendar days — so anchor the expectation in
+  // the same reporting zone via Intl, exactly as the implementation does.
   function expected(n: number): string {
-    const d = new Date();
-    d.setDate(d.getDate() - n);
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
+    const todayIso = new Intl.DateTimeFormat("en-CA", { timeZone: "Etc/GMT+6" }).format(new Date());
+    const d = new Date(`${todayIso}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() - n);
+    return d.toISOString().slice(0, 10);
   }
 
   it("returns a zero-padded YYYY-MM-DD string", () => {

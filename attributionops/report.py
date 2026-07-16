@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from attributionops.db import query
@@ -19,6 +19,7 @@ from attributionops.report_integrity import (
     visible_report_columns,
 )
 from attributionops.util import (
+    iso_ts,
     local_day_bounds_utc,
     normalize_campaign_key,
     report_timezone,
@@ -1151,6 +1152,95 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         new_customers = 0
         recurring_customers = 0
 
+    # Stage 1b — HYROS-parity sale-group metrics. HYROS's headline widgets count
+    # SALE GROUPS (one checkout event), not processor charges, and classify a
+    # charge whose (buyer identity, net amount) already occurred in the trailing
+    # 30 days as a subscription RENEWAL. Reverse-engineered and validated to the
+    # integer against a real HYROS account export (Jul 01–15 window):
+    #   New Customers = non-renewal sale groups          (236/236 exact)
+    #   Sales         = non-renewal AND non-refunded     (214/214 exact)
+    #   AOV           = revenue / ALL sale groups        (0.17% gap)
+    all_orders_sale_groups = 0
+    hyros_sales_count = 0
+    hyros_new_customers = 0
+    try:
+        window_groups: dict[str, dict[str, Any]] = {}
+        for row in order_rows:
+            gid = _order_group_id(row)
+            group = window_groups.setdefault(
+                gid, {"net": 0.0, "refunds": 0.0, "ts": "", "identity": _order_identity(row)}
+            )
+            group["net"] += to_float(row.get("net"))
+            group["refunds"] += to_float(row.get("refunds")) + to_float(row.get("chargebacks"))
+            row_ts = str(row.get("ts") or "")
+            if row_ts and (not group["ts"] or row_ts < group["ts"]):
+                group["ts"] = row_ts
+        all_orders_sale_groups = len(window_groups)
+
+        # Renewal lookback: sale groups from the 30 days before the window (35-day
+        # fetch buffer for safety) plus the window's own earlier groups.
+        history_rows: list[dict[str, Any]] = []
+        window_start_dt = try_parse_iso_ts(start_utc)
+        if window_start_dt is not None and window_groups:
+            history_start = iso_ts(window_start_dt - timedelta(days=35))
+            history_rows = query(
+                db_path,
+                """SELECT order_id, ts, net, customer_key, processor, processor_customer_id,
+                          payment_fingerprint,
+                          COALESCE(NULLIF(sale_group_id, ''), order_id) AS sale_group_id
+                   FROM orders
+                   WHERE ts >= :history_start AND ts < :start_utc""",
+                {"history_start": history_start, "start_utc": start_utc},
+            ).rows
+
+        history_groups: dict[str, dict[str, Any]] = {}
+        for row in history_rows:
+            gid = _order_group_id(row)
+            group = history_groups.setdefault(
+                gid, {"net": 0.0, "ts": "", "identity": _order_identity(row)}
+            )
+            group["net"] += to_float(row.get("net"))
+            row_ts = str(row.get("ts") or "")
+            if row_ts and (not group["ts"] or row_ts < group["ts"]):
+                group["ts"] = row_ts
+
+        # (identity, rounded net) -> sorted timestamps of every prior sale group.
+        prior_ts_by_key: dict[tuple[str, float], list[datetime]] = defaultdict(list)
+        for group in list(history_groups.values()) + list(window_groups.values()):
+            parsed = try_parse_iso_ts(group["ts"])
+            if parsed is None:
+                continue
+            prior_ts_by_key[(str(group["identity"]), round(float(group["net"]), 2))].append(parsed)
+        for ts_list in prior_ts_by_key.values():
+            ts_list.sort()
+
+        renewal_window = timedelta(days=30)
+        for group in window_groups.values():
+            group_ts = try_parse_iso_ts(group["ts"])
+            key = (str(group["identity"]), round(float(group["net"]), 2))
+            is_renewal = False
+            if group_ts is not None:
+                for prior in prior_ts_by_key.get(key, ()):
+                    if prior >= group_ts:
+                        break
+                    if group_ts - prior <= renewal_window:
+                        is_renewal = True
+                        break
+            if is_renewal:
+                continue
+            hyros_new_customers += 1
+            if float(group["refunds"]) <= 0:
+                hyros_sales_count += 1
+    except Exception as exc:
+        logger.exception(
+            "sale-group parity metrics failed for %s %s..%s",
+            db_path, inputs.start_date, inputs.end_date,
+        )
+        data_errors.append({"component": "sale_groups", "error": str(exc)})
+        all_orders_sale_groups = 0
+        hyros_sales_count = 0
+        hyros_new_customers = 0
+
     # Stage 2 — customer identity / net-new acquisition (needs a first-ever
     # identity scan and is more fragile). Isolated so a failure here can't wipe
     # the base aggregates that already succeeded in stage 1.
@@ -1163,10 +1253,12 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         for row in customer_order_rows:
             processor = str(row.get("processor") or "").strip().lower()
             processor_customer_id = str(row.get("processor_customer_id") or "").strip()
-            if processor == "stripe":
-                if processor_customer_id:
-                    acquisition_identities.add(f"stripe:{processor_customer_id}")
+            if processor == "stripe" and processor_customer_id:
+                acquisition_identities.add(f"stripe:{processor_customer_id}")
             else:
+                # Stripe charges without a Stripe customer id fall back to the
+                # warehouse identity (email hash / fingerprint) instead of being
+                # dropped from the denominator entirely.
                 identity = _order_identity(row)
                 if identity:
                     acquisition_identities.add(identity)
@@ -1285,9 +1377,12 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         data_errors.append({"component": "leads_net_new", "error": str(exc)})
         new_leads = 0
 
-    # Hyros labels this NET CAC but divides spend by distinct non-refunded
-    # processor customers in the selected window (not by raw sales).
-    net_cac = safe_div(total_cost, float(unique_customers)) if unique_customers else None
+    # HYROS's NET CAC divides spend by customers whose FIRST-EVER purchase falls
+    # in the window — validated to the decimal against a HYROS export (cost /
+    # CAC = 178 = exactly the first-ever-buyer count). net_new_customers already
+    # computes that; the old denominator (unique_customers) included returning
+    # buyers and understated CAC.
+    net_cac = safe_div(total_cost, float(net_new_customers)) if net_new_customers else None
     # Cost per Lead = ad spend / leads (distinct from CAC and CPA).
     cost_per_lead = safe_div(total_cost, float(leads_count)) if leads_count else None
 
@@ -1311,6 +1406,14 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     blended_cvr = safe_div(all_orders_count, total_clicks)
     blended_aov = safe_div(all_orders_revenue, all_orders_count) if all_orders_count else None
     grouped_aov = safe_div(all_orders_revenue, total_customers) if total_customers else None
+    # HYROS AOV = revenue over ALL sale groups (incl. refunded and renewals) —
+    # NOT the attribution-filtered source_aov, which inflated AOV ~31% by
+    # dropping unattributed checkouts from the denominator.
+    all_orders_aov = (
+        safe_div(all_orders_revenue, float(all_orders_sale_groups))
+        if all_orders_sale_groups
+        else None
+    )
     blended_profit = round_money(all_orders_revenue - total_cost - all_orders_cogs - all_orders_fees)
     blended_cpa = safe_div(total_cost, all_orders_count) if all_orders_count else None
 
@@ -1339,6 +1442,12 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         "tracked_orders": all_orders_count,
         "tracked_revenue": round_money(all_orders_revenue),
         "tracked_gross_revenue": round_money(all_orders_gross_revenue),
+        # HYROS-parity sale-group metrics (see Stage 1b): a "sale group" is one
+        # checkout event; renewals are 30-day (identity, amount) repeats.
+        "tracked_sale_groups": all_orders_sale_groups,
+        "hyros_sales_count": hyros_sales_count,
+        "hyros_new_customers": hyros_new_customers,
+        "all_orders_aov": round_money(all_orders_aov) if all_orders_aov is not None else None,
         "attributed_orders": attributed_orders,
         "attributed_sale_groups": attributed_sale_groups,
         "attributed_revenue": round_money(attributed_revenue),

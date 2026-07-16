@@ -145,15 +145,18 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
   const derived = useMemo(() => {
     const cost = num(sum.cost);
     const revenue = trackedRevenue(sum);
-    const orders = trackedOrders(sum);
+    // HYROS "Sales" = non-renewal, non-refunded sale groups (validated 214/214
+    // against a HYROS export); fall back to raw order count on older payloads.
+    const orders = num(sum.hyros_sales_count ?? trackedOrders(sum));
     const roas = sum.blended_roas ?? sum.roas ?? (cost > 0 ? revenue / cost : null);
-    // Hyros' AOV widget uses source-linked, deduplicated sales. Raw Stripe AOV
-    // is a different metric and must not be presented as a parity value.
-    const aov = sum.source_aov ?? null;
+    // HYROS AOV = revenue / ALL sale groups (incl. refunded + unattributed).
+    // The old source_aov (attribution-filtered) inflated AOV ~31%.
+    const aov = sum.all_orders_aov ?? sum.source_aov ?? null;
     const clicks = num(sum.clicks);
 
-    // New customers = net-new (first-time) buyers, distinct from Sales (order count).
-    const newCustomers = sum.new_customers != null ? num(sum.new_customers) : orders;
+    // HYROS "New Customers" = non-renewal sale groups, refunds included
+    // (validated 236/236 against a HYROS export).
+    const newCustomers = num(sum.hyros_new_customers ?? sum.new_customers ?? orders);
     // Leads come from lead/opt-in conversions; fall back to the funnel snapshot.
     const funnelLeads = (report?.funnels?.rows || []).reduce((a: number, r: any) => a + num(r.leads), 0);
     const leads = sum.leads != null ? num(sum.leads) : funnelLeads;
@@ -164,11 +167,11 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
 
     const cCost = csum ? num(csum.cost) : null;
     const cRevenue = csum ? trackedRevenue(csum) : null;
-    const cOrders = csum ? trackedOrders(csum) : null;
+    const cOrders = csum ? num(csum.hyros_sales_count ?? trackedOrders(csum)) : null;
     const cRoas = csum ? (csum.blended_roas ?? csum.roas ?? (cCost ? cRevenue! / cCost : null)) : null;
-    const cAov = csum ? (csum.source_aov ?? null) : null;
+    const cAov = csum ? (csum.all_orders_aov ?? csum.source_aov ?? null) : null;
     const cClicks = csum ? num(csum.clicks) : null;
-    const cNewCustomers = csum ? (csum.new_customers != null ? num(csum.new_customers) : cOrders) : null;
+    const cNewCustomers = csum ? num(csum.hyros_new_customers ?? csum.new_customers ?? cOrders ?? 0) : null;
     const cLeadsFunnel = (compareReport?.funnels?.rows || []).reduce((a: number, r: any) => a + num(r.leads), 0);
     const cLeads = csum ? (csum.leads != null ? num(csum.leads) : cLeadsFunnel) : null;
     const cCac = csum
