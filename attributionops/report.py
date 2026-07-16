@@ -1164,67 +1164,67 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     hyros_sales_count = 0
     hyros_new_customers = 0
     try:
+        def _charge_amount(row: dict[str, Any]) -> float:
+            # The renewal key matches on the CHARGED amount (gross of refunds):
+            # a refunded prior rebill still marks the next charge as a renewal.
+            # Validated: net-based matching over-counts new customers (241 vs
+            # HYROS's 236) precisely on refunded-rebill chains.
+            return round(to_float(row.get("gross")) or to_float(row.get("net")), 2)
+
         window_groups: dict[str, dict[str, Any]] = {}
         for row in order_rows:
             gid = _order_group_id(row)
             group = window_groups.setdefault(
-                gid, {"net": 0.0, "refunds": 0.0, "ts": "", "identity": _order_identity(row)}
+                gid,
+                {"refunds": 0.0, "ts": "", "identity": _order_identity(row), "amounts": set()},
             )
-            group["net"] += to_float(row.get("net"))
             group["refunds"] += to_float(row.get("refunds")) + to_float(row.get("chargebacks"))
+            group["amounts"].add(_charge_amount(row))
             row_ts = str(row.get("ts") or "")
             if row_ts and (not group["ts"] or row_ts < group["ts"]):
                 group["ts"] = row_ts
         all_orders_sale_groups = len(window_groups)
 
-        # Renewal lookback: sale groups from the 30 days before the window (35-day
-        # fetch buffer for safety) plus the window's own earlier groups.
+        # Renewal lookback: charges from the 30 days before the window (35-day
+        # fetch buffer for safety) plus the window's own earlier charges.
         history_rows: list[dict[str, Any]] = []
         window_start_dt = try_parse_iso_ts(start_utc)
         if window_start_dt is not None and window_groups:
             history_start = iso_ts(window_start_dt - timedelta(days=35))
             history_rows = query(
                 db_path,
-                """SELECT order_id, ts, net, customer_key, processor, processor_customer_id,
-                          payment_fingerprint,
+                """SELECT order_id, ts, gross, net, customer_key, processor,
+                          processor_customer_id, payment_fingerprint,
                           COALESCE(NULLIF(sale_group_id, ''), order_id) AS sale_group_id
                    FROM orders
                    WHERE ts >= :history_start AND ts < :start_utc""",
                 {"history_start": history_start, "start_utc": start_utc},
             ).rows
 
-        history_groups: dict[str, dict[str, Any]] = {}
-        for row in history_rows:
-            gid = _order_group_id(row)
-            group = history_groups.setdefault(
-                gid, {"net": 0.0, "ts": "", "identity": _order_identity(row)}
-            )
-            group["net"] += to_float(row.get("net"))
-            row_ts = str(row.get("ts") or "")
-            if row_ts and (not group["ts"] or row_ts < group["ts"]):
-                group["ts"] = row_ts
-
-        # (identity, rounded net) -> sorted timestamps of every prior sale group.
+        # (identity, charged amount) -> sorted timestamps of every prior CHARGE.
         prior_ts_by_key: dict[tuple[str, float], list[datetime]] = defaultdict(list)
-        for group in list(history_groups.values()) + list(window_groups.values()):
-            parsed = try_parse_iso_ts(group["ts"])
+        for row in list(history_rows) + list(order_rows):
+            parsed = try_parse_iso_ts(str(row.get("ts") or ""))
             if parsed is None:
                 continue
-            prior_ts_by_key[(str(group["identity"]), round(float(group["net"]), 2))].append(parsed)
+            prior_ts_by_key[(_order_identity(row), _charge_amount(row))].append(parsed)
         for ts_list in prior_ts_by_key.values():
             ts_list.sort()
 
         renewal_window = timedelta(days=30)
         for group in window_groups.values():
             group_ts = try_parse_iso_ts(group["ts"])
-            key = (str(group["identity"]), round(float(group["net"]), 2))
             is_renewal = False
             if group_ts is not None:
-                for prior in prior_ts_by_key.get(key, ()):
-                    if prior >= group_ts:
-                        break
-                    if group_ts - prior <= renewal_window:
-                        is_renewal = True
+                for amount in group["amounts"]:
+                    key = (str(group["identity"]), float(amount))
+                    for prior in prior_ts_by_key.get(key, ()):
+                        if prior >= group_ts:
+                            break
+                        if group_ts - prior <= renewal_window:
+                            is_renewal = True
+                            break
+                    if is_renewal:
                         break
             if is_renewal:
                 continue

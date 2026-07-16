@@ -89,6 +89,25 @@ def test_multi_charge_sale_group_counts_once(empty_db):
     assert s["all_orders_aov"] == 140.0
 
 
+def test_renewal_matches_charged_amount_even_when_prior_charge_was_refunded(empty_db):
+    insert_rows(
+        empty_db,
+        "orders",
+        [
+            # Prior rebill was fully refunded (net 0) — the CHARGED amount still
+            # marks the in-window same-amount charge as a renewal. Net-based
+            # matching would wrongly count it as a new customer.
+            order("o_prior", "2026-01-05T10:00:00Z", "cust_a", gross=99, net=0, refunds=99),
+            order("o_renew", "2026-01-15T10:00:00Z", "cust_a", gross=99, net=99),
+        ],
+    )
+    report = build_hyros_like_report(empty_db, _inputs())
+    s = report["summary_totals"]
+    assert s["tracked_sale_groups"] == 1
+    assert s["hyros_new_customers"] == 0
+    assert s["hyros_sales_count"] == 0
+
+
 def test_net_cac_divides_by_first_ever_buyers(empty_db):
     insert_rows(empty_db, "spend", [spend(date="2026-01-12", clicks=100, cost=300)])
     insert_rows(
