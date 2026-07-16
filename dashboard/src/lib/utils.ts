@@ -60,13 +60,26 @@ export function profitColor(value: number | null | undefined): string {
   return "text-ink-faint";
 }
 
+// Runtime override sourced from the backend's /api/health payload so an
+// ops-side REPORT_TIMEZONE change takes effect without a frontend rebuild.
+let reportTimeZoneOverride: string | null = null;
+
+/** Stores a runtime reporting-timezone override; invalid IANA names are ignored. */
+export function setReportTimeZone(tz: string) {
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: tz });
+    reportTimeZoneOverride = tz;
+  } catch {}
+}
+
 /**
  * The reporting timezone the backend buckets days into. Configure a deployment
  * via NEXT_PUBLIC_REPORT_TIMEZONE to match the backend's REPORT_TIMEZONE; both
- * default to Etc/GMT+6 (the Hyros parity offset).
+ * default to Etc/GMT+6 (the Hyros parity offset). A runtime override set from
+ * the backend's live value takes precedence over the build-time env.
  */
 export function reportTimeZone(): string {
-  return process.env.NEXT_PUBLIC_REPORT_TIMEZONE || "Etc/GMT+6";
+  return reportTimeZoneOverride || process.env.NEXT_PUBLIC_REPORT_TIMEZONE || "Etc/GMT+6";
 }
 
 /**

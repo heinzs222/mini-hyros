@@ -12,6 +12,8 @@ try:  # Python 3.9+
 except ImportError:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
+from attributionops.db import query
+
 
 UTC = timezone.utc
 
@@ -246,4 +248,33 @@ def exp_decay_weight(delta_days: float, half_life_days: float = 7.0) -> float:
         return 1.0
     lam = math.log(2.0) / half_life_days
     return math.exp(-lam * max(0.0, delta_days))
+
+
+# ── Warehouse schema helpers ─────────────────────────────────────────────────
+def table_columns(db_path: str, table: str) -> set[str]:
+    try:
+        return {str(r.get("name") or "") for r in query(db_path, f"PRAGMA table_info({table})").rows}
+    except Exception:
+        return set()
+
+
+def session_identity_agg_exprs(session_cols: set[str]) -> tuple[str, str]:
+    """SELECT expressions (visitor, customer) for the per-session identity subquery.
+
+    Each aggregate is guarded by actual column presence: on a warehouse whose
+    sessions table lacks one of these columns, hard-coding MAX(visitor_id)/
+    MAX(customer_key) makes SQLite raise "misuse of aggregate: MAX()" and crash
+    the whole query.
+    """
+    session_visitor_agg = (
+        "MAX(NULLIF(visitor_id, '')) AS visitor_id"
+        if "visitor_id" in session_cols
+        else "'' AS visitor_id"
+    )
+    session_customer_agg = (
+        "MAX(NULLIF(customer_key, '')) AS customer_key"
+        if "customer_key" in session_cols
+        else "'' AS customer_key"
+    )
+    return session_visitor_agg, session_customer_agg
 

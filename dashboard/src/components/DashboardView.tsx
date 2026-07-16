@@ -12,7 +12,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Image as ImageIcon } from "lucide-react";
+import { AlertTriangle, Image as ImageIcon } from "lucide-react";
 import { formatMoney, formatMoneyCompact, formatNumber, formatRatio } from "@/lib/utils";
 import KpiCard from "./KpiCard";
 
@@ -203,6 +203,7 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
       const dayCost = num(r.cost);
       const dayLeads = num((r as any).leads ?? 0);
       const dayNewCustomers = num((r as any).new_customers ?? 0);
+      const dayNetNewCustomers = num((r as any).net_new_customers ?? 0);
       return {
         date: r.date,
         label: shortAxisDate(r.date),
@@ -215,11 +216,12 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
         roas: num((r as any).blended_roas ?? r.roas ?? 0),
         aov: (r as any).source_aov == null ? null : num((r as any).source_aov),
         cpa: ord > 0 ? Math.round((dayCost / ord) * 100) / 100 : 0,
-        // Cost per Lead = spend / leads; NET CAC = spend / net-new customers.
-        // These are distinct from CPA (spend / orders) — plotting cpa on the CPL
-        // and CAC cards was the mislabeled-trend bug.
+        // Cost per Lead = spend / leads. NET CAC = spend / net_new_customers —
+        // the per-day deduplicated first-time buyer count, matching the headline
+        // net_cac denominator (new_customers counts non-recurring sales and
+        // would disagree with it). Both are distinct from CPA (spend / orders).
         cpl: dayLeads > 0 ? Math.round((dayCost / dayLeads) * 100) / 100 : null,
-        cac: dayNewCustomers > 0 ? Math.round((dayCost / dayNewCustomers) * 100) / 100 : null,
+        cac: dayNetNewCustomers > 0 ? Math.round((dayCost / dayNetNewCustomers) * 100) / 100 : null,
       };
     });
 
@@ -232,9 +234,19 @@ export default function DashboardView({ report, compareReport, currentRangeCapti
 
   if (!report) return null;
   const d = derived;
+  const dataErrors = report?.diagnostics?.data_errors || [];
 
   return (
     <div className="space-y-5">
+      {dataErrors.length > 0 && (
+        <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[13px] leading-relaxed text-amber-200">
+          <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" />
+          <div>
+            <span className="font-semibold">A data error occurred while building this report</span> — some
+            numbers may be missing or shown as zero. Check the backend logs.
+          </div>
+        </div>
+      )}
       {/* KPI cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-5">
         <KpiCard

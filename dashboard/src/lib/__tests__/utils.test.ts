@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   cn,
   formatMoney,
@@ -10,6 +10,10 @@ import {
   formatSeconds,
   profitColor,
   daysAgo,
+  shiftIso,
+  reportTimeZone,
+  setReportTimeZone,
+  reportTodayIso,
 } from "@/lib/utils";
 
 describe("cn", () => {
@@ -166,13 +170,11 @@ describe("profitColor", () => {
 });
 
 describe("daysAgo", () => {
+  // daysAgo is anchored to "today" in the REPORTING timezone, not the machine's
+  // local zone — deriving the expectation from local Date math makes the test
+  // flake for the hours of the day when the two zones disagree on the date.
   function expected(n: number): string {
-    const d = new Date();
-    d.setDate(d.getDate() - n);
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
+    return shiftIso(reportTodayIso(), -n);
   }
 
   it("returns a zero-padded YYYY-MM-DD string", () => {
@@ -188,5 +190,76 @@ describe("daysAgo", () => {
 
   it("produces an earlier date for a larger offset", () => {
     expect(daysAgo(10) < daysAgo(1)).toBe(true);
+  });
+});
+
+describe("shiftIso", () => {
+  it("shifts within a month", () => {
+    expect(shiftIso("2026-07-15", 1)).toBe("2026-07-16");
+    expect(shiftIso("2026-07-15", -7)).toBe("2026-07-08");
+    expect(shiftIso("2026-07-15", 0)).toBe("2026-07-15");
+  });
+
+  it("crosses month boundaries", () => {
+    expect(shiftIso("2026-01-31", 1)).toBe("2026-02-01");
+    expect(shiftIso("2026-03-01", -1)).toBe("2026-02-28");
+    // Leap year: Feb 2024 has 29 days.
+    expect(shiftIso("2024-02-28", 1)).toBe("2024-02-29");
+    expect(shiftIso("2024-03-01", -1)).toBe("2024-02-29");
+  });
+
+  it("crosses year boundaries", () => {
+    expect(shiftIso("2025-12-31", 1)).toBe("2026-01-01");
+    expect(shiftIso("2026-01-01", -1)).toBe("2025-12-31");
+    expect(shiftIso("2026-01-05", -7)).toBe("2025-12-29");
+  });
+
+  it("shifts exactly one calendar day across DST transitions", () => {
+    // US spring-forward (2026-03-08) and fall-back (2026-11-01) dates: local-time
+    // Date.setDate math can land on the same or a doubled day in a DST browser
+    // zone; UTC-anchored math must always move exactly one day.
+    expect(shiftIso("2026-03-08", 1)).toBe("2026-03-09");
+    expect(shiftIso("2026-03-09", -1)).toBe("2026-03-08");
+    expect(shiftIso("2026-10-31", 1)).toBe("2026-11-01");
+    expect(shiftIso("2026-11-01", -1)).toBe("2026-10-31");
+  });
+});
+
+describe("reportTimeZone / setReportTimeZone", () => {
+  // Captured before any test runs, so it is the env-configured default.
+  const defaultTz = reportTimeZone();
+
+  afterEach(() => {
+    setReportTimeZone(defaultTz);
+    vi.useRealTimers();
+  });
+
+  it("returns the env default when no override is set", () => {
+    expect(reportTimeZone()).toBe(defaultTz);
+  });
+
+  it("prefers a valid runtime override over the env default", () => {
+    setReportTimeZone("America/New_York");
+    expect(reportTimeZone()).toBe("America/New_York");
+  });
+
+  it("ignores invalid IANA names, keeping the previous value", () => {
+    setReportTimeZone("America/New_York");
+    setReportTimeZone("Not/A_Zone");
+    expect(reportTimeZone()).toBe("America/New_York");
+    setReportTimeZone("");
+    expect(reportTimeZone()).toBe("America/New_York");
+  });
+
+  it("reportTodayIso reflects the override", () => {
+    // Freeze the clock at a UTC instant where zones on opposite sides of the
+    // date line disagree on the calendar date. Etc/GMT+12 is UTC-12 and
+    // Etc/GMT-12 is UTC+12 (POSIX sign convention).
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T00:00:00Z"));
+    setReportTimeZone("Etc/GMT+12");
+    expect(reportTodayIso()).toBe("2026-07-14");
+    setReportTimeZone("Etc/GMT-12");
+    expect(reportTodayIso()).toBe("2026-07-15");
   });
 });

@@ -16,6 +16,8 @@ from attributionops.util import (
     local_day_start_utc,
     normalize_campaign_key,
     report_timezone,
+    session_identity_agg_exprs,
+    table_columns,
     to_float,
     try_parse_iso_ts,
 )
@@ -137,13 +139,6 @@ def _normalize_basis(date_basis: str) -> str:
     return date_basis
 
 
-def _table_columns(db_path: str, table: str) -> set[str]:
-    try:
-        return {str(r.get("name") or "") for r in query(db_path, f"PRAGMA table_info({table})").rows}
-    except Exception:
-        return set()
-
-
 def _identity_keys(row: dict[str, Any]) -> list[str]:
     keys: list[str] = []
     customer_key = str(row.get("customer_key") or "").strip()
@@ -224,7 +219,7 @@ def _load_orders_and_touchpoints(
     start_utc, orders_end_excl = local_day_bounds_utc(
         start_d.isoformat(), orders_end_d.isoformat()
     )
-    order_cols = _table_columns(db_path, "orders")
+    order_cols = table_columns(db_path, "orders")
     optional_order_cols = [
         "session_id",
         "visitor_id",
@@ -271,7 +266,7 @@ def _load_orders_and_touchpoints(
     )
     orders = apply_refunds_as_of(db_path, orders, refund_end_excl)
 
-    conversion_cols = _table_columns(db_path, "conversions")
+    conversion_cols = table_columns(db_path, "conversions")
     if orders and conversion_cols:
         conversion_select = ["order_id", "ts", "customer_key"]
         for col in ("session_id", "visitor_id"):
@@ -313,26 +308,14 @@ def _load_orders_and_touchpoints(
     # prior ad clicks. This mirrors HYROS-style stitching more closely than
     # requiring customer_key on every order.
     win_start = local_day_start_utc(start_d - timedelta(days=lookback_days))
-    touchpoint_cols = _table_columns(db_path, "touchpoints")
-    session_cols = _table_columns(db_path, "sessions")
+    touchpoint_cols = table_columns(db_path, "touchpoints")
+    session_cols = table_columns(db_path, "sessions")
     touchpoint_visitor_expr = (
         "COALESCE(NULLIF(t.visitor_id, ''), s.visitor_id, '') AS visitor_id"
         if "visitor_id" in touchpoint_cols
         else "COALESCE(s.visitor_id, '') AS visitor_id"
     )
-    # Guard the sessions aggregates by actual column presence: a sessions table
-    # missing visitor_id otherwise raises "misuse of aggregate: MAX()" and crashes
-    # the whole attribution run (mirrors the same fix in tools/tracking.py).
-    session_visitor_agg = (
-        "MAX(NULLIF(visitor_id, '')) AS visitor_id"
-        if "visitor_id" in session_cols
-        else "'' AS visitor_id"
-    )
-    session_customer_agg = (
-        "MAX(NULLIF(customer_key, '')) AS customer_key"
-        if "customer_key" in session_cols
-        else "'' AS customer_key"
-    )
+    session_visitor_agg, session_customer_agg = session_identity_agg_exprs(session_cols)
     touchpoints = query(
         db_path,
         f"""

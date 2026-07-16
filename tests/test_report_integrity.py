@@ -92,6 +92,102 @@ def test_ambiguous_campaign_name_is_not_guessed() -> None:
     assert coverage["unmapped_orders"] == 1
 
 
+def test_blank_ad_account_is_not_guessed_from_single_in_window_spender() -> None:
+    # The platform has two accounts historically, but only one spent in the
+    # selected window. An attribution row with no account id must stay
+    # unmapped rather than folding into whichever account happened to spend.
+    in_window_spend = [
+        {
+            "platform": "meta",
+            "account_id": "111",
+            "campaign_id": "100",
+            "adset_id": "",
+            "ad_id": "",
+            "name": "Active",
+        }
+    ]
+    lifetime_spend = in_window_spend + [
+        {
+            "platform": "meta",
+            "account_id": "222",
+            "campaign_id": "900",
+            "adset_id": "",
+            "ad_id": "",
+            "name": "Paused",
+        }
+    ]
+    attribution = [
+        {
+            "platform": "meta",
+            "account_id": "",
+            "orders": 2,
+            "revenue": 200,
+        }
+    ]
+
+    resolved = resolve_attribution_dimensions(
+        in_window_spend,
+        attribution,
+        active_tab="ad_account",
+        alias_rows=lifetime_spend,
+    )
+
+    assert resolved[0]["account_id"] == ""
+    assert resolved[0]["_dimension_resolution"] == "missing"
+    coverage = build_dimension_coverage(resolved, active_tab="ad_account")
+    assert coverage["dimension_attributed_orders"] == 0
+    assert coverage["unmapped_orders"] == 2
+
+
+def test_alias_unique_in_window_but_ambiguous_lifetime_stays_unmapped() -> None:
+    # Two historical campaigns share the display name; only one spent in the
+    # selected window. Resolution must be window-independent, so the alias
+    # stays unmapped instead of resolving to the in-window campaign.
+    in_window_spend = [
+        {
+            "platform": "meta",
+            "account_id": "1",
+            "campaign_id": "100",
+            "adset_id": "",
+            "ad_id": "",
+            "name": "Sales",
+        }
+    ]
+    lifetime_spend = in_window_spend + [
+        {
+            "platform": "meta",
+            "account_id": "1",
+            "campaign_id": "200",
+            "adset_id": "",
+            "ad_id": "",
+            "name": "Sales",
+        }
+    ]
+    attribution = [
+        {
+            "platform": "meta",
+            "account_id": "",
+            "campaign_id": "Sales",
+            "orders": 1,
+            "revenue": 100,
+        }
+    ]
+
+    resolved = resolve_attribution_dimensions(
+        in_window_spend,
+        attribution,
+        active_tab="campaign",
+        alias_rows=lifetime_spend,
+    )
+
+    assert resolved[0]["campaign_id"] == "Sales"
+    assert resolved[0]["account_id"] == ""
+    assert resolved[0]["_dimension_resolution"] == "unmatched"
+    coverage = build_dimension_coverage(resolved, active_tab="campaign")
+    assert coverage["dimension_attributed_orders"] == 0
+    assert coverage["unmapped_orders"] == 1
+
+
 def test_reported_columns_hide_without_reported_feed() -> None:
     columns = [
         {"key": "orders"},
