@@ -6,7 +6,7 @@ import ModelSelect, { modelLabel } from "./ModelSelect";
 import AttributionTable from "./AttributionTable";
 import PerformanceChart from "./PerformanceChart";
 import PlatformMixChart from "./PlatformMixChart";
-import { reportTodayIso } from "@/lib/utils";
+import { reportTodayIso, shiftIso } from "@/lib/utils";
 import {
   Megaphone,
   Copy,
@@ -81,11 +81,6 @@ function fmtPill(iso: string): string {
   const d = new Date(`${iso}T00:00:00`);
   return `${pad(d.getMonth() + 1)}.${pad(d.getDate())}`;
 }
-function addDaysIso(iso: string, n: number): string {
-  const d = new Date(`${iso}T00:00:00`);
-  d.setDate(d.getDate() + n);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
 function hashId(s: string): string {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
@@ -137,7 +132,7 @@ export default function ReportsView(props: Props) {
   const [openByDefault, setOpenByDefault] = useState(true);
   const [viewMode, setViewMode] = useState<"tabs" | "nested" | "chart">("tabs");
   const [search, setSearch] = useState("");
-  const [density, setDensity] = useState<"compact" | "comfortable">("compact");
+  const [density, setDensity] = useState<"compact" | "comfortable">("comfortable");
   const [showDensity, setShowDensity] = useState(false);
   const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set());
   const [showColumns, setShowColumns] = useState(false);
@@ -173,9 +168,9 @@ export default function ReportsView(props: Props) {
   const today = reportTodayIso();
   const quickPresets = [
     { label: "Today", range: { start: today, end: today } },
-    { label: "Yesterday", range: { start: addDaysIso(today, -1), end: addDaysIso(today, -1) } },
-    { label: "7 days", range: { start: addDaysIso(today, -7), end: addDaysIso(today, -1) } },
-    { label: "30 days", range: { start: addDaysIso(today, -30), end: addDaysIso(today, -1) } },
+    { label: "Yesterday", range: { start: shiftIso(today, -1), end: shiftIso(today, -1) } },
+    { label: "7 days", range: { start: shiftIso(today, -7), end: shiftIso(today, -1) } },
+    { label: "30 days", range: { start: shiftIso(today, -30), end: shiftIso(today, -1) } },
   ];
   const activePreset = quickPresets.find((p) => p.range.start === range.start && p.range.end === range.end)?.label;
 
@@ -367,24 +362,24 @@ export default function ReportsView(props: Props) {
               <ViewTab active={viewMode === "chart"} onClick={() => setViewMode("chart")} icon={<LineChart size={14} />} label="Chart" />
             </div>
             <div className="flex items-center gap-2">
-              <div className="flex h-8 items-center gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5">
-                <Search size={13} className="text-ink-faint" />
+              <div className="flex h-[34px] items-center gap-2 rounded-[9px] border border-[#20202b] bg-[#121219] px-3">
+                <Search size={13} className="text-[#797d8a]" />
                 <input
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search…"
-                  className="w-32 bg-transparent text-[12px] text-ink placeholder:text-ink-faint focus:outline-none"
+                  className="w-32 bg-transparent text-[12px] font-medium text-[#e8eaf1] placeholder:text-[#797d8a] focus:outline-none"
                 />
               </div>
               <div className="relative" ref={densityRef}>
                 <button
                   onClick={() => setShowDensity((s) => !s)}
-                  className="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim hover:text-ink"
+                  className="flex h-[34px] items-center gap-1.5 rounded-[9px] border border-[#20202b] bg-[#121219] px-3 text-[12px] font-medium text-[#9aa0ad] hover:text-[#e8eaf1]"
                 >
-                  Density: <span className="capitalize text-ink">{density}</span> <ChevronDown size={12} />
+                  Density: <span className="capitalize text-[#e8eaf1]">{density}</span> <ChevronDown size={12} />
                 </button>
                 {showDensity && (
-                  <div className="animate-hpop absolute right-0 z-30 mt-2 w-[160px] rounded-lg border border-[var(--card-border)] bg-[#0c0c11] p-1 shadow-2xl">
+                  <div className="animate-hpop absolute right-0 z-30 mt-2 w-[160px] rounded-lg border border-[#20202b] bg-[#121219] p-1 shadow-2xl">
                     {(["compact", "comfortable"] as const).map((d) => (
                       <button
                         key={d}
@@ -398,12 +393,12 @@ export default function ReportsView(props: Props) {
                   </div>
                 )}
               </div>
-              <button className="flex h-8 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim opacity-70" title="Column presets coming soon">
-                Preset: <span className="text-ink">Custom</span> <ChevronDown size={12} />
+              <button className="flex h-[34px] cursor-not-allowed items-center gap-1.5 rounded-[9px] border border-[#20202b] bg-[#121219] px-3 text-[12px] font-medium text-[#9aa0ad] opacity-70" title="Column presets coming soon">
+                Preset: <span className="text-[#e8eaf1]">Custom</span> <ChevronDown size={12} />
               </button>
               <button
                 onClick={() => setShowColumns(true)}
-                className="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim hover:text-ink hover:border-white/20"
+                className="flex h-[34px] items-center gap-1.5 rounded-[9px] border border-[#20202b] bg-[#121219] px-3 text-[12px] font-medium text-[#9aa0ad] hover:text-[#e8eaf1] hover:border-white/20"
               >
                 <Columns3 size={13} /> Columns
               </button>
@@ -412,18 +407,18 @@ export default function ReportsView(props: Props) {
 
           {/* Grouping breadcrumb tabs */}
           {viewMode !== "chart" && (
-            <div className="mb-3 flex items-center gap-1 overflow-x-auto rounded-xl border border-[var(--card-border)] bg-[var(--surface)] p-1">
+            <div className="mb-3 inline-flex items-center gap-[3px] overflow-x-auto rounded-[12px] border border-[#20202b] bg-[#121219] p-1">
               {GROUP_TABS.map((t) => {
                 const active = activeTab === t.key;
                 return (
                   <button
                     key={t.key}
                     onClick={() => { onTabChange(t.key); onPlatformFilterChange("all"); }}
-                    className={`flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${
-                      active ? "bg-white/[0.06] text-ink-bright" : "text-ink-dim hover:text-ink"
+                    className={`flex items-center justify-center gap-2 whitespace-nowrap rounded-[9px] px-[15px] py-2 text-[13px] transition-colors ${
+                      active ? "bg-white/[0.07] font-semibold text-[#e8eaf1]" : "font-medium text-[#797d8a] hover:text-ink"
                     }`}
                   >
-                    <span className={active ? "text-brand-400" : "text-ink-faint"}>{t.icon}</span>
+                    {active && <span className="h-[6px] w-[6px] flex-shrink-0 rounded-full bg-[#8b5cf6]" />}
                     {t.label}
                   </button>
                 );
@@ -504,10 +499,10 @@ export default function ReportsView(props: Props) {
                 const money = (v: number) =>
                   `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
                 return (
-                  <div className="mb-3 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[13px] leading-relaxed text-amber-200">
-                    <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" />
+                  <div className="mb-3 flex items-center gap-2.5 rounded-[11px] border border-[rgba(234,179,8,0.16)] bg-[rgba(234,179,8,0.07)] px-[13px] py-2.5 text-[12px] leading-relaxed text-[#e2cd8f]">
+                    <AlertTriangle size={15} className="flex-shrink-0 text-[#e3b341]" />
                     <div>
-                      <span className="font-semibold">
+                      <span className="font-bold text-[#f0dfa0]">
                         Source coverage — {pct}% of orders matched to a source touchpoint.
                       </span>{" "}
                       {unattrOrders} of {total} order{total === 1 ? "" : "s"}

@@ -25,6 +25,7 @@ from attributionops.util import (
     report_timezone,
     round_money,
     safe_div,
+    table_columns,
     to_float,
     to_int,
     try_parse_iso_ts,
@@ -748,6 +749,29 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         value_type="revenue",
         date_basis=date_basis,
     )
+    # Alias resolution must not depend on the selected window: build the alias
+    # candidates from the LIFETIME spend catalog so an alias that is ambiguous
+    # across the account's history stays unmapped in every date range, instead
+    # of resolving only when the window happens to contain a single candidate
+    # (which made historical orders move between rows as the range changed).
+    # Reuse ads_get_spend so the candidates are aggregated to the SAME
+    # breakdown granularity as the window rows — raw ad-level spend rows would
+    # make every entity with several child ads look like multiple identities
+    # and therefore ambiguous.
+    alias_rows: list[dict[str, Any]] | None = None
+    if inputs.active_tab != "traffic_source":
+        try:
+            alias_rows = ads_get_spend(
+                db_path,
+                platform="all",
+                start_date="0000-01-01",
+                end_date="9999-12-31",
+                breakdown=breakdown,
+            )["rows"]
+        except Exception:
+            logger.exception("lifetime spend alias scan failed for %s", db_path)
+            alias_rows = None
+
     attrib_rows = resolve_attribution_dimensions(
         spend_rows,
         list(_attr["run"]["rows"]),
@@ -758,6 +782,21 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         active_tab=inputs.active_tab,
     )
     attrib_by_day = _attr["day_totals"]["rows"]
+
+    if alias_rows is not None:
+        # Second pass rather than folded into the call above: the pytest
+        # bootstrap patcher (scripts/apply_report_integrity_fixes.py) requires
+        # that exact call as its already-applied marker.
+        attrib_rows = resolve_attribution_dimensions(
+            spend_rows,
+            list(_attr["run"]["rows"]),
+            active_tab=inputs.active_tab,
+            alias_rows=alias_rows,
+        )
+        dimension_coverage = build_dimension_coverage(
+            attrib_rows,
+            active_tab=inputs.active_tab,
+        )
 
     # 4) reported
     reported_rows = ads_get_reported_value(
@@ -1095,6 +1134,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     unique_customers = 0
     net_new_customers = 0
     returning_customers = 0
+    orders_data_failed = False
     # Stage 1 — base order aggregates (cheap, robust). A failure here logs and
     # degrades to zeros, but must NOT be masked as "no orders": it's recorded in
     # data_errors so the UI can distinguish a query error from an empty range.
@@ -1141,6 +1181,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
             db_path, inputs.start_date, inputs.end_date,
         )
         data_errors.append({"component": "orders", "error": str(exc)})
+        orders_data_failed = True
         order_rows = []
         customer_order_rows = []
         all_orders_count = 0
@@ -1306,10 +1347,7 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     # build every lead query from only those columns. A warehouse missing
     # session_id/visitor_id then degrades gracefully instead of raising
     # "no such column" and losing lead metrics.
-    try:
-        lead_cols = {str(r.get("name") or "") for r in query(db_path, "PRAGMA table_info(conversions)").rows}
-    except Exception:
-        lead_cols = set()
+    lead_cols = table_columns(db_path, "conversions")
     lead_sid = "session_id" if "session_id" in lead_cols else "'' AS session_id"
     lead_vid = "visitor_id" if "visitor_id" in lead_cols else "'' AS visitor_id"
     _identity_parts = ["NULLIF(customer_key, '')"]
@@ -1416,6 +1454,18 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     )
     blended_profit = round_money(all_orders_revenue - total_cost - all_orders_cogs - all_orders_fees)
     blended_cpa = safe_div(total_cost, all_orders_count) if all_orders_count else None
+
+    if orders_data_failed:
+        # The order aggregates above were zeroed after a query failure, so the
+        # blended metrics they feed would render as convincing real numbers
+        # (0.0 ratios, profit == -cost). Report them as unknown instead so the
+        # UI shows its missing-data fallback.
+        unattributed_orders = None
+        unattributed_revenue = None
+        mer = None
+        blended_roas = None
+        blended_cvr = None
+        blended_profit = None
 
     summary_totals = {
         **summary_totals_metrics,
@@ -1621,7 +1671,24 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     charts = {"time_series": time_series, "top_winners": top_winners, "top_losers": top_losers}
 
     # Diagnostics
-    last_event_ts = health.get("freshness", {}).get("sessions_last_ts") or health.get("freshness", {}).get("orders_last_ts")
+    # Freshness must reflect the warehouse's true latest activity, not the
+    # report window: the health check above is window-scoped for performance,
+    # so its MAX(ts) is capped at the window end and would show month-old
+    # timestamps on historical ranges even while tracking is live.
+    last_event_ts: str | None = None
+    try:
+        session_max = (query(db_path, "SELECT MAX(ts) AS max_ts FROM sessions;").rows[0] or {}).get("max_ts")
+        last_event_ts = str(session_max) if session_max else None
+    except Exception:
+        logger.exception("sessions freshness scan failed for %s", db_path)
+    if not last_event_ts:
+        try:
+            order_max = (query(db_path, "SELECT MAX(ts) AS max_ts FROM orders;").rows[0] or {}).get("max_ts")
+            last_event_ts = str(order_max) if order_max else None
+        except Exception:
+            logger.exception("orders freshness scan failed for %s", db_path)
+    # last_spend_ts is already lifetime: integrations_status computes an
+    # unscoped MAX(date) over spend, so it needs no window correction here.
     last_spend_ts = integrations.get("ads", {}).get("spend_last_date")
     diagnostics = {
         "data_freshness": {

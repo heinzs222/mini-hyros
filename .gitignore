@@ -13,6 +13,7 @@ venv/
 htmlcov/
 coverage.xml
 dashboard/coverage/
+dashboard/build-output.txt
 
 # Node
 node_modules/

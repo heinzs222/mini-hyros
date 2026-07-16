@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Info, BookOpen } from "lucide-react";
-import { reportTodayIso } from "@/lib/utils";
+import { reportTodayIso, shiftIso } from "@/lib/utils";
 
 /* ──────────────────────────── date helpers ──────────────────────────── */
 
@@ -15,11 +15,6 @@ function toIso(d: Date): string {
 function fromIso(iso: string): Date {
   const [y, m, d] = iso.split("-").map(Number);
   return new Date(y, (m || 1) - 1, d || 1);
-}
-function addDays(iso: string, n: number): string {
-  const d = fromIso(iso);
-  d.setDate(d.getDate() + n);
-  return toIso(d);
 }
 function daysInMonth(year: number, month: number): number {
   // month is 0-indexed; day 0 of the next month is the last day of this month.
@@ -89,11 +84,11 @@ function buildPresets(): Preset[] {
   const firstOfYear = `${d.getFullYear()}-01-01`;
   return [
     { label: "Today", range: () => ({ start: t, end: t }) },
-    { label: "Yesterday", range: () => ({ start: addDays(t, -1), end: addDays(t, -1) }) },
+    { label: "Yesterday", range: () => ({ start: shiftIso(t, -1), end: shiftIso(t, -1) }) },
     { label: "This Month", range: () => ({ start: firstOfMonth, end: t }) },
-    { label: "Last 7 Days", range: () => ({ start: addDays(t, -7), end: addDays(t, -1) }) },
-    { label: "Last 14 Days", range: () => ({ start: addDays(t, -14), end: addDays(t, -1) }) },
-    { label: "Last 30 Days", range: () => ({ start: addDays(t, -30), end: addDays(t, -1) }) },
+    { label: "Last 7 Days", range: () => ({ start: shiftIso(t, -7), end: shiftIso(t, -1) }) },
+    { label: "Last 14 Days", range: () => ({ start: shiftIso(t, -14), end: shiftIso(t, -1) }) },
+    { label: "Last 30 Days", range: () => ({ start: shiftIso(t, -30), end: shiftIso(t, -1) }) },
     { label: "Last 3 Month", range: () => ({ start: addMonthsClamped(t, -3), end: t }) },
     { label: "Last 6 Month", range: () => ({ start: addMonthsClamped(t, -6), end: t }) },
     { label: "Last Year", range: () => ({ start: addMonthsClamped(t, -12), end: t }) },
