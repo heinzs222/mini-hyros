@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   cn,
   formatMoney,
@@ -166,24 +166,28 @@ describe("profitColor", () => {
 });
 
 describe("daysAgo", () => {
-  function expected(n: number): string {
-    const d = new Date();
-    d.setDate(d.getDate() - n);
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
-  }
+  // daysAgo buckets "today" in the reporting timezone (Etc/GMT+6 by default),
+  // so comparing against the runner's local date flakes near midnight. Pin the
+  // clock and zone instead so the expected dates are literal.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-15T12:00:00Z"));
+    vi.stubEnv("NEXT_PUBLIC_REPORT_TIMEZONE", "UTC");
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
 
   it("returns a zero-padded YYYY-MM-DD string", () => {
     const result = daysAgo(0);
     expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(result).toBe(expected(0));
+    expect(result).toBe("2026-03-15");
   });
 
   it("offsets backwards by the given number of days", () => {
-    expect(daysAgo(7)).toBe(expected(7));
-    expect(daysAgo(30)).toBe(expected(30));
+    expect(daysAgo(7)).toBe("2026-03-08");
+    expect(daysAgo(30)).toBe("2026-02-13");
   });
 
   it("produces an earlier date for a larger offset", () => {
