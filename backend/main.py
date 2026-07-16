@@ -111,6 +111,87 @@ def _ensure_db_exists(db_path: str) -> None:
     )
 
 
+def _sync_interval_minutes() -> float:
+    """Cadence for the server-owned auto-sync loop; <= 0 disables it."""
+    try:
+        return float(os.environ.get("SYNC_INTERVAL_MINUTES", "30") or 0)
+    except ValueError:
+        return 0.0
+
+
+async def _run_scheduled_sync() -> dict[str, Any]:
+    """One full API pull (ad spend + Stripe + GHL) over the trailing week.
+
+    Runs server-side on a timer so the warehouse stays fresh WITHOUT anyone
+    keeping a browser tab open and pressing Sync — previously the only trigger,
+    which left spend/orders stale between visits and underfilled every report
+    window. Each part fails independently: one platform's error never blocks
+    the others, and errors are logged + returned rather than raised.
+    """
+    from fastapi import BackgroundTasks as _BackgroundTasks
+
+    from api.ghl_sync import ghl_sync as _ghl_sync
+    from api.spend_sync import sync_spend as _sync_spend
+    from api.stripe_sync import stripe_sync as _stripe_sync
+
+    log = logging.getLogger("vigil.autosync")
+    today = datetime.now(report_timezone()).date()
+    start = (today - timedelta(days=7)).isoformat()
+    end = today.isoformat()
+    results: dict[str, Any] = {"start_date": start, "end_date": end}
+
+    try:
+        results["spend"] = await _sync_spend(platform="all", start_date=start, end_date=end)
+    except Exception as exc:
+        log.exception("scheduled spend sync failed")
+        results["spend"] = {"error": str(exc)}
+    try:
+        background = _BackgroundTasks()
+        results["stripe"] = await _stripe_sync(
+            background, start_date=start, end_date=end, defer_history=False
+        )
+        # Called outside a request cycle, so any deferred work the handler
+        # queued must be drained here or it would silently never run.
+        for task in background.tasks:
+            await task()
+    except Exception as exc:
+        log.exception("scheduled stripe sync failed")
+        results["stripe"] = {"error": str(exc)}
+    try:
+        results["ghl"] = await _ghl_sync(
+            start_date=start, end_date=end, limit=500,
+            include_forms=True, include_opportunities=True,
+        )
+    except Exception as exc:
+        log.exception("scheduled GHL sync failed")
+        results["ghl"] = {"error": str(exc)}
+
+    log.info(
+        "scheduled sync complete window=%s..%s spend_ok=%s stripe_ok=%s ghl_ok=%s",
+        start, end,
+        "error" not in (results.get("spend") or {}),
+        "error" not in (results.get("stripe") or {}),
+        "error" not in (results.get("ghl") or {}),
+    )
+    return results
+
+
+async def _auto_sync_loop(interval_minutes: float, *, initial_delay_seconds: float = 90.0) -> None:
+    """Periodic auto-sync. The initial delay keeps boot (schema migrations +
+    report cache warming) uncontended on small instances."""
+    await asyncio.sleep(initial_delay_seconds)
+    while True:
+        try:
+            await _run_scheduled_sync()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # _run_scheduled_sync guards each part; this is a last-resort net so
+            # an unexpected error can never kill the loop for the process's life.
+            logging.getLogger("vigil.autosync").exception("scheduled sync crashed")
+        await asyncio.sleep(max(interval_minutes, 1.0) * 60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Ensure configured DB exists (create schema if missing)
@@ -128,7 +209,15 @@ async def lifespan(app: FastAPI):
         and _REPORT_CACHE_TTL > 0
     ):
         threading.Thread(target=_warm_default_reports, daemon=True, name="report-boot-warm").start()
+    # Server-owned periodic sync (SYNC_INTERVAL_MINUTES, default 30; 0 disables):
+    # pulls spend/Stripe/GHL through the same handlers as the manual Sync button.
+    auto_sync_task = None
+    sync_interval = _sync_interval_minutes()
+    if sync_interval > 0:
+        auto_sync_task = asyncio.create_task(_auto_sync_loop(sync_interval))
     yield
+    if auto_sync_task is not None:
+        auto_sync_task.cancel()
 
 app = FastAPI(title="AttributionOps – Mini Hyros", version="0.1.0", lifespan=lifespan)
 
