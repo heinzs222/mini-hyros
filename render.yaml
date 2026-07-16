@@ -60,6 +60,8 @@ services:
         sync: false
       - key: AUTH_SECRET_KEY
         sync: false
+      - key: SYNC_INTERVAL_MINUTES
+        value: "30"
       - key: AUTH_SESSION_TTL_HOURS
         value: "12"
       - key: AUTH_COOKIE_SECURE
