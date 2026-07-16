@@ -4,7 +4,8 @@ module.exports = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ["Inter", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
+        sans: ["Hanken Grotesk", "Inter", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
+        mono: ["JetBrains Mono", "ui-monospace", "SFMono-Regular", "Menlo", "Consolas", "monospace"],
       },
       colors: {
         brand: {
@@ -19,15 +20,21 @@ module.exports = {
           900: "#4c1d95",
         },
         ink: {
-          DEFAULT: "#ced0dd",
-          dim: "#80838f",
-          faint: "#595c68",
-          bright: "#e9eaf0",
+          DEFAULT: "#b9bcc8",
+          dim: "#7e828f",
+          faint: "#565a67",
+          bright: "#eceef4",
         },
         surface: {
           DEFAULT: "#0e0e13",
           2: "#15151c",
           3: "#1b1b23",
+        },
+        mint: {
+          DEFAULT: "#3ee0a1",
+        },
+        coral: {
+          DEFAULT: "#ff6b7a",
         },
       },
     },
