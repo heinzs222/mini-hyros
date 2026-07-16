@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncStripe, syncGhl, type ManagedWebSocket } from "@/lib/api";
-import { daysAgo, reportTodayIso } from "@/lib/utils";
+import { daysAgo, reportTodayIso, shiftIso } from "@/lib/utils";
 import Sidebar, { Section } from "@/components/Sidebar";
 import DateRangePicker from "@/components/DateRangePicker";
 import DashboardView from "@/components/DashboardView";
@@ -76,15 +76,6 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 type CompareMode = "none" | "previous_period" | "custom_range" | "model";
 
-function shiftIsoDate(dateIso: string, deltaDays: number): string {
-  const date = new Date(`${dateIso}T00:00:00`);
-  date.setDate(date.getDate() + deltaDays);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 function inclusiveSpanDays(startIso: string, endIso: string): number {
   const start = new Date(`${startIso}T00:00:00`).getTime();
   const end = new Date(`${endIso}T00:00:00`).getTime();
@@ -99,8 +90,8 @@ function normalizeDateRange(startIso: string, endIso: string): [string, string] 
 
 function previousPeriod(startIso: string, endIso: string): { start: string; end: string } {
   const spanDays = inclusiveSpanDays(startIso, endIso);
-  const previousEnd = shiftIsoDate(startIso, -1);
-  const previousStart = shiftIsoDate(previousEnd, -(spanDays - 1));
+  const previousEnd = shiftIso(startIso, -1);
+  const previousStart = shiftIso(previousEnd, -(spanDays - 1));
   return { start: previousStart, end: previousEnd };
 }
 
@@ -273,6 +264,18 @@ export default function DashboardPage() {
     reportAbortRef.current = abortController;
     reportInFlightRef.current = true;
 
+    // Hard deadline on the primary report. Because this fetch passes its own
+    // AbortSignal, apiFetch's generic timeout does NOT apply — without this a
+    // stalled backend (cold start, redeploy, dropped connection) hangs the
+    // request forever, and the in-flight guard then blocks every auto-refresh
+    // tick indefinitely: the dashboard sits on a spinner for half an hour with
+    // no retry. Aborting here frees the guard so auto-refresh recovers.
+    let deadlineHit = false;
+    const deadlineId = setTimeout(() => {
+      deadlineHit = true;
+      abortController.abort();
+    }, 75_000);
+
     try {
       const [startDate, endDate] = normalizeDateRange(primaryStartDate, primaryEndDate);
 
@@ -303,8 +306,15 @@ export default function DashboardPage() {
       // concurrent duplicate comparison requests.
       compareCompletedKeyRef.current = "";
     } catch (err: any) {
-      if (isAbortError(err)) return;
+      if (isAbortError(err) && !deadlineHit) return;
       if (requestSeq !== reportRequestSeqRef.current) return;
+      if (deadlineHit) {
+        // Surface the timeout instead of silently spinning; the backend keeps
+        // building server-side and caches the result, so the auto-refresh retry
+        // (within 60s) usually lands instantly.
+        setError("Report request timed out after 75s — the backend may be waking up or under load. Retrying automatically…");
+        return;
+      }
       const status = typeof err?.status === "number" ? err.status : 0;
       if (status === 401 || status === 403) {
         router.replace("/login");
@@ -312,6 +322,7 @@ export default function DashboardPage() {
       }
       setError(err.message || "Failed to load report");
     } finally {
+      clearTimeout(deadlineId);
       if (reportAbortRef.current === abortController) {
         reportAbortRef.current = null;
         reportInFlightRef.current = false;
@@ -397,6 +408,11 @@ export default function DashboardPage() {
     compareInFlightKeyRef.current = compareKey;
     setCompareUnavailable(false);
 
+    // Deadline mirror of loadReport's: a hung comparison fetch would otherwise
+    // pin compareInFlightKeyRef to this key forever, permanently blocking
+    // comparison refetches for this window.
+    const deadlineId = setTimeout(() => abortController.abort(), 75_000);
+
     try {
       const compareData = await fetchReport(compareParams, abortController.signal);
       if (requestSeq !== compareRequestSeqRef.current) return;
@@ -411,6 +427,7 @@ export default function DashboardPage() {
       setCompareLabel("");
       setCompareUnavailable(true);
     } finally {
+      clearTimeout(deadlineId);
       if (compareAbortRef.current === abortController) {
         compareAbortRef.current = null;
       }

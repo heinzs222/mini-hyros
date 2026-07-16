@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Mail, Globe2, Link2, Radio } from "lucide-react";
+import { Mail, Globe2, Link2, Circle } from "lucide-react";
 
 /**
  * Canonical, Hyros-style display names for the ad platforms.
@@ -77,7 +77,8 @@ function fallbackIcon(source: string) {
   if (s.includes("email") || s.includes("klaviyo") || s.includes("newsletter") || s.includes("mail")) return Mail;
   if (s.includes("organic") || s.includes("seo") || s.includes("search")) return Globe2;
   if (s.includes("direct") || s.includes("referr") || s.includes("link")) return Link2;
-  return Radio;
+  // Generic fallback: a hollow grey circle (no specific source signal to show).
+  return Circle;
 }
 
 interface PlatformBadgeProps {
@@ -125,9 +126,12 @@ export default function PlatformBadge({
     bg = "#000000";
   } else {
     const Icon = fallbackIcon(rawName || label || "");
-    glyph = <Icon size={Math.round(size * 0.58)} className="text-ink-dim" strokeWidth={2} />;
-    bg = "var(--surface-2)";
-    border = "1px solid rgba(255,255,255,0.08)";
+    // The generic default (no contextual match) reads as a hollow grey circle;
+    // the contextual icons (Mail/Globe2/Link2) keep the existing dim tint.
+    const iconColorCls = Icon === Circle ? "text-[#6f7380]" : "text-ink-dim";
+    glyph = <Icon size={Math.round(size * 0.58)} className={iconColorCls} strokeWidth={2} />;
+    bg = "#17171f";
+    border = "1px solid #262631";
   }
 
   return (

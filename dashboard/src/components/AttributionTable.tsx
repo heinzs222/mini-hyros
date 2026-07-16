@@ -197,33 +197,76 @@ const LEVEL_LABELS: Record<string, string> = {
   ad: "Ad",
 };
 
-function CellValue({ col, metrics }: { col: Column; metrics: any }) {
+// Column-key sets driving the per-cell colour/weight rules (mirrors `colorFor` /
+// `weightFor` in the design reference: reports-table-1a.dc.html).
+const PRIMARY_MONEY_KEYS = new Set(["cost", "total_revenue", "revenue"]);
+const PROFIT_ROLE_KEYS = new Set(["roas", "profit", "margin_pct", "net_profit"]);
+// ROAS / Net Profit get the at-a-glance "pill" treatment.
+const PILLED_KEYS = new Set(["roas", "net_profit"]);
+
+function formatCellValue(col: Column, val: any): string {
+  if (col.type === "money") return formatMoney(val);
+  if (col.type === "percent") return formatPercentValue(val, 2);
+  if (col.type === "ratio") return formatRatio(val, 2);
+  if (col.type === "number") return formatNumber(val);
+  return val ?? "—";
+}
+
+/** Colour class for a cell, following the design's colorFor rules exactly. */
+function colorClassFor(col: Column, val: any): string {
+  const num = val == null ? null : Number(val);
+
+  // Signed money: profit / net_profit — reuse the shared profitColor() helper
+  // so it stays in lockstep with the rest of the app's profit palette.
+  if (col.key === "profit" || col.key === "net_profit") return profitColor(val);
+
+  // Signed ratio: ROAS — universal 1.0x breakeven (0.09x and 0.00x read red).
+  if (col.key === "roas") {
+    if (num == null) return "text-ink-faint";
+    return num >= 1 ? "text-positive" : "text-negative";
+  }
+
+  // Signed percent: Margin — negative red, positive neutral, 0/blank dim.
+  if (col.key === "margin_pct") {
+    if (num == null) return "text-ink-faint";
+    if (num < 0) return "text-negative";
+    if (num > 0) return "text-[#b9bcc8]";
+    return "text-ink-faint";
+  }
+
+  // Everything else: null/empty and numeric 0 are dimmed.
+  if (num == null || num === 0) return "text-ink-faint";
+
+  if (PRIMARY_MONEY_KEYS.has(col.key)) return "text-[#eceef4]"; // Cost, Gross Rev., Net Rev.
+  if (col.type === "money") return "text-[#b9bcc8]"; // CPC, CPM, CPA, AOV
+  if (col.type === "number") return "text-[#eceef4]"; // Impressions, Clicks, Attr. Orders
+  if (col.type === "percent") return "text-[#b9bcc8]"; // CTR, CVR
+
+  // Unknown/other numeric column: sensible fallback.
+  return "text-ink";
+}
+
+function weightClassFor(col: Column): string {
+  return PRIMARY_MONEY_KEYS.has(col.key) || PROFIT_ROLE_KEYS.has(col.key) ? "font-semibold" : "font-medium";
+}
+
+/** Pill tint classes for the ROAS / Net Profit cells (data rows only). */
+function pillClassFor(col: Column, val: any, pillsEnabled: boolean): string {
+  if (!pillsEnabled || !PILLED_KEYS.has(col.key) || val == null) return "";
+  const positive = col.key === "roas" ? Number(val) >= 1 : Number(val) >= 0;
+  return positive
+    ? "inline-block rounded-full px-[11px] py-[5px] bg-[var(--positive-tint)] border border-[rgba(62,224,161,.26)]"
+    : "inline-block rounded-full px-[11px] py-[5px] bg-[var(--negative-tint)] border border-[rgba(255,107,122,.24)]";
+}
+
+function CellValue({ col, metrics, size = "13", pill = true, bold = false }: { col: Column; metrics: any; size?: "13" | "13.5"; pill?: boolean; bold?: boolean }) {
   const val = metrics[col.key];
-  // Only truly missing cells (null/undefined/empty) are dimmed as "no data here".
-  // A real zero — e.g. spend with zero orders — is a signal the buyer must see,
-  // so it keeps normal styling.
-  const isEmpty = val == null || val === "";
-  const dim = isEmpty ? "text-ink-faint" : "";
-  if (col.type === "money") {
-    const colorCls = col.key === "profit" || col.key === "net_profit" ? profitColor(val) : dim;
-    return <span className={colorCls}>{formatMoney(val)}</span>;
-  }
-  if (col.type === "percent") {
-    return <span className={dim}>{formatPercentValue(val, 2)}</span>;
-  }
-  if (col.type === "ratio") {
-    // ROAS has a universal 1.0x breakeven — color it green/red like profit so the
-    // owner can read winners/losers at a glance (matching HYROS).
-    const roasCls =
-      col.key === "roas" && val != null
-        ? Number(val) >= 1
-          ? "text-emerald-400"
-          : "text-rose-400"
-        : dim;
-    return <span className={roasCls}>{formatRatio(val, 2)}</span>;
-  }
-  if (col.type === "number") return <span className={dim}>{formatNumber(val)}</span>;
-  return <span className={dim}>{val ?? "—"}</span>;
+  const sizeCls = size === "13.5" ? "text-[13.5px]" : "text-[13px]";
+  // Totals row values are uniformly font-weight 700 (per the reference's totCells),
+  // unlike data rows where weight varies by column role.
+  const weightCls = bold ? "font-bold" : weightClassFor(col);
+  const cls = `${colorClassFor(col, val)} ${weightCls} ${sizeCls} tabular ${pillClassFor(col, val, pill)}`;
+  return <span className={cls}>{formatCellValue(col, val)}</span>;
 }
 
 function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; currentMetrics: any; compareMetrics: any }) {
@@ -233,7 +276,7 @@ function DeltaValue({ col, currentMetrics, compareMetrics }: { col: Column; curr
 
   const delta = Number(current) - Number(previous);
   const sign = delta > 0 ? "+" : delta < 0 ? "−" : "";
-  const color = delta > 0 ? "text-emerald-400/90" : delta < 0 ? "text-rose-400/90" : "text-ink-faint";
+  const color = delta > 0 ? "text-positive/90" : delta < 0 ? "text-negative/90" : "text-ink-faint";
   const cls = `mt-0.5 text-[10px] font-medium tabular ${color}`;
 
   if (col.type === "money") {
@@ -286,7 +329,7 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
   }, [effSearch]);
 
   // Hyros-style table controls
-  const [density, setDensity] = useState<"compact" | "comfortable">("compact");
+  const [density, setDensity] = useState<"compact" | "comfortable">("comfortable");
   const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set());
   const [showColsMenu, setShowColsMenu] = useState(false);
   const [showFilterMenu, setShowFilterMenu] = useState(false);
@@ -308,7 +351,10 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
   const dimensionCol = useMemo(() => columns.find((c) => c.type === "dimension"), [columns]);
   const compareById = useMemo(() => new Map(compareRows.map((r) => [r.id, r])), [compareRows]);
   const querySignature = `${activeTab}|${startDate || ""}|${endDate || ""}|${model || ""}|${lookbackDays || ""}|${useClickDate ? "click" : "conversion"}`;
-  const cellPad = effDensity === "compact" ? "py-1.5" : "py-3";
+  // Comfortable is the design default: roomy 15px-vertical cells; compact keeps
+  // the same horizontal padding but tightens vertical rhythm to 10px.
+  const metricPad = effDensity === "compact" ? "px-[14px] py-[10px]" : "px-[14px] py-[15px]";
+  const sourcePad = effDensity === "compact" ? "px-[18px] py-[10px]" : "px-[18px] py-[15px]";
   const filterActive = Boolean(filterKey && filterVal !== "");
 
   const filtered = useMemo(() => {
@@ -508,6 +554,12 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
     return () => { cancelled = true; };
   }, [lightbox?.video_id, lightbox?.type]);
 
+  // Zebra striping is keyed off render order, not row identity, so it must be a
+  // plain counter local to this render pass (reset every render, shared by the
+  // recursive renderRow closure so expanded children keep counting on from
+  // their parent's position).
+  let zebraIdx = 0;
+
   // Render a single data row
   const renderRow = (row: TableRow, depth: number, parentKey?: string): React.ReactNode => {
     const rowKey = parentKey ? `${parentKey}>${row.id}` : row.id;
@@ -519,10 +571,25 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
     const nameTitle = row.raw_id && row.raw_id !== row.name ? `${row.name} (ID: ${row.raw_id})` : row.name;
     const pillCls = "shrink-0 rounded px-1.5 py-[1px] text-[10px] font-medium leading-none text-ink-faint bg-white/[0.05]";
 
+    // Zebra striping counts every rendered row in visual top-to-bottom order —
+    // including inline-expanded children — via a render-scoped counter, not the
+    // totals row (which always keeps its own #15151c band).
+    const zebraPos = zebraIdx++;
+    const rowBgCls = zebraPos % 2 ? "bg-[#0f0f16]" : "bg-[#0e0e13]";
+
+    // Health spine: sign of this row's Net Profit.
+    const netProfit = row.metrics.net_profit;
+    const spineCls =
+      netProfit != null && Number(netProfit) > 0
+        ? "bg-positive"
+        : netProfit != null && Number(netProfit) < 0
+          ? "bg-negative"
+          : "bg-transparent";
+
     return (
       <React.Fragment key={rowKey}>
         <tr
-          className={`group border-b border-[var(--card-border)]/70 transition-colors hover:bg-[var(--surface-2)] ${
+          className={`group ${rowBgCls} border-b border-white/5 transition-colors hover:bg-[var(--surface-2)] ${
             row.children_available ? "cursor-pointer" : ""
           }`}
           onClick={() => {
@@ -530,15 +597,16 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
             else if (parentKey) toggleExpandChild(parentKey, row);
           }}
         >
-          <td className={`px-4 ${cellPad} sticky left-0 z-10 bg-[var(--surface)] group-hover:bg-[var(--surface-2)]`}>
+          <td className={`relative ${sourcePad} sticky left-0 z-10 ${rowBgCls} group-hover:bg-[var(--surface-2)]`}>
+            <span className={`pointer-events-none absolute left-0 top-[9px] bottom-[9px] w-[3px] rounded-tr-[3px] rounded-br-[3px] ${spineCls}`} />
             <div className="flex items-center gap-2" style={{ paddingLeft: depth * 18 }}>
               {row.children_available ? (
                 isLoading ? (
                   <Loader2 size={14} className="text-brand-400 animate-spin shrink-0" />
                 ) : isExpanded ? (
-                  <ChevronDown size={14} className="text-ink-dim shrink-0" />
+                  <ChevronDown size={14} className="text-[#54596a] shrink-0" />
                 ) : (
-                  <ChevronRight size={14} className="text-ink-faint shrink-0" />
+                  <ChevronRight size={14} className="text-[#54596a] shrink-0" />
                 )
               ) : (
                 <span className="w-3.5 shrink-0" />
@@ -584,12 +652,14 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
                 // canonical platform name ("Google Ads" / "Meta Ads" / "TikTok Ads").
                 (() => {
                   const plat = platformFromRow(row);
+                  const known = isKnownPlatform(plat);
                   return (
                     <PlatformBadge
                       platform={plat}
-                      label={isKnownPlatform(plat) ? undefined : row.name}
+                      label={known ? undefined : row.name}
                       rawName={nameTitle}
-                      size={18}
+                      size={25}
+                      labelClassName={`truncate text-[14.5px] font-semibold ${known ? "text-[#e8eaf1]" : "text-[#a7aab6]"}`}
                     />
                   );
                 })()
@@ -610,12 +680,12 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
                 <span className={pillCls}>{levelLabel}</span>
               )}
               {row.children_count != null && row.children_count > 0 && (
-                <span className="shrink-0 text-[11px] text-ink-faint tabular">({row.children_count})</span>
+                <span className="shrink-0 text-[12px] font-medium text-[#636675] tabular">({row.children_count})</span>
               )}
             </div>
           </td>
           {shownCols.map((col) => (
-            <td key={col.key} className={`text-right px-3 ${cellPad} text-ink whitespace-nowrap tabular`}>
+            <td key={col.key} className={`text-right ${metricPad} whitespace-nowrap`}>
               <CellValue col={col} metrics={row.metrics} />
               {compareRow && (
                 <DeltaValue col={col} currentMetrics={row.metrics} compareMetrics={compareRow.metrics} />
@@ -626,7 +696,7 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
         {/* Render children inline as sibling tr elements */}
         {isExpanded && children.length > 0 && children.map((child) => renderRow(child, depth + 1, row.id))}
         {isExpanded && children.length === 0 && !isLoading && (
-          <tr key={`${rowKey}-empty`} className="border-b border-[var(--card-border)]/70">
+          <tr key={`${rowKey}-empty`} className="border-b border-white/5">
             <td colSpan={shownCols.length + 1} className="px-4 py-2 text-ink-faint text-[11px]" style={{ paddingLeft: (depth + 1) * 18 + 32 }}>
               No child items found
             </td>
@@ -637,11 +707,14 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
   };
 
   const TotalsRow = () => (
-    <tr className="border-b border-white/10 bg-white/[0.05]">
-      <td className={`px-4 ${cellPad} text-[13px] font-semibold text-ink-bright sticky left-0 bg-[var(--surface-2)] z-10`}>{totalsLabel}</td>
+    <tr>
+      <td className={`${sourcePad} sticky left-0 z-10 bg-[#15151c] border-t border-b border-white/[0.09]`}>
+        <span className="text-[12.5px] font-extrabold uppercase tracking-[.06em] text-[#f0f1f6]">{totalsLabel}</span>
+      </td>
       {shownCols.map((col) => (
-        <td key={col.key} className={`text-right px-3 ${cellPad} whitespace-nowrap tabular font-semibold text-ink-bright`}>
-          <CellValue col={col} metrics={visibleTotals} />
+        <td key={col.key} className={`text-right ${metricPad} whitespace-nowrap bg-[#15151c] border-t border-b border-white/[0.09]`}>
+          {/* Totals row shows plain coloured values — no ROAS / Net Profit pill. */}
+          <CellValue col={col} metrics={visibleTotals} size="13.5" pill={false} bold />
         </td>
       ))}
     </tr>
@@ -710,7 +783,7 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
         </div>
       </div>
     )}
-    <div className="hpanel overflow-hidden">
+    <div className="overflow-hidden rounded-[18px] border border-[var(--card-border)] bg-[#0e0e13] shadow-[0_30px_70px_-42px_rgba(0,0,0,.9)]">
       {compareRows.length > 0 && (
         <div className="px-4 py-2 border-b border-[var(--card-border)] text-[11px] text-blue-300 bg-blue-500/5">
           Row deltas shown vs {compareLabel || "comparison"}
@@ -721,7 +794,7 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
       <>
       {/* Grouping tabs (segmented control) */}
       <div className="flex items-center gap-2 px-4 pt-4 pb-3 overflow-x-auto">
-        <div className="flex items-center gap-1 rounded-xl border border-[var(--card-border)] bg-[var(--surface-2)] p-1">
+        <div className="flex items-center gap-1 rounded-[12px] border border-[#20202b] bg-[#121219] p-1">
           {TABS.map((t) => (
             <button
               key={t.key}
@@ -731,10 +804,10 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
                 setExpanded({});
                 setChildRows({});
               }}
-              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[13px] font-medium transition-colors whitespace-nowrap ${
+              className={`flex items-center gap-1.5 rounded-[9px] px-3.5 py-1.5 text-[13px] font-medium whitespace-nowrap transition-colors ${
                 activeTab === t.key
-                  ? "bg-white/[0.07] text-ink-bright"
-                  : "text-ink-dim hover:text-ink"
+                  ? "bg-white/[0.07] text-[#e8eaf1]"
+                  : "text-[#797d8a] hover:text-ink"
               }`}
             >
               <span className={activeTab === t.key ? "text-brand-400" : "text-ink-faint"}>{t.icon}</span>
@@ -776,7 +849,7 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
 
         <div className="ml-auto flex items-center gap-2">
           {/* Search */}
-          <div className="flex items-center gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 h-8">
+          <div className="flex h-[34px] items-center gap-2 rounded-[9px] border border-[#20202b] bg-[#121219] px-2.5">
             <Search size={13} className="text-ink-faint" />
             <input
               type="text"
@@ -790,7 +863,7 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
           {/* Density */}
           <button
             onClick={() => setDensity((d) => (d === "compact" ? "comfortable" : "compact"))}
-            className="flex items-center gap-1.5 h-8 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim hover:text-ink"
+            className="flex h-[34px] items-center gap-1.5 rounded-[9px] border border-[#20202b] bg-[#121219] px-2.5 text-[12px] text-ink-dim hover:text-ink"
             title="Toggle row density"
           >
             <SlidersHorizontal size={13} />
@@ -802,10 +875,10 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
             <button
               title="Filter rows by a metric threshold"
               onClick={() => { setShowFilterMenu((s) => !s); setShowColsMenu(false); }}
-              className={`flex items-center gap-1.5 h-8 rounded-lg border px-2.5 text-[12px] transition-colors ${
+              className={`flex h-[34px] items-center gap-1.5 rounded-[9px] border px-2.5 text-[12px] transition-colors ${
                 filterActive
                   ? "border-brand-500/50 bg-brand-500/10 text-brand-300"
-                  : "border-[var(--card-border)] bg-[var(--surface-2)] text-ink-dim hover:text-ink"
+                  : "border-[#20202b] bg-[#121219] text-ink-dim hover:text-ink"
               }`}
             >
               <FilterIcon size={13} /> Filter{filterActive ? " (1)" : ""}
@@ -865,7 +938,7 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
             <button
               title="Show or hide metric columns"
               onClick={() => { setShowColsMenu((s) => !s); setShowFilterMenu(false); }}
-              className="flex items-center gap-1.5 h-8 rounded-lg border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 text-[12px] text-ink-dim transition-colors hover:text-ink hover:border-white/20"
+              className="flex h-[34px] items-center gap-1.5 rounded-[9px] border border-[#20202b] bg-[#121219] px-2.5 text-[12px] text-ink-dim transition-colors hover:text-ink hover:border-white/20"
             >
               <Columns3 size={13} /> Columns
             </button>
@@ -904,10 +977,10 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
 
       {/* Table */}
       <div className="overflow-auto max-h-[70vh]">
-        <table className="w-full text-[13px]">
+        <table className="w-full min-w-[1380px] border-separate border-spacing-0 text-[13px]">
           <thead>
             <tr>
-              <th className="text-left px-4 py-2.5 text-[11px] text-ink-dim font-medium sticky left-0 top-0 z-30 bg-[var(--surface)] border-b border-[var(--card-border)] min-w-[240px]">
+              <th className="sticky left-0 top-0 z-30 min-w-[238px] border-b border-white/[0.07] bg-[#101017] px-[18px] py-[14px] text-left text-[10.5px] font-bold uppercase tracking-[.08em] text-[#71757f]">
                 {dimensionCol?.label || "Name"}
               </th>
               {shownCols.map((col) => {
@@ -915,13 +988,15 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
                 return (
                   <th
                     key={col.key}
-                    className={`group sticky top-0 z-20 bg-[var(--surface)] border-b border-[var(--card-border)] text-right px-3 py-2.5 text-[11px] font-medium cursor-pointer whitespace-nowrap select-none ${active ? "text-ink-bright" : "text-ink-dim hover:text-ink"}`}
+                    className={`group sticky top-0 z-20 cursor-pointer select-none whitespace-nowrap border-b border-white/[0.07] bg-[#101017] px-[14px] py-[14px] text-right text-[10.5px] font-bold uppercase tracking-[.07em] transition-colors ${
+                      active ? "text-[#c9ccd6]" : "text-[#71757f] hover:text-[#9ca0ac]"
+                    }`}
                     onClick={() => handleSort(col.key)}
                   >
                     <div className="flex items-center justify-end gap-1">
                       {col.label}
                       {active ? (
-                        sortDir === "desc" ? <ChevronDown size={12} className="text-brand-400" /> : <ChevronUp size={12} className="text-brand-400" />
+                        sortDir === "desc" ? <ChevronDown size={12} className="text-[#8b5cf6]" /> : <ChevronUp size={12} className="text-[#8b5cf6]" />
                       ) : (
                         <ChevronDown size={12} className="text-ink-faint opacity-0 group-hover:opacity-60 transition-opacity" />
                       )}

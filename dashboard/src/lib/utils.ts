@@ -54,9 +54,9 @@ export function formatSeconds(value: number | null | undefined): string {
 
 export function profitColor(value: number | null | undefined): string {
   if (value == null) return "text-ink-faint";
-  if (value > 0) return "text-emerald-400";
-  // rose-400 (not red-400) to match ROAS/delta coloring elsewhere in the table.
-  if (value < 0) return "text-rose-400";
+  if (value > 0) return "text-positive";
+  // text-negative (not red-400) to match ROAS/delta coloring elsewhere in the table.
+  if (value < 0) return "text-negative";
   return "text-ink-faint";
 }
 

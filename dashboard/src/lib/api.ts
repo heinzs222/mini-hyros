@@ -77,13 +77,18 @@ function bumpActivity(delta: number) {
   }
 }
 
+// Absolute upper bound on ANY request, even when the caller manages its own
+// deadline via an AbortSignal. Longer than every legitimate operation deadline
+// (the longest sync deadline is 180s); this only exists so a stalled connection
+// can never hang a request — and everything gated on it — forever.
+const HARD_CEILING_MS = 300_000;
+
 export async function apiFetch(input: string, init: RequestInit = {}, signal?: AbortSignal) {
   const headers = new Headers(init.headers || {});
   const token = readAuthToken();
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  bumpActivity(1);
 
   const providedSignal = signal ?? init.signal;
   // Callers such as the dashboard sync coordinator provide operation-specific
@@ -97,7 +102,12 @@ export async function apiFetch(input: string, init: RequestInit = {}, signal?: A
   const abort = () => controller.abort();
   timeoutController?.signal.addEventListener("abort", abort, { once: true });
   providedSignal?.addEventListener("abort", abort, { once: true });
+  // Safety-net ceiling for caller-managed signals (which skip the generic
+  // timeout above): a request that outlives every sane deadline is aborted so
+  // it can't wedge the in-flight guards that pause auto-refresh.
+  const ceilingId = providedSignal ? setTimeout(abort, HARD_CEILING_MS) : null;
 
+  bumpActivity(1);
   try {
     return await fetch(input, { ...init, headers, signal: controller.signal });
   } catch (err: any) {
@@ -106,8 +116,11 @@ export async function apiFetch(input: string, init: RequestInit = {}, signal?: A
     }
     throw err;
   } finally {
+    // CRITICAL: balance the increment above. Without this the activity counter
+    // only ever grows and the top progress bar animates forever.
     bumpActivity(-1);
     if (timeoutId !== null) clearTimeout(timeoutId);
+    if (ceilingId !== null) clearTimeout(ceilingId);
     timeoutController?.signal.removeEventListener("abort", abort);
     providedSignal?.removeEventListener("abort", abort);
   }

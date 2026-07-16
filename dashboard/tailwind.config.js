@@ -4,7 +4,7 @@ module.exports = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ["Inter", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
+        sans: ["Hanken Grotesk", "Inter", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
       },
       colors: {
         brand: {
@@ -29,6 +29,8 @@ module.exports = {
           2: "#15151c",
           3: "#1b1b23",
         },
+        positive: "#3ee0a1",
+        negative: "#ff6b7a",
       },
     },
   },
