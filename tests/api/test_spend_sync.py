@@ -6,7 +6,7 @@ import respx
 from httpx import Response
 
 from attributionops.db import sql_rows
-from attributionops.tools.ads import ads_list_platforms
+from attributionops.tools.ads import ads_get_spend, ads_list_platforms
 
 CSV = (
     "Day,Campaign,Campaign ID,Clicks,Impressions,Cost\n"
@@ -48,12 +48,16 @@ def test_import_csv_rejects_unknown_platform(client):
 def test_meta_spend_sync_with_mocked_api(client, api_db, monkeypatch):
     monkeypatch.setenv("META_ACCESS_TOKEN", "tok")
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "act_123")
+    monkeypatch.delenv("META_INCLUDE_CAMPAIGN_ADJUSTMENTS", raising=False)  # default: on
+    monkeypatch.delenv("REPORT_CURRENCY", raising=False)
+    monkeypatch.delenv("SPEND_FX_RATES", raising=False)
 
     meta_payload = {
         "data": [
             {
                 "date_start": "2026-01-10",
                 "account_id": "123",
+                "account_currency": "USD",
                 "campaign_id": "cmp1",
                 "adset_id": "set1",
                 "ad_id": "ad1",
@@ -70,7 +74,8 @@ def test_meta_spend_sync_with_mocked_api(client, api_db, monkeypatch):
     }
 
     # assert_all_mocked=False lets the TestClient -> ASGI request pass through;
-    # only the outbound Graph API call is intercepted.
+    # only the outbound Graph API call is intercepted. The same mocked payload
+    # answers both the ad-level and the (default-on) campaign-level fetch.
     with respx.mock(assert_all_mocked=False) as router:
         graph = router.get(url__startswith="https://graph.facebook.com/").mock(
             return_value=Response(200, json=meta_payload)
@@ -83,18 +88,32 @@ def test_meta_spend_sync_with_mocked_api(client, api_db, monkeypatch):
     assert r.status_code == 200
     assert graph.called
     body = r.json()
-    # Meta now also fetches a campaign-level report for reconciliation; the mocked
-    # ad-level report has exactly one row.
-    assert body["platforms"]["meta"]["fetched_ads"] == 1
+    meta = body["platforms"]["meta"]
+    assert meta["fetched_ads"] == 1
+    assert meta["fetched_campaigns"] == 1
     assert body["synced"] >= 1
+    # The billing currency observed on the synced rows is surfaced, along with
+    # how it will be treated at read time (no USD rate configured here).
+    assert meta["currencies"] == ["USD"]
+    assert meta["fx"]["report_currency"] == "CAD"
+    assert meta["fx"]["currencies"]["USD"] == {"converted": False, "rate": None, "missing_rate": True}
     # Campaign total equals the summed ad total, so no adjustment row is added.
     meta_rows = sql_rows(api_db, "SELECT * FROM spend WHERE platform = 'meta'")
     assert len(meta_rows) == 1
     assert meta_rows[0]["clicks"] == "10"
+    assert meta_rows[0]["currency"] == "USD"
     assert '"click_metric":"inline_link_clicks"' in meta_rows[0]["metadata"]
     assert '"all_clicks":"19"' in meta_rows[0]["metadata"]
     # The mocked spend row is now queryable.
     assert "meta" in ads_list_platforms(api_db)["platforms"]
+
+    # End to end: the captured USD cost converts into the report currency at
+    # read time once an FX rate is configured.
+    monkeypatch.setenv("SPEND_FX_RATES", "USD:1.40")
+    result = ads_get_spend(api_db, platform="meta", start_date="2026-01-01",
+                           end_date="2026-01-31", breakdown="platform")
+    assert result["rows"][0]["cost"] == 7.7  # 5.50 USD * 1.40
+    assert result["spend_by_currency"]["USD"] == {"cost": 5.5, "converted": True, "rate": 1.4}
 
 
 def test_meta_hyros_clicks_falls_back_for_legacy_payload():
@@ -104,7 +123,10 @@ def test_meta_hyros_clicks_falls_back_for_legacy_payload():
     assert spend_sync._meta_hyros_clicks({"clicks": "15"}) == 15
 
 
-def test_meta_campaign_adjustments_are_disabled_for_hyros_parity(api_db, monkeypatch):
+def test_meta_campaign_adjustments_default_on(api_db, monkeypatch):
+    """With the env unset, campaign-level reconciliation applies: Advantage+
+    campaigns report spend with no ad-level Insights rows at all, so skipping
+    the positive delta silently undercounts Meta cost."""
     from api import spend_sync
 
     monkeypatch.delenv("META_INCLUDE_CAMPAIGN_ADJUSTMENTS", raising=False)
@@ -131,15 +153,15 @@ def test_meta_campaign_adjustments_are_disabled_for_hyros_parity(api_db, monkeyp
         api_db, "123", "2026-07-04", "2026-07-04", ad_rows, campaign_rows
     )
 
-    rows = sql_rows(api_db, "SELECT cost, clicks, impressions FROM spend WHERE platform='meta'")
-    assert stats["inserted_campaign_adjustments"] == 0
-    assert rows == [{"cost": "5.50", "clicks": "10", "impressions": "1000"}]
+    rows = sql_rows(api_db, "SELECT SUM(CAST(cost AS REAL)) AS cost FROM spend WHERE platform='meta'")
+    assert stats["inserted_campaign_adjustments"] == 1
+    assert rows[0]["cost"] == 8.0  # 5.50 ad-level + 2.50 campaign delta
 
 
-def test_meta_campaign_adjustments_remain_available_as_opt_in(api_db, monkeypatch):
+def test_meta_campaign_adjustments_can_be_disabled_explicitly(api_db, monkeypatch):
     from api import spend_sync
 
-    monkeypatch.setenv("META_INCLUDE_CAMPAIGN_ADJUSTMENTS", "true")
+    monkeypatch.setenv("META_INCLUDE_CAMPAIGN_ADJUSTMENTS", "false")
     ad_rows = [{
         "date_start": "2026-07-04",
         "account_id": "123",
@@ -163,9 +185,9 @@ def test_meta_campaign_adjustments_remain_available_as_opt_in(api_db, monkeypatc
         api_db, "123", "2026-07-04", "2026-07-04", ad_rows, campaign_rows
     )
 
-    rows = sql_rows(api_db, "SELECT SUM(CAST(cost AS REAL)) AS cost FROM spend WHERE platform='meta'")
-    assert stats["inserted_campaign_adjustments"] == 1
-    assert rows[0]["cost"] == 8.0
+    rows = sql_rows(api_db, "SELECT cost, clicks, impressions FROM spend WHERE platform='meta'")
+    assert stats["inserted_campaign_adjustments"] == 0
+    assert rows == [{"cost": "5.50", "clicks": "10", "impressions": "1000"}]
 
 
 def test_meta_spend_sync_missing_credentials(client, api_db, monkeypatch):

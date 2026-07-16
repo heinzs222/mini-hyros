@@ -67,6 +67,7 @@ def _google_result_row():
     """A single Google Ads searchStream/search result row (camelCase keys)."""
     return {
         "segments": {"date": "2026-01-10"},
+        "customer": {"currencyCode": "USD"},
         "campaign": {"id": "111", "name": "Spring Sale"},
         "adGroup": {"id": "222", "name": "Group A"},
         "adGroupAd": {"ad": {"id": "333", "name": "Ad Z"}},
@@ -80,14 +81,15 @@ def test_write_google_spend_rows_inserts_and_converts_micros(api_db):
         api_db, "123-456-7890", "2026-01-01", "2026-01-31", [_google_result_row()]
     )
     assert stats["inserted"] == 1
+    assert stats["currencies"] == ["USD"]
 
     with sqlite3.connect(api_db) as conn:
         row = conn.execute(
-            "SELECT account_id, campaign_id, adset_id, ad_id, clicks, cost, impressions, metadata "
+            "SELECT account_id, campaign_id, adset_id, ad_id, clicks, cost, impressions, metadata, currency "
             "FROM spend WHERE platform='google'"
         ).fetchone()
 
-    account_id, campaign_id, adset_id, ad_id, clicks, cost, impressions, metadata = row
+    account_id, campaign_id, adset_id, ad_id, clicks, cost, impressions, metadata, currency = row
     assert account_id == "1234567890"  # cleaned customer id
     assert campaign_id == "111"
     assert adset_id == "222"
@@ -95,6 +97,7 @@ def test_write_google_spend_rows_inserts_and_converts_micros(api_db):
     assert clicks == "40"
     assert impressions == "2000"
     assert cost == "5.5"  # 5_500_000 micros -> 5.5
+    assert currency == "USD"  # customer.currency_code threaded onto the row
     assert '"campaign_name":"Spring Sale"' in metadata
     assert '"ad_name":"Ad Z"' in metadata
     assert '"source":"google_ads_api"' in metadata
@@ -155,6 +158,7 @@ def test_google_spend_sync_with_mocked_api(client, api_db, monkeypatch):
     assert g["fetched_campaigns"] == 1
     assert g["synced"] == 1  # campaign total == ad total -> no adjustment row
     assert g["inserted_campaign_adjustments"] == 0
+    assert g["currencies"] == ["USD"]  # billing currency observed on synced rows
     assert g["customer_id"] == "1234567890"
     assert body["synced"] >= 1
     # Spend row landed and is queryable.
@@ -420,6 +424,44 @@ def test_write_tiktok_spend_rows_normalizes_dates_before_replacing(api_db):
         ).fetchall()
 
     assert rows == [("2026-01-12", "", "ad777", "12", "33.3", "900")]
+
+
+def test_write_tiktok_spend_rows_stamps_configured_account_currency(api_db, monkeypatch):
+    # TikTok's report API returns no currency per row; the account billing
+    # currency comes from TIKTOK_ACCOUNT_CURRENCY (normalized to upper-case).
+    monkeypatch.setenv("TIKTOK_ACCOUNT_CURRENCY", "usd")
+    ss._ensure_spend_table(api_db)
+
+    rows = [
+        {
+            "dimensions": {"ad_id": "ad777", "stat_time_day": "2026-01-12 00:00:00"},
+            "metrics": {"spend": "33.30", "impressions": "900", "clicks": "12"},
+        }
+    ]
+    stats = ss._write_tiktok_spend_rows(api_db, "adv1", "2026-01-01", "2026-01-31", rows)
+    assert stats["currencies"] == ["USD"]
+
+    with sqlite3.connect(api_db) as conn:
+        currency = conn.execute("SELECT currency FROM spend WHERE platform='tiktok'").fetchone()[0]
+    assert currency == "USD"
+
+
+def test_write_tiktok_spend_rows_defaults_to_blank_currency(api_db, monkeypatch):
+    monkeypatch.delenv("TIKTOK_ACCOUNT_CURRENCY", raising=False)
+    ss._ensure_spend_table(api_db)
+
+    rows = [
+        {
+            "dimensions": {"ad_id": "ad777", "stat_time_day": "2026-01-12 00:00:00"},
+            "metrics": {"spend": "33.30", "impressions": "900", "clicks": "12"},
+        }
+    ]
+    stats = ss._write_tiktok_spend_rows(api_db, "adv1", "2026-01-01", "2026-01-31", rows)
+    assert stats["currencies"] == []
+
+    with sqlite3.connect(api_db) as conn:
+        currency = conn.execute("SELECT currency FROM spend WHERE platform='tiktok'").fetchone()[0]
+    assert currency == ""
 
 
 def test_tiktok_spend_sync_not_connected(client, api_db, monkeypatch):

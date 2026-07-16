@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from attributionops.config import default_db_path
 from attributionops.db import connect
+from attributionops.tools.ads import report_currency, spend_fx_rates
 from api.platform_auth import get_or_refresh_tiktok_token, get_tiktok_advertiser_id
 
 router = APIRouter()
@@ -73,10 +74,38 @@ def _ensure_spend_table(db_path: str) -> None:
             """CREATE TABLE IF NOT EXISTS spend (
                 platform TEXT, date TEXT, account_id TEXT, campaign_id TEXT,
                 adset_id TEXT, ad_id TEXT, creative_id TEXT,
-                clicks TEXT, cost TEXT, impressions TEXT, metadata TEXT
+                clicks TEXT, cost TEXT, impressions TEXT, metadata TEXT,
+                currency TEXT DEFAULT ''
             )"""
         )
+        # Schema evolution for databases created before the currency column
+        # existed: the PRAGMA guard keeps the ALTER idempotent (mirrors
+        # attributionops.schema.ensure_order_semantics).
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(spend)").fetchall()}
+        if "currency" not in columns:
+            conn.execute("ALTER TABLE spend ADD COLUMN currency TEXT DEFAULT ''")
         conn.commit()
+
+
+def _spend_fx_status(currencies: list[str]) -> dict[str, Any]:
+    """Describe how the observed spend currencies behave at report time.
+
+    Purely informational — conversion itself happens at read time in
+    attributionops.tools.ads.ads_get_spend. ``converted`` means a SPEND_FX_RATES
+    rate will be applied; ``missing_rate`` flags foreign-currency spend that
+    stays unconverted because no rate is configured.
+    """
+    report_ccy = report_currency()
+    rates = spend_fx_rates()
+    status: dict[str, dict[str, Any]] = {}
+    for currency in currencies:
+        code = str(currency or "").strip().upper()
+        if not code or code == report_ccy:
+            status[code] = {"converted": False, "rate": None, "missing_rate": False}
+        else:
+            rate = rates.get(code)
+            status[code] = {"converted": rate is not None, "rate": rate, "missing_rate": rate is None}
+    return {"report_currency": report_ccy, "currencies": status}
 
 
 def _ensure_ad_names_table(db_path: str) -> None:
@@ -880,12 +909,13 @@ def _google_include_campaign_adjustments() -> bool:
 def _meta_include_campaign_adjustments() -> bool:
     """Return whether campaign-only Meta spend should be reconciled.
 
-    Hyros's platform totals are built from ad-level Insights rows. Meta campaign
-    totals can be higher than that ad-level view, so adding their positive delta
-    makes Mini Hyros disagree with Hyros even though both source payloads are
-    individually valid. Keep the complete-billing view available as an opt-in.
+    Default to reconciliation, matching Google: the source Hyros account runs
+    Advantage+ campaigns whose spend has no ad-level Insights rows at all, so
+    skipping the campaign-level delta silently undercounts Meta cost (parity
+    forensics measured a -28.7% spend gap vs Hyros). An explicit false remains
+    available for diagnosing ad-level-only views.
     """
-    raw = str(os.environ.get("META_INCLUDE_CAMPAIGN_ADJUSTMENTS", "") or "").strip().lower()
+    raw = str(os.environ.get("META_INCLUDE_CAMPAIGN_ADJUSTMENTS", "true") or "true").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
@@ -975,6 +1005,7 @@ async def _fetch_meta_insights(access_token: str, ad_account_id: str, start_date
         [
             "date_start",
             "account_id",
+            "account_currency",
             "campaign_id",
             "adset_id",
             "ad_id",
@@ -1027,6 +1058,7 @@ async def _fetch_meta_campaign_insights(access_token: str, ad_account_id: str, s
         [
             "date_start",
             "account_id",
+            "account_currency",
             "campaign_id",
             "campaign_name",
             "clicks",
@@ -1082,13 +1114,14 @@ def _write_meta_spend_rows(
     end_date: str,
     rows: list[dict[str, Any]],
     campaign_rows: list[dict[str, Any]] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     account_id = ad_account_id.replace("act_", "").strip()
     synced_at = _now()
     inserted = 0
     inserted_ads = 0
     inserted_campaign_adjustments = 0
     adjustment_cost = 0.0
+    currencies: set[str] = set()
     name_rows: dict[tuple[str, str], tuple[str, str]] = {}
     ad_totals_by_campaign_day: dict[tuple[str, str], dict[str, float]] = defaultdict(
         lambda: {"cost": 0.0, "clicks": 0.0, "impressions": 0.0}
@@ -1108,6 +1141,7 @@ def _write_meta_spend_rows(
             "inserted_campaign_adjustments": 0,
             "adjustment_cost": 0.0,
             "names_upserted": 0,
+            "currencies": [],
             "preserved": True,
         }
 
@@ -1137,6 +1171,9 @@ def _write_meta_spend_rows(
             clicks = str(int(round(_meta_hyros_clicks(r))))
             spend = str(r.get("spend") or "0").strip()
             impressions = str(r.get("impressions") or "0").strip()
+            currency = str(r.get("account_currency") or "").strip().upper()
+            if currency:
+                currencies.add(currency)
 
             if campaign_id:
                 totals = ad_totals_by_campaign_day[(day, campaign_id)]
@@ -1162,8 +1199,8 @@ def _write_meta_spend_rows(
                 INSERT INTO spend (
                     platform, date, account_id, campaign_id,
                     adset_id, ad_id, creative_id,
-                    clicks, cost, impressions, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    clicks, cost, impressions, metadata, currency
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "meta",
@@ -1177,6 +1214,7 @@ def _write_meta_spend_rows(
                     spend,
                     impressions,
                     metadata,
+                    currency,
                 ),
             )
             inserted += 1
@@ -1203,6 +1241,9 @@ def _write_meta_spend_rows(
             campaign_cost = _num(r.get("spend"), 0.0)
             campaign_clicks = _meta_hyros_clicks(r)
             campaign_impressions = _num(r.get("impressions"), 0.0)
+            currency = str(r.get("account_currency") or "").strip().upper()
+            if currency:
+                currencies.add(currency)
 
             ad_total = ad_totals_by_campaign_day.get((day, campaign_id), {})
             cost_delta = round(campaign_cost - float(ad_total.get("cost") or 0.0), 6)
@@ -1229,8 +1270,8 @@ def _write_meta_spend_rows(
                 INSERT INTO spend (
                     platform, date, account_id, campaign_id,
                     adset_id, ad_id, creative_id,
-                    clicks, cost, impressions, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    clicks, cost, impressions, metadata, currency
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "meta",
@@ -1244,6 +1285,7 @@ def _write_meta_spend_rows(
                     _fmt_decimal(max(cost_delta, 0.0)),
                     str(int(round(max(impressions_delta, 0.0)))),
                     metadata,
+                    currency,
                 ),
             )
             inserted += 1
@@ -1277,6 +1319,7 @@ def _write_meta_spend_rows(
         "inserted_campaign_adjustments": inserted_campaign_adjustments,
         "adjustment_cost": round(adjustment_cost, 2),
         "names_upserted": len(name_rows),
+        "currencies": sorted(currencies),
     }
 
 
@@ -1313,6 +1356,8 @@ async def _sync_meta_spend(start_date: str, end_date: str) -> dict[str, Any]:
             "adjustment_cost": write_stats.get("adjustment_cost", 0.0),
             "deleted": write_stats["deleted"],
             "names_upserted": write_stats["names_upserted"],
+            "currencies": write_stats.get("currencies", []),
+            "fx": _spend_fx_status(write_stats.get("currencies", [])),
             "date_range": {"start": start_date, "end": end_date},
             "account_id": ad_account_id.replace("act_", ""),
         }
@@ -1355,6 +1400,7 @@ async def _fetch_google_insights(
     gaql = (
         "SELECT "
         "segments.date, "
+        "customer.currency_code, "
         "campaign.id, campaign.name, "
         "ad_group.id, ad_group.name, "
         "ad_group_ad.ad.id, ad_group_ad.ad.name, "
@@ -1410,6 +1456,7 @@ async def _fetch_google_campaign_insights(
     gaql = (
         "SELECT "
         "segments.date, "
+        "customer.currency_code, "
         "campaign.id, campaign.name, "
         "metrics.clicks, metrics.impressions, metrics.cost_micros "
         "FROM campaign "
@@ -1454,13 +1501,14 @@ def _write_google_spend_rows(
     end_date: str,
     rows: list[dict[str, Any]],
     campaign_rows: list[dict[str, Any]] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     clean_customer_id = _clean_google_customer_id(customer_id)
     synced_at = _now()
     inserted = 0
     inserted_ads = 0
     inserted_campaign_adjustments = 0
     adjustment_cost = 0.0
+    currencies: set[str] = set()
     ad_totals_by_campaign_day: dict[tuple[str, str], dict[str, float]] = defaultdict(
         lambda: {"cost": 0.0, "clicks": 0.0, "impressions": 0.0}
     )
@@ -1476,6 +1524,7 @@ def _write_google_spend_rows(
             "inserted_ads": 0,
             "inserted_campaign_adjustments": 0,
             "adjustment_cost": 0.0,
+            "currencies": [],
             "preserved": True,
         }
 
@@ -1508,6 +1557,9 @@ def _write_google_spend_rows(
             impressions = _num(_first_present(r, ("metrics", "impressions")), 0.0)
             cost_micros = _num(_first_present(r, ("metrics", "costMicros"), ("metrics", "cost_micros")), 0.0)
             cost = cost_micros / 1_000_000.0
+            currency = str(_first_present(r, ("customer", "currencyCode"), ("customer", "currency_code"))).strip().upper()
+            if currency:
+                currencies.add(currency)
 
             if campaign_id:
                 totals = ad_totals_by_campaign_day[(day, campaign_id)]
@@ -1537,8 +1589,8 @@ def _write_google_spend_rows(
                 INSERT INTO spend (
                     platform, date, account_id, campaign_id,
                     adset_id, ad_id, creative_id,
-                    clicks, cost, impressions, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    clicks, cost, impressions, metadata, currency
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "google",
@@ -1552,6 +1604,7 @@ def _write_google_spend_rows(
                     _fmt_decimal(cost),
                     str(int(round(impressions))),
                     metadata,
+                    currency,
                 ),
             )
             inserted += 1
@@ -1567,6 +1620,9 @@ def _write_google_spend_rows(
             campaign_impressions = _num(_first_present(r, ("metrics", "impressions")), 0.0)
             campaign_cost_micros = _num(_first_present(r, ("metrics", "costMicros"), ("metrics", "cost_micros")), 0.0)
             campaign_cost = campaign_cost_micros / 1_000_000.0
+            currency = str(_first_present(r, ("customer", "currencyCode"), ("customer", "currency_code"))).strip().upper()
+            if currency:
+                currencies.add(currency)
 
             ad_total = ad_totals_by_campaign_day.get((day, campaign_id), {})
             cost_delta = round(campaign_cost - float(ad_total.get("cost") or 0.0), 6)
@@ -1593,8 +1649,8 @@ def _write_google_spend_rows(
                 INSERT INTO spend (
                     platform, date, account_id, campaign_id,
                     adset_id, ad_id, creative_id,
-                    clicks, cost, impressions, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    clicks, cost, impressions, metadata, currency
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "google",
@@ -1608,6 +1664,7 @@ def _write_google_spend_rows(
                     _fmt_decimal(max(cost_delta, 0.0)),
                     str(int(round(max(impressions_delta, 0.0)))),
                     metadata,
+                    currency,
                 ),
             )
             inserted += 1
@@ -1622,6 +1679,7 @@ def _write_google_spend_rows(
         "inserted_ads": inserted_ads,
         "inserted_campaign_adjustments": inserted_campaign_adjustments,
         "adjustment_cost": round(adjustment_cost, 2),
+        "currencies": sorted(currencies),
     }
 
 
@@ -1683,6 +1741,8 @@ async def _sync_google_spend(start_date: str, end_date: str) -> dict[str, Any]:
             "inserted_campaign_adjustments": write_stats["inserted_campaign_adjustments"],
             "adjustment_cost": write_stats["adjustment_cost"],
             "deleted": write_stats["deleted"],
+            "currencies": write_stats.get("currencies", []),
+            "fx": _spend_fx_status(write_stats.get("currencies", [])),
             "date_range": {"start": start_date, "end": end_date},
             "customer_id": _clean_google_customer_id(customer_id),
             "api_version": _google_ads_api_version(),
@@ -1694,6 +1754,15 @@ async def _sync_google_spend(start_date: str, end_date: str) -> dict[str, Any]:
         return {"synced": 0, "error": f"Google Ads API error: {details}"}
     except Exception as exc:
         return {"synced": 0, "error": str(exc)}
+
+
+def _tiktok_account_currency() -> str:
+    """Billing currency stamped on TikTok spend rows.
+
+    TikTok's report endpoint does not return a currency per row, so the ad
+    account's billing currency is supplied via TIKTOK_ACCOUNT_CURRENCY (see
+    .env.example). Empty means unknown and the rows stay unstamped."""
+    return str(os.environ.get("TIKTOK_ACCOUNT_CURRENCY", "") or "").strip().upper()
 
 
 def _tiktok_value(row: dict[str, Any], key: str) -> Any:
@@ -1849,6 +1918,7 @@ def _write_tiktok_spend_rows(
     ad_rows = list(ad_rows if ad_rows is not None else (rows or []))
     campaign_rows = list(campaign_rows or [])
     campaign_report_available = bool(campaign_rows)
+    currency = _tiktok_account_currency()
 
     # An empty fetch must never wipe existing rows: skip the delete-and-replace
     # entirely and preserve whatever is already stored (mirrors the guard in
@@ -1861,6 +1931,7 @@ def _write_tiktok_spend_rows(
             "inserted_campaign_adjustments": 0,
             "skipped_unmapped_ads": 0,
             "adjustment_cost": 0.0,
+            "currencies": [],
             "preserved": True,
         }
 
@@ -1928,8 +1999,8 @@ def _write_tiktok_spend_rows(
                 INSERT INTO spend (
                     platform, date, account_id, campaign_id,
                     adset_id, ad_id, creative_id,
-                    clicks, cost, impressions, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    clicks, cost, impressions, metadata, currency
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "tiktok",
@@ -1943,6 +2014,7 @@ def _write_tiktok_spend_rows(
                     _fmt_decimal(cost_value),
                     str(impressions_value),
                     metadata,
+                    currency,
                 ),
             )
             inserted += 1
@@ -1983,8 +2055,8 @@ def _write_tiktok_spend_rows(
                 INSERT INTO spend (
                     platform, date, account_id, campaign_id,
                     adset_id, ad_id, creative_id,
-                    clicks, cost, impressions, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    clicks, cost, impressions, metadata, currency
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "tiktok",
@@ -1998,6 +2070,7 @@ def _write_tiktok_spend_rows(
                     _fmt_decimal(max(cost_delta, 0.0)),
                     str(max(impressions_delta, 0)),
                     metadata,
+                    currency,
                 ),
             )
             inserted += 1
@@ -2013,6 +2086,7 @@ def _write_tiktok_spend_rows(
         "inserted_campaign_adjustments": inserted_campaign_adjustments,
         "skipped_unmapped_ads": skipped_unmapped_ads,
         "adjustment_cost": round(adjustment_cost, 2),
+        "currencies": [currency] if currency else [],
     }
 
 
@@ -2052,6 +2126,8 @@ async def _sync_tiktok_spend(start_date: str, end_date: str) -> dict[str, Any]:
             "inserted_campaign_adjustments": write_stats.get("inserted_campaign_adjustments", 0),
             "skipped_unmapped_ads": write_stats.get("skipped_unmapped_ads", 0),
             "adjustment_cost": write_stats.get("adjustment_cost", 0.0),
+            "currencies": write_stats.get("currencies", []),
+            "fx": _spend_fx_status(write_stats.get("currencies", [])),
             "date_range": {"start": start_date, "end": end_date},
             "advertiser_id": advertiser_id,
         }
