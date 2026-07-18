@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from attributionops import pg_dialect
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,27 @@ class QueryResult:
     db_path: str
 
 
+# ── Backend selection ────────────────────────────────────────────────────────
+# The warehouse runs on SQLite locally and in the test suite (the original,
+# still-authoritative dialect) and on Postgres (Supabase) in production on
+# Vercel. A single Postgres DSN env var flips the whole data layer over; when it
+# is absent everything below behaves exactly as the original SQLite code did.
+_PG_ENV_VARS = ("ATTRIBUTIONOPS_DATABASE_URL", "POSTGRES_URL", "DATABASE_URL", "SUPABASE_DB_URL")
+
+
+def postgres_dsn() -> str | None:
+    for var in _PG_ENV_VARS:
+        val = os.environ.get(var, "").strip()
+        if val:
+            return val
+    return None
+
+
+def is_postgres() -> bool:
+    return postgres_dsn() is not None
+
+
+# ── SQLite tuning ────────────────────────────────────────────────────────────
 def _tune(conn: sqlite3.Connection) -> None:
     """Apply read/write tuning PRAGMAs to a connection.
 
@@ -44,12 +68,19 @@ def _tune(conn: sqlite3.Connection) -> None:
         cur.close()
 
 
-def connect(db_path: str) -> sqlite3.Connection:
-    """Open a fresh, tuned connection.
+def connect(db_path: str):
+    """Open a fresh, tuned write connection for the active backend.
 
     Callers that write should use this with a context manager
     (``with connect(...) as conn: ...``) so the transaction commits/rolls back.
+    On Postgres this returns a psycopg-backed adapter that mimics the subset of
+    the sqlite3 connection API the codebase uses (execute/executemany/cursor/
+    commit/rollback/context-manager) and transparently translates the SQL.
     """
+    if is_postgres():
+        from attributionops import pg_conn
+
+        return pg_conn.connect(postgres_dsn())
     conn = sqlite3.connect(db_path)
     _tune(conn)
     return conn
@@ -69,7 +100,12 @@ def connect(db_path: str) -> sqlite3.Connection:
 _local = threading.local()
 
 
-def _read_conn(db_path: str) -> sqlite3.Connection:
+def _read_conn(db_path: str):
+    if is_postgres():
+        from attributionops import pg_conn
+
+        return pg_conn.read_conn(postgres_dsn())
+
     cache: dict[str, sqlite3.Connection] | None = getattr(_local, "conns", None)
     if cache is None:
         cache = {}
@@ -113,7 +149,7 @@ def query(db_path: str, sql: str, params: dict[str, Any] | None = None) -> Query
 def sql_rows(db_path: str, sql: str, params: Any = None) -> list[dict[str, Any]]:
     """Simple query returning just a list of row dicts. Accepts list or dict params."""
     conn = _read_conn(db_path)
-    cur = conn.execute(sql, params or [])
+    cur = conn.execute(sql, params if params is not None else [])
     return [dict(r) for r in cur.fetchall()]
 
 
