@@ -71,9 +71,9 @@ def ads_get_spend(
     # Older warehouses predate the spend.currency column (added by the spend
     # sync's schema evolution); select it defensively so reads never crash on a
     # not-yet-migrated database.
-    spend_columns = {
-        str(r.get("name") or "") for r in query(db_path, "PRAGMA table_info(spend);").rows
-    }
+    from attributionops.util import table_columns
+
+    spend_columns = table_columns(db_path, "spend")
     currency_select = "currency" if "currency" in spend_columns else "'' AS currency"
 
     rows = query(

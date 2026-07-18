@@ -48,14 +48,12 @@ def apply_refunds_as_of(
     events: dict[str, dict[str, list[tuple[Any, float]]]] = defaultdict(
         lambda: {"refund": [], "chargeback": []}
     )
+    from attributionops.dbmeta import table_exists
+
+    if not table_exists(db_path, "refund_log"):
+        return [dict(order) for order in orders]
     try:
         with connect(db_path) as conn:
-            table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='refund_log'"
-            ).fetchone()
-            if not table:
-                return [dict(order) for order in orders]
-
             for chunk in _chunks(order_ids):
                 placeholders = ",".join("?" for _ in chunk)
                 rows = conn.execute(
@@ -73,7 +71,7 @@ def apply_refunds_as_of(
                     events[str(row[0] or "")][kind].append(
                         (event_ts, max(to_float(row[3]), 0.0))
                     )
-    except sqlite3.Error:
+    except Exception:
         return [dict(order) for order in orders]
 
     adjusted: list[dict[str, Any]] = []

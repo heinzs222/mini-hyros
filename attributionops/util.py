@@ -252,7 +252,19 @@ def exp_decay_weight(delta_days: float, half_life_days: float = 7.0) -> float:
 
 # ── Warehouse schema helpers ─────────────────────────────────────────────────
 def table_columns(db_path: str, table: str) -> set[str]:
+    from attributionops.db import is_postgres
+
     try:
+        if is_postgres():
+            return {
+                str(r.get("name") or "")
+                for r in query(
+                    db_path,
+                    "SELECT column_name AS name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = :t",
+                    {"t": table},
+                ).rows
+            }
         return {str(r.get("name") or "") for r in query(db_path, f"PRAGMA table_info({table})").rows}
     except Exception:
         return set()
