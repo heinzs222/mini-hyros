@@ -622,6 +622,66 @@ export function createWebSocket(
   };
 }
 
+// ── Live feed polling (serverless-friendly WebSocket replacement) ────────────
+// Vercel serverless functions cannot hold a WebSocket open, so the Live Events
+// panel polls /api/live/recent instead. This exposes the same shape consumers
+// used for the socket ({ close() } + a status callback) so the swap is local.
+export interface LiveConnection {
+  close: () => void;
+}
+
+const LIVE_POLL_INTERVAL_MS = Number(process.env.NEXT_PUBLIC_LIVE_POLL_MS || 4000) || 4000;
+
+export function createLivePoller(
+  onMessage: (data: any) => void,
+  onStatusChange?: (status: WebSocketStatus) => void,
+): LiveConnection | null {
+  if (typeof window === "undefined") return null;
+
+  let stopped = false;
+  let cursor = "";
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const setStatus = (status: WebSocketStatus) => {
+    try {
+      onStatusChange?.(status);
+    } catch {}
+  };
+
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const qs = `limit=50${cursor ? `&since=${encodeURIComponent(cursor)}` : ""}`;
+      const res = await apiFetch(`${API_BASE}/api/live/recent?${qs}`);
+      if (!res.ok) throw new Error(`live/recent ${res.status}`);
+      const data = await res.json();
+      setStatus("open");
+      const events: any[] = Array.isArray(data?.events) ? data.events : [];
+      for (const ev of events) onMessage(ev);
+      if (data?.cursor) cursor = String(data.cursor);
+    } catch {
+      // Transient failure (cold start / network): surface reconnecting and keep
+      // polling. Never throw out of the loop.
+      setStatus("reconnecting");
+    } finally {
+      if (!stopped) timer = setTimeout(poll, LIVE_POLL_INTERVAL_MS);
+    }
+  };
+
+  setStatus("connecting");
+  void poll();
+
+  return {
+    close() {
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
+}
+
 // ── Campaign Settings ─────────────────────────────────────────────────────────
 export interface CampaignSetting {
   platform: string;
