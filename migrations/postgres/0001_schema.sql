@@ -44,6 +44,15 @@ BEGIN
 END;
 $$;
 
+-- SQLite's ROUND(x, n) accepts a float first argument; Postgres only ships
+-- round(numeric, int). Add the missing overload so ROUND(<double>, n) queries
+-- (e.g. ROUND(SUM(cost)/SUM(views), 4)) work unchanged.
+CREATE OR REPLACE FUNCTION round(double precision, integer)
+RETURNS numeric
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT round($1::numeric, $2);
+$$;
+
 -- ── SQLite strftime() emulation ─────────────────────────────────────────────
 -- The warehouse uses strftime('%Y-%m-%dT%H:%M:%SZ', ts, '-N days') for the
 -- tracking source-lookback window. Reproduce it: convert the SQLite format
@@ -184,13 +193,34 @@ CREATE TABLE IF NOT EXISTS ad_names (
     PRIMARY KEY (platform, entity_type, entity_id)
 );
 
+-- Matches backend/api/video_metrics.py _ensure_video_table (the endpoint's
+-- authoritative schema — numeric types + *pct column names), NOT the older
+-- text-based shape in scripts/init_empty_db.py.
 CREATE TABLE IF NOT EXISTS video_metrics (
-    platform text, date text, campaign_id text, adset_id text,
-    ad_id text, creative_id text, video_id text, video_name text,
-    views text, views_3s text, views_25 text, views_50 text,
-    views_75 text, views_100 text, avg_watch_time_sec text,
-    thumb_stop_rate text, hook_rate text, hold_rate text,
-    ctr text, cost text, cost_per_view text
+    platform text,
+    date text,
+    account_id text,
+    campaign_id text,
+    adset_id text,
+    ad_id text,
+    video_id text,
+    video_name text,
+    views integer DEFAULT 0,
+    views_3s integer DEFAULT 0,
+    views_25pct integer DEFAULT 0,
+    views_50pct integer DEFAULT 0,
+    views_75pct integer DEFAULT 0,
+    views_100pct integer DEFAULT 0,
+    avg_watch_time_sec double precision DEFAULT 0,
+    video_length_sec double precision DEFAULT 0,
+    thumb_stop_rate double precision DEFAULT 0,
+    hook_rate double precision DEFAULT 0,
+    hold_rate double precision DEFAULT 0,
+    click_through_rate double precision DEFAULT 0,
+    cost_per_view double precision DEFAULT 0,
+    impressions integer DEFAULT 0,
+    clicks integer DEFAULT 0,
+    cost double precision DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS campaign_settings (

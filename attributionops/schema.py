@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from attributionops.db import is_postgres
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +413,10 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
 
 def ensure_schema(db_path: str) -> None:
     """Idempotently upgrade an existing database; memoized per process+path."""
+    if is_postgres():
+        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
+        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
+        return
     with _ensured_lock:
         if db_path in _ensured_paths:
             return

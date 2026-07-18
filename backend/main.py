@@ -884,10 +884,15 @@ def get_report_children(
         return {"rows": [], "child_tab": child_tab}
 
     # Get touchpoint sessions grouped by child
+    # NOTE: the platform/campaign/adset/ad columns are wrapped in MAX() rather
+    # than selected bare. They are constant within each grouped child_key (they
+    # make up the key), so MAX() returns that constant — but unlike SQLite,
+    # Postgres rejects bare non-grouped columns, and MAX() is valid on both.
     tp_sql = f"""
         SELECT {tp_id_tmpl} as child_key,
                {tp_id_tmpl} as child_id,
-               t.platform, t.campaign_id, t.adset_id, t.ad_id,
+               MAX(t.platform) AS platform, MAX(t.campaign_id) AS campaign_id,
+               MAX(t.adset_id) AS adset_id, MAX(t.ad_id) AS ad_id,
                COUNT(DISTINCT t.session_id) as sessions,
                COUNT(*) as touchpoint_count
         FROM touchpoints t
@@ -903,7 +908,8 @@ def get_report_children(
     sp_sql = f"""
         SELECT {sp_id_tmpl} as child_key,
                {sp_id_tmpl} as child_id,
-               s.platform, s.campaign_id, s.adset_id, s.ad_id,
+               MAX(s.platform) AS platform, MAX(s.campaign_id) AS campaign_id,
+               MAX(s.adset_id) AS adset_id, MAX(s.ad_id) AS ad_id,
                SUM(CAST(COALESCE(s.clicks, '0') AS REAL)) as sp_clicks,
                SUM(CAST(COALESCE(s.cost, '0') AS REAL)) as sp_cost,
                SUM(CAST(COALESCE(s.impressions, '0') AS REAL)) as sp_impressions

@@ -24,7 +24,8 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
-from attributionops.db import connect, sql_rows
+from attributionops.db import connect, sql_rows  # noqa
+from attributionops.db import is_postgres
 
 router = APIRouter()
 UTC = timezone.utc
@@ -46,6 +47,10 @@ _ensured_dbs: set[str] = set()
 
 
 def _ensure_table(db_path: str) -> None:
+    if is_postgres():
+        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
+        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
+        return
     if db_path in _ensured_dbs:
         return
     with connect(db_path) as conn:

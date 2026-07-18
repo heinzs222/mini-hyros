@@ -22,12 +22,17 @@ import threading
 
 from ..db import sql_rows
 from ..schema import ensure_campaign_settings
+from attributionops.db import is_postgres
 
 _lock = threading.Lock()
 _ensured: set[str] = set()
 
 
 def ensure_campaign_settings_table(db_path: str) -> None:
+    if is_postgres():
+        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
+        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
+        return
     with _lock:
         if db_path in _ensured:
             return
