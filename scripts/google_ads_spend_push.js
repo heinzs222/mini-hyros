@@ -5,7 +5,7 @@
   Run it inside the client account that owns the campaigns, not only the MCC.
 */
 
-var MINI_HYROS_ENDPOINT = "https://mini-hyros.onrender.com";
+var MINI_HYROS_ENDPOINT = "https://mini-hyros-api.vercel.app";
 var MINI_HYROS_TOKEN =
   "PASTE_GOOGLE_ADS_SCRIPT_TOKEN_HERE";
 

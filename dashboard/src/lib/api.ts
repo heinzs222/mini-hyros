@@ -3,7 +3,9 @@ function defaultApiBase(): string {
   if (typeof window !== "undefined") {
     const host = window.location.hostname;
     if (host !== "localhost" && host !== "127.0.0.1") {
-      return "https://mini-hyros.onrender.com";
+      // Production fallback when NEXT_PUBLIC_API_URL is unset. Set that env var
+      // to your deployed backend URL; this placeholder just avoids localhost.
+      return "https://mini-hyros-api.vercel.app";
     }
   }
   return "http://localhost:8000";

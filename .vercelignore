@@ -1,0 +1,14 @@
+# Keep the backend serverless function bundle lean: exclude the dashboard
+# (its own Vercel project), local data, tests, and build/VCS cruft.
+dashboard/
+data/
+tests/
+.git/
+.github/
+__pycache__/
+*.pyc
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+DEPLOY.md
+README.md

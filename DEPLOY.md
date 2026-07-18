@@ -1,93 +1,128 @@
-# Deploy Mini Hyros for Free
+# Deploy Mini Hyros on Vercel + Supabase
+
+Mini Hyros now runs entirely on Vercel:
+
+| Piece | Where | How |
+|---|---|---|
+| **Dashboard** (`dashboard/`, Next.js) | Vercel project | Static/SSR Next.js |
+| **Backend API** (`backend/`, FastAPI) | Vercel Python serverless function (`api/index.py`) | ASGI, routed via `vercel.json` |
+| **Database** | Supabase Postgres | `migrations/postgres/0001_schema.sql` |
+| **Periodic sync** | Vercel Cron → `/api/cron/sync` | replaces the old always-on loop |
+| **Live feed** | `/api/live/recent` polling | replaces the `/ws` WebSocket |
+
+> Local development is unchanged and still uses SQLite — the Postgres backend
+> only turns on when a Postgres connection string env var is present.
+
+---
 
 ## What You Need
-- A **GitHub** account (free)
-- A **Render** account (free) — for the backend API
-- A **Vercel** account (free) — for the dashboard
+- A **GitHub** account (the repo)
+- A **Vercel** account (free) — hosts both the backend and the dashboard
+- A **Supabase** account (free) — the Postgres database
 
 ---
 
-## Step 1: Push to GitHub
+## Step 1: Create the Supabase database
 
-```powershell
-cd c:\Users\SPECIAL\Desktop\hyros
-git init
-git add .
-git commit -m "Mini Hyros - self-hosted attribution"
-```
-
-Then create a new repo on https://github.com/new (call it `hyros` or whatever you want) and:
-
-```powershell
-git remote add origin https://github.com/YOUR_USERNAME/hyros.git
-git branch -M main
-git push -u origin main
-```
-
----
-
-## Step 2: Deploy Backend on Render
-
-1. Go to https://render.com and sign up (free)
-2. Click **New → Web Service**
-3. Connect your GitHub repo
-4. Configure:
-   - **Name**: `mini-hyros-api`
-   - **Root Directory**: leave empty (uses project root)
-   - **Runtime**: **Docker**
-   - **Instance Type**: **Free**
-5. Add these **Environment Variables**:
-   - `ATTRIBUTIONOPS_DB_PATH` = `/var/data/attributionops.sqlite` (on the persistent disk — see Notes; `render.yaml` sets this automatically)
-   - `TRACKING_DOMAIN` = `https://mini-hyros-api.onrender.com` (your Render URL)
-   - `SITE_TOKEN` = `your-site-token` (pick any string)
-   - `GOOGLE_ADS_SCRIPT_TOKEN` = `your-private-google-ads-script-token` (optional, for Google Ads Script spend push)
-   - `GOOGLE_ADS_SYNC_MODE` = `api` (use `script` when Google Ads Script is pushing spend instead of the Ads API)
-   - `STAPE_ENDPOINT` = `https://wnczugry.usv.stape.io` (your Stape sGTM URL)
-6. Click **Create Web Service**
-7. Wait for build to complete (~3-5 min)
-8. Your backend URL will be: `https://mini-hyros-api.onrender.com`
-
-**Test it:** Visit `https://mini-hyros-api.onrender.com/api/health`
+1. Go to https://supabase.com → **New project**. Pick a name, region, and a
+   strong database password (save it).
+2. Once the project is ready, open **SQL Editor → New query**, paste the entire
+   contents of [`migrations/postgres/0001_schema.sql`](migrations/postgres/0001_schema.sql),
+   and **Run**. This creates every table, index, the lenient-cast/`strftime`
+   helper functions, and the recurring-order attribution triggers.
+3. Get the connection string: **Project Settings → Database → Connection string
+   → "Transaction pooler" (port 6543)**. It looks like:
+   ```
+   postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres
+   ```
+   Use the **transaction pooler** (6543), not the direct connection — serverless
+   functions open many short-lived connections. (The app disables prepared
+   statements so it is pooler-safe.)
 
 ---
 
-## Step 3: Deploy Dashboard on Vercel
+## Step 2: Deploy the Backend API on Vercel
 
-1. Go to https://vercel.com and sign up (free, use GitHub)
-2. Click **Add New → Project**
-3. Import your GitHub repo
-4. Configure:
-   - **Framework Preset**: Next.js
+1. Go to https://vercel.com → **Add New → Project** and import the repo.
+2. Configure:
+   - **Root Directory**: leave as the repository root (`.`)
+   - **Framework Preset**: **Other** (Vercel auto-detects the Python function
+     from `api/index.py` + `requirements.txt` and the `vercel.json` routing)
+3. Add **Environment Variables** (see the full reference below). At minimum:
+   - `DATABASE_URL` = the Supabase transaction-pooler URI from Step 1
+   - `TRACKING_DOMAIN` = your backend URL (e.g. `https://mini-hyros-api.vercel.app`)
+   - `SITE_TOKEN` = any string you choose
+   - `CRON_SECRET` = a random string (Vercel Cron sends it as a bearer token)
+   - `REPORT_TIMEZONE`, `REPORT_CURRENCY`, plus any ad-platform/webhook secrets
+4. **Deploy.** Your backend URL will be something like
+   `https://mini-hyros-api.vercel.app`.
+5. The `crons` entry in `vercel.json` registers an hourly call to
+   `/api/cron/sync`. Adjust the schedule there if you want it more/less frequent
+   (minute-level cron requires a Vercel Pro plan).
+
+**Test it:** visit `https://<your-backend>.vercel.app/api/health` — you should
+see `{"status":"ok", ... ,"backend":"postgres"}`.
+
+---
+
+## Step 3: Deploy the Dashboard on Vercel
+
+1. **Add New → Project**, import the **same repo** again (a second Vercel
+   project for the frontend).
+2. Configure:
+   - **Framework Preset**: **Next.js**
    - **Root Directory**: `dashboard`
-5. Add this **Environment Variable**:
-   - `NEXT_PUBLIC_API_URL` = `https://mini-hyros-api.onrender.com` (your Render URL from Step 2)
-6. Click **Deploy**
-7. Wait for build (~1-2 min)
-8. Your dashboard URL will be something like: `https://hyros-dashboard.vercel.app`
+3. Add this **Environment Variable**:
+   - `NEXT_PUBLIC_API_URL` = your backend URL from Step 2
+     (e.g. `https://mini-hyros-api.vercel.app`)
+4. **Deploy.** Your dashboard URL will be something like
+   `https://mini-hyros.vercel.app`.
+
+> Set `CORS_ALLOW_ORIGINS` on the backend to your dashboard origin if you want
+> to lock CORS down (it defaults to `*` so public tracking scripts work).
 
 ---
 
-## Step 4: Update Tracking Domain
+## Step 4: Install the Tracking Pixel
 
-Go back to Render → your web service → Environment:
-- Set `TRACKING_DOMAIN` = `https://mini-hyros-api.onrender.com`
-- Set `STAPE_ENDPOINT` = `https://wnczugry.usv.stape.io`
+Visit `https://<your-backend>.vercel.app/t/setup` for copy-paste snippets. The
+main script is:
 
-This makes the setup page (`/t/setup`) show the correct script URLs and Stape endpoint.
-
----
-
-## Step 5: Install Tracking Pixel
-
-Visit `https://mini-hyros-api.onrender.com/t/setup` for copy-paste snippets.
-
-Your main tracking script will be:
 ```html
-<script src="https://mini-hyros-api.onrender.com/t/hyros.js"
+<script src="https://<your-backend>.vercel.app/t/hyros.js"
         data-token="your-site-token"
-        data-endpoint="https://mini-hyros-api.onrender.com"
-        data-stape-endpoint="https://wnczugry.usv.stape.io"></script>
+        data-endpoint="https://<your-backend>.vercel.app"></script>
 ```
+
+---
+
+## Environment Variable Reference
+
+Set these on the **backend** Vercel project (secrets marked 🔒):
+
+| Variable | Example / default | Notes |
+|---|---|---|
+| `DATABASE_URL` 🔒 | `postgresql://…pooler.supabase.com:6543/postgres` | Supabase transaction pooler. Also accepts `ATTRIBUTIONOPS_DATABASE_URL` / `POSTGRES_URL` / `SUPABASE_DB_URL`. |
+| `CRON_SECRET` 🔒 | random string | Auth for `/api/cron/sync` (Vercel Cron bearer token). |
+| `TRACKING_DOMAIN` | `https://mini-hyros-api.vercel.app` | Used by `/t/setup` script URLs. |
+| `SITE_TOKEN` | `your-site-token` | Pixel token. |
+| `REPORT_TIMEZONE` | `Etc/GMT+6` | Match the source Hyros account. |
+| `REPORT_CURRENCY` | `CAD` | Reporting currency. |
+| `SPEND_FX_RATES` 🔒 | `USD:1.40` | Read-time FX conversion. |
+| `SYNC_INTERVAL_MINUTES` | `30` | Cadence hint (the actual cadence is the Vercel Cron schedule). |
+| `META_ACCESS_TOKEN` 🔒 / `META_AD_ACCOUNT_ID` 🔒 / `META_PIXEL_ID` 🔒 | | Meta Ads API. |
+| `META_INCLUDE_CAMPAIGN_ADJUSTMENTS` | `true` | |
+| `GOOGLE_ADS_DEVELOPER_TOKEN` 🔒 (+ OAuth vars) | | Google Ads API. |
+| `GOOGLE_INCLUDE_CAMPAIGN_ADJUSTMENTS` | `true` | |
+| `TIKTOK_ACCESS_TOKEN` 🔒 / `TIKTOK_ACCOUNT_CURRENCY` | | TikTok Ads API. |
+| `STRIPE_RECURRING_AMOUNT_KEYS` | `CAD:5000` | |
+| `STRIPE_HISTORY_BACKFILL_DAYS` | `365` | |
+| `SHOPIFY_WEBHOOK_SECRET` 🔒 / `STRIPE_WEBHOOK_SECRET` 🔒 | | Webhook verification. |
+| `AUTH_ENABLED` | `false` | Set `true` + `AUTH_USERNAME`/`AUTH_PASSWORD`/`AUTH_SECRET_KEY` to require login. |
+| `CORS_ALLOW_ORIGINS` | `*` | Comma-separated origins to lock CORS down. |
+
+Set on the **dashboard** project: `NEXT_PUBLIC_API_URL` (your backend URL), and
+optionally `NEXT_PUBLIC_LIVE_POLL_MS` (live-feed poll interval, default 4000).
 
 ---
 
@@ -95,17 +130,28 @@ Your main tracking script will be:
 
 | What | URL |
 |---|---|
-| Dashboard | `https://your-app.vercel.app` |
-| Backend API | `https://mini-hyros-api.onrender.com` |
-| Tracking Script | `https://mini-hyros-api.onrender.com/t/hyros.js` |
-| Setup Guide | `https://mini-hyros-api.onrender.com/t/setup` |
-| Shopify Webhook | `https://mini-hyros-api.onrender.com/api/webhooks/shopify` |
-| Stripe Webhook | `https://mini-hyros-api.onrender.com/api/webhooks/stripe` |
+| Dashboard | `https://<your-dashboard>.vercel.app` |
+| Backend API | `https://<your-backend>.vercel.app` |
+| Health check | `https://<your-backend>.vercel.app/api/health` |
+| Tracking Script | `https://<your-backend>.vercel.app/t/hyros.js` |
+| Setup Guide | `https://<your-backend>.vercel.app/t/setup` |
+| Shopify Webhook | `https://<your-backend>.vercel.app/api/webhooks/shopify` |
+| Stripe Webhook | `https://<your-backend>.vercel.app/api/webhooks/stripe` |
+| Cron sync (Vercel Cron) | `https://<your-backend>.vercel.app/api/cron/sync` |
 
 ---
 
 ## Notes
 
-- **Render free tier** sleeps after 15 min of inactivity. First request after sleep takes ~30s. To keep it awake, use a free cron pinger like https://cron-job.org to hit `/api/health` every 14 min.
-- **Persistent data**: `render.yaml` attaches a Render persistent disk (`disk: data`, mounted at `/var/data`, 1 GB) and points `ATTRIBUTIONOPS_DB_PATH` at `/var/data/attributionops.sqlite`, so the SQLite database survives redeploys and spin-downs. **Important:** Render persistent disks require a **paid instance type** — the disk is only provisioned once you upgrade the service from **Free** to a paid plan (e.g. Starter, ~$7/mo). On the free tier there is no attached disk, so data still resets on redeploy (or switch to Turso, a free SQLite cloud DB, as an alternative).
-- **Auto-deploy**: Both Vercel and Render auto-deploy when you push to GitHub.
+- **Migrations**: `migrations/postgres/0001_schema.sql` is the single source of
+  truth for the Postgres schema. The app never runs SQLite-style
+  `CREATE`/`ALTER`/`PRAGMA`/trigger DDL against Postgres — apply the migration
+  once (Step 1) and re-apply it (it is idempotent) when the schema changes.
+- **Periodic sync**: driven by Vercel Cron hitting `/api/cron/sync`. The old
+  in-process 30-minute loop is disabled on serverless.
+- **Live feed**: the dashboard polls `/api/live/recent` (every 4s by default);
+  there is no long-lived WebSocket on serverless.
+- **Cold starts**: serverless functions cold-start after inactivity; the first
+  request may be slower while the report cache warms lazily.
+- **Local development** is unchanged: without a Postgres URL the app uses SQLite
+  and `uvicorn main:app --app-dir backend` (see `README.md`).

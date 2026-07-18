@@ -65,7 +65,11 @@ def _tiktok_redirect_uri(request: Request) -> str:
     if backend_url and backend_url != frontend_url and "vercel.app" not in backend_url:
         return backend_url
 
-    return _request_origin(request) or "https://mini-hyros.onrender.com"
+    return (
+        _request_origin(request)
+        or os.environ.get("TRACKING_DOMAIN", "").strip().rstrip("/")
+        or "https://mini-hyros-api.vercel.app"
+    )
 
 
 def _dashboard_url() -> str:
