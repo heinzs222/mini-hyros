@@ -91,3 +91,31 @@ def test_rowid_substring_in_identifier_is_untouched():
     out = translate("SELECT crowid_x, t.rowid FROM t")
     assert "crowid_x" in out
     assert "t.ctid" in out
+
+
+def test_cast_as_integer_becomes_sqlite_int():
+    assert translate("SELECT CAST(x AS INTEGER) FROM t") == "SELECT sqlite_int(x) FROM t"
+
+
+def test_replace_into_unknown_table_falls_back_to_do_nothing():
+    out = translate("REPLACE INTO unknown_tbl (a, b) VALUES (?, ?)")
+    assert out.startswith("INSERT INTO unknown_tbl (a, b) VALUES")
+    assert out.rstrip().endswith("ON CONFLICT DO NOTHING")
+
+
+def test_line_comment_percent_escaped_and_preserved():
+    out = translate("SELECT 1 -- 50% done\nFROM t WHERE a = ?")
+    assert "-- 50%% done" in out
+    assert "a = %s" in out
+
+
+def test_double_quoted_identifier_preserves_question_mark():
+    out = translate('SELECT "weird?col" FROM t WHERE a = ?')
+    assert '"weird?col"' in out
+    assert out.rstrip().endswith("a = %s")
+
+
+def test_escaped_single_quote_and_percent_in_string():
+    out = translate("SELECT 'it''s a %' AS x FROM t WHERE a = ?")
+    assert "'it''s a %%'" in out
+    assert out.rstrip().endswith("a = %s")
