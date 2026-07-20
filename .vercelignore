@@ -1,14 +1,13 @@
-# Keep the backend serverless function bundle lean: exclude the dashboard
-# (its own Vercel project), local data, tests, and build/VCS cruft.
-dashboard/
+# Both Vercel projects deploy from this single repo:
+#   - the dashboard project (Root Directory = dashboard)
+#   - the backend project  (Root Directory = repo root, api/index.py)
+# A repo-root .vercelignore is applied to BOTH, so it must NOT exclude
+# dashboard/ — doing so empties the dashboard build. Keep this to backend-only
+# cruft that is safe to drop from either upload.
 data/
 tests/
-.git/
-.github/
 __pycache__/
 *.pyc
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
-DEPLOY.md
-README.md
