@@ -20,7 +20,8 @@ from fastapi import APIRouter, Request, HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
-from attributionops.db import connect
+from attributionops.db import connect  # noqa
+from attributionops.db import is_postgres
 from attributionops.schema import ensure_order_semantics, ensure_refund_log
 
 router = APIRouter()
@@ -93,6 +94,10 @@ _tracking_schema_ready: set[str] = set()
 
 
 def _ensure_tracking_schema(db_path: str) -> None:
+    if is_postgres():
+        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
+        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
+        return
     # Memoized per process+path: the ALTER/CREATE INDEX DDL only needs to run
     # once, not on every tracking hit (which serialized on the write lock).
     with _tracking_schema_lock:

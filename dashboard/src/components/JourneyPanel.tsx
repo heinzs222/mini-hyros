@@ -159,7 +159,7 @@ export default function JourneyPanel({ startDate = "", endDate = "" }: JourneyPa
             <div className="font-medium mb-1">Journey data requires tracking setup</div>
             <ol className="text-yellow-400/70 text-xs space-y-1 list-decimal list-inside">
               <li>Install the tracking pixel on your website from Settings / Tracking.</li>
-              <li>Send GHL webhooks to {process.env.NEXT_PUBLIC_API_URL || "https://mini-hyros.onrender.com"}/api/webhooks/ghl.</li>
+              <li>Send GHL webhooks to {process.env.NEXT_PUBLIC_API_URL || "https://mini-hyros-api.vercel.app"}/api/webhooks/ghl.</li>
               <li>Leads and purchases will appear here once visitors identify or convert.</li>
             </ol>
           </div>

@@ -1,0 +1,8 @@
+# Runtime dependencies for the Vercel Python serverless backend (api/index.py).
+# Local development uses backend/requirements.txt (which also pins uvicorn for
+# `uvicorn main:app`); Vercel provides the ASGI server, so this list is leaner
+# and adds psycopg for the Supabase Postgres backend.
+fastapi==0.115.0
+python-dotenv==1.0.1
+httpx==0.27.2
+psycopg[binary]>=3.2,<4

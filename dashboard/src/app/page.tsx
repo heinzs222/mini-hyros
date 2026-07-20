@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
-import { fetchReport, createWebSocket, fetchAuthMe, logout as logoutApi, syncSpend, syncStripe, syncGhl, type ManagedWebSocket } from "@/lib/api";
+import { fetchReport, createLivePoller, fetchAuthMe, logout as logoutApi, syncSpend, syncStripe, syncGhl, type LiveConnection } from "@/lib/api";
 import { daysAgo, reportTodayIso, shiftIso } from "@/lib/utils";
 import Sidebar, { Section } from "@/components/Sidebar";
 import DateRangePicker from "@/components/DateRangePicker";
@@ -201,7 +201,7 @@ export default function DashboardPage() {
   const [syncErrors, setSyncErrors] = useState<string[]>([]);
   const [platformFilter, setPlatformFilter] = useState("all");
   const [mainTab, setMainTab] = useState("attribution");
-  const wsRef = useRef<ManagedWebSocket | null>(null);
+  const wsRef = useRef<LiveConnection | null>(null);
   const refreshTimerRef = useRef<NodeJS.Timeout | null>(null);
   const spendSyncTimerRef = useRef<NodeJS.Timeout | null>(null);
   const syncingSpendRef = useRef(false);
@@ -688,7 +688,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!authChecked) return;
-    const managed = createWebSocket(
+    const managed = createLivePoller(
       (data: LiveEvent) => {
         const eventId = (liveEventSeqRef.current += 1);
         setLiveEvents((prev) => [...prev.slice(-49), { ...data, _id: eventId }]);

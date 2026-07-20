@@ -22,7 +22,8 @@ from fastapi import APIRouter, BackgroundTasks, Query
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
-from attributionops.db import connect, sql_rows
+from attributionops.db import connect, sql_rows  # noqa
+from attributionops.db import is_postgres
 from attributionops.schema import ensure_order_semantics, ensure_refund_log
 from attributionops.util import local_day_bounds_utc, parse_iso_ts
 
@@ -84,6 +85,10 @@ def _get_stripe_key() -> str:
 
 
 def _ensure_orders_table(db_path: str) -> None:
+    if is_postgres():
+        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
+        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
+        return
     with connect(db_path) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS orders (
             order_id TEXT PRIMARY KEY,

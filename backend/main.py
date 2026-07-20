@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from attributionops.config import default_db_path
+from attributionops.db import is_postgres
 from attributionops.report import ReportInputs, build_hyros_like_report
 from attributionops.report_integrity import resolve_attribution_dimensions
 from attributionops.schema import ensure_schema
@@ -192,28 +193,50 @@ async def _auto_sync_loop(interval_minutes: float, *, initial_delay_seconds: flo
         await asyncio.sleep(max(interval_minutes, 1.0) * 60)
 
 
+def _is_serverless() -> bool:
+    """True on Vercel (or any platform that sets SERVERLESS=1).
+
+    On serverless, background threads/tasks are killed when the function
+    suspends between requests, so the boot warmer and the in-process auto-sync
+    loop must not run — the sync is driven by Vercel Cron hitting
+    /api/cron/sync, and the report cache warms lazily on the first request.
+    """
+    return bool(
+        os.environ.get("VERCEL")
+        or os.environ.get("SERVERLESS")
+        or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure configured DB exists (create schema if missing)
-    db = default_db_path()
-    _ensure_db_exists(db)
-    # Apply idempotent migrations (unique indexes, campaign_settings) to any
-    # pre-existing database so read-time guarantees hold on older DBs too.
-    ensure_schema(db)
+    # On SQLite (local/dev) create + migrate the file. On Postgres the schema is
+    # provisioned once by migrations/postgres/0001_schema.sql, and the serverless
+    # filesystem is read-only anyway, so there is nothing to create here.
+    if not is_postgres():
+        db = default_db_path()
+        _ensure_db_exists(db)
+        ensure_schema(db)
+
+    serverless = _is_serverless()
+
     # Warm the default dashboard windows into the report cache in the background
-    # so the first request after a (re)boot — exactly when a Render cold start
-    # already makes things feel slow — is served from cache instead of paying a
-    # full report build on top. Disable with REPORT_WARM_ON_BOOT=0.
+    # so the first request after a (re)boot is served from cache. Skipped on
+    # serverless, where a detached boot thread would be frozen mid-flight.
     if (
-        (os.environ.get("REPORT_WARM_ON_BOOT", "1").strip() or "1") != "0"
+        not serverless
+        and (os.environ.get("REPORT_WARM_ON_BOOT", "1").strip() or "1") != "0"
         and _REPORT_CACHE_TTL > 0
     ):
         threading.Thread(target=_warm_default_reports, daemon=True, name="report-boot-warm").start()
+
     # Server-owned periodic sync (SYNC_INTERVAL_MINUTES, default 30; 0 disables):
     # pulls spend/Stripe/GHL through the same handlers as the manual Sync button.
+    # On serverless there is no long-lived process to host the loop — Vercel Cron
+    # calls /api/cron/sync on the same cadence instead (see vercel.json).
     auto_sync_task = None
     sync_interval = _sync_interval_minutes()
-    if sync_interval > 0:
+    if not serverless and sync_interval > 0:
         auto_sync_task = asyncio.create_task(_auto_sync_loop(sync_interval))
     yield
     if auto_sync_task is not None:
@@ -290,6 +313,10 @@ def _is_public_path(path: str) -> bool:
     if p.startswith("/api/webhooks"):
         return True
     if p == "/api/spend/google-ads-script":
+        return True
+    if p == "/api/cron/sync":
+        # Guards itself with CRON_SECRET; must bypass the dashboard auth cookie
+        # so Vercel Cron (which sends only its own bearer token) can reach it.
         return True
     if p.startswith("/t/"):
         return True
@@ -513,7 +540,106 @@ async def health():
             payload["migration_error"] = mig_err
     except Exception:
         pass
+    payload["backend"] = "postgres" if is_postgres() else "sqlite"
     return payload
+
+
+@app.api_route("/api/cron/sync", methods=["GET", "POST"])
+async def cron_sync(request: Request):
+    """Server-owned periodic sync, invoked by Vercel Cron (see vercel.json).
+
+    Replaces the always-on asyncio auto-sync loop, which cannot run on
+    serverless. Protected by CRON_SECRET when set: Vercel Cron sends it as
+    ``Authorization: Bearer <CRON_SECRET>``; an ``X-Cron-Secret`` header is also
+    accepted for manual/local triggering.
+    """
+    secret = os.environ.get("CRON_SECRET", "").strip()
+    if secret:
+        auth = str(request.headers.get("authorization") or "")
+        alt = str(request.headers.get("x-cron-secret") or "")
+        if auth != f"Bearer {secret}" and alt != secret:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    try:
+        result = await _run_scheduled_sync()
+        return {"status": "ok", "result": result}
+    except Exception as exc:
+        logging.getLogger("vigil.cron").exception("cron sync failed")
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(exc)})
+
+
+@app.get("/api/live/recent")
+def live_recent(
+    since: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Recent activity feed for the dashboard's Live Events panel.
+
+    Polling replacement for the /ws WebSocket (which serverless functions can't
+    hold open). Returns events newer than ``since`` (an ISO ts cursor) ordered
+    oldest-first so the client can append them; on the first poll (no cursor) it
+    returns the most recent ``limit`` events as a baseline. Derived directly from
+    the warehouse, so it needs no in-process broadcast state.
+    """
+    db_path = _db()
+    params = {"since": since or "", "limit": limit}
+    # gross/value are stored as text; keep them text here and coerce in Python.
+    sql = """
+        SELECT ts, 'new_order' AS etype, order_id AS ref,
+               COALESCE(gross, '') AS amount, COALESCE(customer_key, '') AS customer_key,
+               '' AS extra
+        FROM orders
+        WHERE ts > :since AND COALESCE(order_id, '') <> ''
+        UNION ALL
+        SELECT ts,
+               CASE WHEN LOWER(COALESCE(type, '')) IN ('booking', 'appointment', 'appointmentbooked', 'appointment_booked')
+                    THEN 'new_booking' ELSE 'new_lead' END AS etype,
+               COALESCE(order_id, '') AS ref, '' AS amount,
+               COALESCE(customer_key, '') AS customer_key, COALESCE(type, '') AS extra
+        FROM conversions
+        WHERE ts > :since
+          AND LOWER(COALESCE(type, '')) NOT IN ('purchase', 'sale', 'payment')
+        UNION ALL
+        SELECT ts, 'session' AS etype, COALESCE(session_id, '') AS ref, '' AS amount,
+               COALESCE(customer_key, '') AS customer_key,
+               COALESCE(utm_source, '') || '|' || COALESCE(landing_page, '') AS extra
+        FROM sessions
+        WHERE ts > :since
+        ORDER BY ts DESC
+        LIMIT :limit
+    """
+    from attributionops.db import sql_rows as _sql_rows
+
+    try:
+        rows = _sql_rows(db_path, sql, params)
+    except Exception:
+        logging.getLogger("vigil.live").exception("live/recent query failed")
+        rows = []
+
+    events: list[dict[str, Any]] = []
+    for r in reversed(rows):  # oldest-first for append semantics
+        etype = str(r.get("etype") or "")
+        ts = str(r.get("ts") or "")
+        ev: dict[str, Any] = {"type": etype, "ts": ts, "customer_key": r.get("customer_key") or ""}
+        if etype == "new_order":
+            try:
+                ev["gross"] = round(float(str(r.get("amount") or "0") or 0), 2)
+            except (TypeError, ValueError):
+                ev["gross"] = 0.0
+            ev["order_id"] = r.get("ref") or ""
+        elif etype in ("new_lead", "new_booking"):
+            ev["order_id"] = r.get("ref") or ""
+            ev["conversion_type"] = r.get("extra") or ""
+            ev["form_name"] = r.get("extra") or ""
+        else:
+            ev["session_id"] = r.get("ref") or ""
+            extra = str(r.get("extra") or "")
+            src, _, landing = extra.partition("|")
+            ev["utm_source"] = src
+            ev["landing_page"] = landing
+        events.append(ev)
+
+    cursor = events[-1]["ts"] if events else since
+    return {"events": events, "cursor": cursor}
 
 
 # NOTE: the report/data endpoints below are declared as sync `def` (not `async
@@ -884,10 +1010,15 @@ def get_report_children(
         return {"rows": [], "child_tab": child_tab}
 
     # Get touchpoint sessions grouped by child
+    # NOTE: the platform/campaign/adset/ad columns are wrapped in MAX() rather
+    # than selected bare. They are constant within each grouped child_key (they
+    # make up the key), so MAX() returns that constant — but unlike SQLite,
+    # Postgres rejects bare non-grouped columns, and MAX() is valid on both.
     tp_sql = f"""
         SELECT {tp_id_tmpl} as child_key,
                {tp_id_tmpl} as child_id,
-               t.platform, t.campaign_id, t.adset_id, t.ad_id,
+               MAX(t.platform) AS platform, MAX(t.campaign_id) AS campaign_id,
+               MAX(t.adset_id) AS adset_id, MAX(t.ad_id) AS ad_id,
                COUNT(DISTINCT t.session_id) as sessions,
                COUNT(*) as touchpoint_count
         FROM touchpoints t
@@ -903,7 +1034,8 @@ def get_report_children(
     sp_sql = f"""
         SELECT {sp_id_tmpl} as child_key,
                {sp_id_tmpl} as child_id,
-               s.platform, s.campaign_id, s.adset_id, s.ad_id,
+               MAX(s.platform) AS platform, MAX(s.campaign_id) AS campaign_id,
+               MAX(s.adset_id) AS adset_id, MAX(s.ad_id) AS ad_id,
                SUM(CAST(COALESCE(s.clicks, '0') AS REAL)) as sp_clicks,
                SUM(CAST(COALESCE(s.cost, '0') AS REAL)) as sp_cost,
                SUM(CAST(COALESCE(s.impressions, '0') AS REAL)) as sp_impressions

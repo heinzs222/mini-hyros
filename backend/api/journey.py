@@ -33,8 +33,9 @@ def _db() -> str:
 
 
 def _table_columns(db_path: str, table: str) -> set[str]:
-    with connect(db_path) as conn:
-        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    from attributionops.util import table_columns
+
+    return table_columns(db_path, table)
 
 
 def _identity_predicate(
