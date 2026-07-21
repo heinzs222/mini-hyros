@@ -5,6 +5,7 @@ import html
 import json
 import logging
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -21,6 +22,12 @@ from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, HTML
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
+
+try:
+    from .database_export import create_sqlite_snapshot, remove_file
+except ImportError:
+    from database_export import create_sqlite_snapshot, remove_file
 
 # Add parent dir so we can import attributionops
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -291,6 +298,8 @@ def _is_public_path(path: str) -> bool:
         return True
     if p == "/api/spend/google-ads-script":
         return True
+    if p == "/api/admin/database-export":
+        return True
     if p.startswith("/t/"):
         return True
     if p.startswith("/v1/lst/"):
@@ -514,6 +523,33 @@ async def health():
     except Exception:
         pass
     return payload
+
+
+@app.get("/api/admin/database-export")
+def database_export(request: Request):
+    expected = os.environ.get("DATABASE_EXPORT_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="Database export is not configured")
+
+    supplied = request.headers.get("X-Mini-Hyros-Export-Token", "")
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        snapshot_path = create_sqlite_snapshot(_db())
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Database file not found")
+    except Exception:
+        logging.exception("Database export failed")
+        raise HTTPException(status_code=500, detail="Database export failed")
+
+    filename = f"mini-hyros-{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.sqlite"
+    return FileResponse(
+        snapshot_path,
+        media_type="application/vnd.sqlite3",
+        filename=filename,
+        background=BackgroundTask(remove_file, snapshot_path),
+    )
 
 
 # NOTE: the report/data endpoints below are declared as sync `def` (not `async

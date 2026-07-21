@@ -23,15 +23,38 @@ key cannot create this schema or import trusted attribution data.
 
 ## 2. Export the current Render database
 
-Download `/var/data/attributionops.sqlite` from the current Render persistent
-disk before changing production. Keep Render serving traffic during validation.
+Keep Render serving traffic during validation. Deploy the protected export
+endpoint, create a long random `DATABASE_EXPORT_TOKEN` in Render, and redeploy.
+Never put this token in a URL or commit it.
+
+Download a consistent SQLite snapshot through the API:
+
+```powershell
+$env:DATABASE_EXPORT_TOKEN = "your-random-export-token"
+$headers = @{"X-Mini-Hyros-Export-Token" = $env:DATABASE_EXPORT_TOKEN}
+Invoke-WebRequest `
+  -Uri "https://mini-hyros.onrender.com/api/admin/database-export" `
+  -Headers $headers `
+  -OutFile ".\production-attributionops.sqlite"
+```
+
+The endpoint uses SQLite's online backup API and runs an integrity check before
+returning the file. It does not stop ingestion or expose the Render disk path.
+Confirm the downloaded file before importing it:
+
+```powershell
+python -c "import sqlite3; db=sqlite3.connect('production-attributionops.sqlite'); print(db.execute('PRAGMA integrity_check').fetchone()[0]); db.close()"
+```
+
+The result must be `ok`. Keep this snapshot private because it contains
+customer, click, lead, and order data.
 
 ## 3. Inspect and migrate
 
 ```powershell
 pip install -r requirements-migration.txt
-python scripts/migrate_sqlite_to_supabase.py --sqlite-path .\attributionops.sqlite --dry-run
-python scripts/migrate_sqlite_to_supabase.py --sqlite-path .\attributionops.sqlite --replace
+python scripts/migrate_sqlite_to_supabase.py --sqlite-path .\production-attributionops.sqlite --dry-run
+python scripts/migrate_sqlite_to_supabase.py --sqlite-path .\production-attributionops.sqlite --replace
 ```
 
 `--replace` imports all ten warehouse tables in one transaction. The command
