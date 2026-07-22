@@ -1,14 +1,17 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "api/index.py": {
-      "maxDuration": 300
+  "services": {
+    "mini-hyros-api": {
+      "root": "."
     }
   },
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "/api/index.py"
+      "destination": {
+        "type": "service",
+        "service": "mini-hyros-api"
+      }
     }
   ]
 }
