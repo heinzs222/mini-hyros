@@ -2,7 +2,8 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
     "mini-hyros-api": {
-      "root": "."
+      "root": ".",
+      "entrypoint": "api/index.py"
     }
   },
   "rewrites": [
