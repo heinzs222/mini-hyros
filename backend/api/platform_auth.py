@@ -68,7 +68,7 @@ def _tiktok_redirect_uri(request: Request) -> str:
         os.environ.get("PUBLIC_API_URL")
         or os.environ.get("API_PUBLIC_URL")
         or _request_origin(request)
-        or "https://mini-hyros.onrender.com"
+        or "https://vigil-api.vercel.app"
     )
 
 

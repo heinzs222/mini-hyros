@@ -56,7 +56,7 @@ Download a consistent SQLite snapshot through the API:
 $env:DATABASE_EXPORT_TOKEN = "your-random-export-token"
 $headers = @{"X-Mini-Hyros-Export-Token" = $env:DATABASE_EXPORT_TOKEN}
 Invoke-WebRequest `
-  -Uri "https://mini-hyros.onrender.com/api/admin/database-export" `
+  -Uri "https://vigil-api.vercel.app/api/admin/database-export" `
   -Headers $headers `
   -OutFile ".\production-attributionops.sqlite"
 ```

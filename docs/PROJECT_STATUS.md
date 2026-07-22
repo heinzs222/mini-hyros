@@ -12,7 +12,7 @@ read-only reference: never create, edit, delete, or reconfigure anything there.
 ## Current architecture
 
 - Frontend: Vercel at `https://mini-hyros.vercel.app/`.
-- API and ingestion: FastAPI on Render at `https://mini-hyros.onrender.com/`.
+- API and ingestion: FastAPI on Render at `https://vigil-api.vercel.app/`.
 - Current production database: SQLite on the Render persistent disk at
   `/var/data/attributionops.sqlite`.
 - Target database: Supabase Postgres. A production snapshot has been imported
