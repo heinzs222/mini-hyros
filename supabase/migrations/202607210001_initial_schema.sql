@@ -15,8 +15,11 @@ create table if not exists public.spend (
   clicks text,
   cost text,
   impressions text,
-  metadata text
+  metadata text,
+  currency text
 );
+
+alter table public.spend add column if not exists currency text;
 
 create table if not exists public.sessions (
   session_id text,

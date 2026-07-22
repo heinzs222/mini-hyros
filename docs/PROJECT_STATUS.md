@@ -15,8 +15,9 @@ read-only reference: never create, edit, delete, or reconfigure anything there.
 - API and ingestion: FastAPI on Render at `https://mini-hyros.onrender.com/`.
 - Current production database: SQLite on the Render persistent disk at
   `/var/data/attributionops.sqlite`.
-- Target database: Supabase Postgres. The schema and migration tooling are in
-  this repository, but production has not been switched to Postgres.
+- Target database: Supabase Postgres. A production snapshot has been imported
+  and verified with exact source/target row-count parity, but production has
+  not been switched to Postgres.
 - Server-side tagging: Stape-hosted Google Tag Manager server container.
 
 ## Data flows
@@ -57,9 +58,9 @@ read-only reference: never create, edit, delete, or reconfigure anything there.
 - Supabase is not the live runtime database. FastAPI still contains substantial
   SQLite-specific SQL (`PRAGMA`, `rowid`, SQLite date functions, and `?`
   placeholders). Changing one environment variable is not a valid cutover.
-- The production SQLite data has not yet been exported and imported into
-  Supabase. The existing Supabase warehouse tables are empty except for three
-  intentional campaign-setting defaults.
+- Supabase contains a verified production snapshot, but it can lag behind the
+  live SQLite database while Render continues ingesting into SQLite. A final
+  delta import is required immediately before runtime cutover.
 - Attribution coverage is incomplete. Unattributed orders must remain clearly
   reported rather than assigned to a fabricated source.
 - Cost per lead can differ from Hyros when Vigil and Hyros use different lead
@@ -85,31 +86,36 @@ Completed:
 2. Added a SQLite-to-Postgres migration utility and migration dependencies.
 3. Confirmed the Supabase connection and applied the schema.
 4. Added a safe, authenticated SQLite snapshot endpoint and focused test.
+5. Exported the production SQLite database and passed `PRAGMA quick_check`.
+6. Imported the snapshot in one committed transaction and verified exact row
+   counts in all ten warehouse tables: 1,211 spend rows, 267,810 sessions,
+   141,547 touchpoints, 8,678 orders, 11,806 conversions, 0 reported values,
+   2,330 ad names, 0 video metrics, 3 campaign settings, and 25 refunds.
 
 Current stopping point:
 
-1. Deploy the database export endpoint.
-2. Set a long random `DATABASE_EXPORT_TOKEN` in Render and redeploy.
-3. Download and integrity-check the production SQLite snapshot using
-   `docs/SUPABASE_MIGRATION.md`.
-4. Dry-run and import that snapshot into Supabase.
-5. Compare source/target row counts and dashboard totals before changing live
-   reads or writes.
+1. Implement a Postgres data-access adapter behind the existing FastAPI API.
+2. Run fixed-window SQLite/Postgres reports side by side and resolve every
+   difference in orders, net revenue, refunds, leads, spend, clicks, and
+   attribution.
+3. Pause ingestion briefly, import the final SQLite delta, and switch reads and
+   writes only after parity passes.
+4. Keep the FastAPI service on Render during this database cutover. Moving API
+   compute is a separate project.
 
 ## Direction and next work
 
-1. Complete the snapshot import without interrupting production.
-2. Add a Postgres data-access adapter behind the existing FastAPI API.
-3. Run SQLite and Postgres reports side by side for fixed date windows and
+1. Add a Postgres data-access adapter behind the existing FastAPI API.
+2. Run SQLite and Postgres reports side by side for fixed date windows and
    compare orders, net revenue, refunds, leads, spend, clicks, and attribution.
-4. Perform a short final ingestion pause, import the final delta, and switch the
+3. Perform a short final ingestion pause, import the final delta, and switch the
    API only after parity checks pass.
-5. Reconcile GHL lead definitions and identity stitching to reduce the reporting
+4. Reconcile GHL lead definitions and identity stitching to reduce the reporting
    gap and match Hyros CPL using the same source records.
-6. Verify browser lead and purchase events reach Vigil, Stape, Google, Meta, and
+5. Verify browser lead and purchase events reach Vigil, Stape, Google, Meta, and
    TikTok with stable event IDs and deduplication.
-7. Finish reports and CRM workflow testing across desktop and mobile.
-8. Retire Render SQLite only after the Supabase deployment has stable ingestion,
+6. Finish reports and CRM workflow testing across desktop and mobile.
+7. Retire Render SQLite only after the Supabase deployment has stable ingestion,
    reporting, backups, and rollback coverage. Moving API compute off Render is a
    separate deployment project.
 

@@ -9,6 +9,29 @@ The browser publishable key is intentionally not used for warehouse reads or
 writes. All warehouse tables have row-level security enabled with no anonymous
 policies. The backend must use Supabase's private Postgres connection URI.
 
+## Current status (2026-07-22)
+
+A production SQLite snapshot passed `PRAGMA quick_check` and was imported into
+Supabase in one committed transaction. Source and target row counts matched
+exactly:
+
+| Table | Rows |
+| --- | ---: |
+| `spend` | 1,211 |
+| `sessions` | 267,810 |
+| `touchpoints` | 141,547 |
+| `orders` | 8,678 |
+| `conversions` | 11,806 |
+| `reported_value` | 0 |
+| `ad_names` | 2,330 |
+| `video_metrics` | 0 |
+| `campaign_settings` | 3 |
+| `refund_log` | 25 |
+
+This is a verified snapshot, not the live runtime database. Render continues
+reading and writing SQLite until the Postgres data-access adapter and
+fixed-window report parity checks are complete.
+
 ## 1. Get the private database URI
 
 In Supabase, open the project and select **Connect**. Copy a Postgres connection

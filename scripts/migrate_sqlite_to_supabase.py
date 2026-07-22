@@ -153,6 +153,35 @@ def target_counts(postgres_connection: object) -> dict[str, int]:
     return counts
 
 
+def target_columns(postgres_connection: object, table: str) -> set[str]:
+    rows = postgres_connection.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s
+        """,
+        (table,),
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def validate_target_schema(
+    sqlite_connection: sqlite3.Connection,
+    postgres_connection: object,
+) -> None:
+    mismatches: list[str] = []
+    for table in TABLES:
+        source = set(source_columns(sqlite_connection, table))
+        target = target_columns(postgres_connection, table)
+        missing = sorted(source - target)
+        if missing:
+            mismatches.append(f"{table}: {', '.join(missing)}")
+    if mismatches:
+        raise RuntimeError(
+            "Supabase schema is missing SQLite source columns: " + "; ".join(mismatches)
+        )
+
+
 def insert_table(
     sqlite_connection: sqlite3.Connection,
     postgres_connection: object,
@@ -169,9 +198,10 @@ def insert_table(
         f"VALUES ({placeholders})"
     )
     inserted = 0
-    for batch in source_rows(sqlite_connection, table, batch_size):
-        postgres_connection.executemany(insert_sql, batch)
-        inserted += len(batch)
+    with postgres_connection.cursor() as cursor:
+        for batch in source_rows(sqlite_connection, table, batch_size):
+            cursor.executemany(insert_sql, batch)
+            inserted += len(batch)
     return inserted
 
 
@@ -223,6 +253,7 @@ def main() -> int:
         print(f"Connecting to {redacted_url(args.database_url)}")
         with psycopg.connect(args.database_url) as postgres_connection:
             execute_schema(postgres_connection, args.schema_file)
+            validate_target_schema(sqlite_connection, postgres_connection)
             before = target_counts(postgres_connection)
             if any(before.values()) and not args.replace:
                 populated = ", ".join(

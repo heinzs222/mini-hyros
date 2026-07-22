@@ -29,6 +29,10 @@ data/live/
 data/outbox/
 *.sqlite-shm
 *.sqlite-wal
+production-attributionops.sqlite
+migration-*.log
+*.download-shm
+*.download-wal
 
 # Environment
 .env
