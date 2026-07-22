@@ -39,7 +39,7 @@ logger = logging.getLogger("ghl_sync")
 # Reuse the webhook write-helpers so GHL leads stitch to the same customer_key
 # (sha256 of email, or the shared normalized-phone key) as Stripe orders and
 # the tracking pixel.
-from api.ghl import (
+from backend.api.ghl import (
     _sha256,
     _iso_ts,
     _lead_conversion_id,

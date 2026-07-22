@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect
 from attributionops.tools.ads import report_currency, spend_fx_rates
-from api.platform_auth import get_or_refresh_tiktok_token, get_tiktok_advertiser_id
+from backend.api.platform_auth import get_or_refresh_tiktok_token, get_tiktok_advertiser_id
 
 router = APIRouter()
 UTC = timezone.utc

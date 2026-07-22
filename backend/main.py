@@ -47,25 +47,25 @@ from attributionops.tools.tracking import tracking_health_check
 from attributionops.tools.forecasting import forecasting_run
 from attributionops.tools.warehouse import warehouse_query
 
-from api.webhooks import router as webhooks_router
-from api.video_metrics import router as video_router
-from api.connections import router as connections_router
-from api.ghl import router as ghl_router
-from api.capi import router as capi_router
-from api.ltv import router as ltv_router
-from api.journey import router as journey_router
-from api.funnel import router as funnel_router
-from api.cohort import router as cohort_router
-from api.refunds import router as refunds_router
-from api.email_sms import router as email_sms_router
-from api.ai_recommendations import router as ai_router
-from api.campaign_settings import router as campaign_settings_router
-from api.ad_names import router as ad_names_router, get_name_map, get_thumbnails_map
-from api.spend_sync import router as spend_sync_router
-from api.stripe_sync import router as stripe_sync_router
-from api.ghl_sync import router as ghl_sync_router
-from api.platform_auth import router as platform_auth_router
-from api.auth import (
+from backend.api.webhooks import router as webhooks_router
+from backend.api.video_metrics import router as video_router
+from backend.api.connections import router as connections_router
+from backend.api.ghl import router as ghl_router
+from backend.api.capi import router as capi_router
+from backend.api.ltv import router as ltv_router
+from backend.api.journey import router as journey_router
+from backend.api.funnel import router as funnel_router
+from backend.api.cohort import router as cohort_router
+from backend.api.refunds import router as refunds_router
+from backend.api.email_sms import router as email_sms_router
+from backend.api.ai_recommendations import router as ai_router
+from backend.api.campaign_settings import router as campaign_settings_router
+from backend.api.ad_names import router as ad_names_router, get_name_map, get_thumbnails_map
+from backend.api.spend_sync import router as spend_sync_router
+from backend.api.stripe_sync import router as stripe_sync_router
+from backend.api.ghl_sync import router as ghl_sync_router
+from backend.api.platform_auth import router as platform_auth_router
+from backend.api.auth import (
     router as auth_router,
     is_auth_enabled,
     extract_request_token,
@@ -206,7 +206,12 @@ async def lifespan(app: FastAPI):
     _ensure_db_exists(db)
     # Apply idempotent migrations (unique indexes, campaign_settings) to any
     # pre-existing database so read-time guarantees hold on older DBs too.
-    ensure_schema(db)
+    # Supabase is migrated separately from the canonical PostgreSQL schema.
+    # Keep SQLite bootstrap behavior for local development and tests only.
+    from attributionops.db import using_postgres
+
+    if not using_postgres():
+        ensure_schema(db)
     # Warm the default dashboard windows into the report cache in the background
     # so the first request after a (re)boot — exactly when a Render cold start
     # already makes things feel slow — is served from cache instead of paying a
