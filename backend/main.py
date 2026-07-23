@@ -203,7 +203,6 @@ async def _auto_sync_loop(interval_minutes: float, *, initial_delay_seconds: flo
 async def lifespan(app: FastAPI):
     # Ensure configured DB exists (create schema if missing)
     db = default_db_path()
-    _ensure_db_exists(db)
     # Apply idempotent migrations (unique indexes, campaign_settings) to any
     # pre-existing database so read-time guarantees hold on older DBs too.
     # Supabase is migrated separately from the canonical PostgreSQL schema.
@@ -211,6 +210,7 @@ async def lifespan(app: FastAPI):
     from attributionops.db import using_postgres
 
     if not using_postgres():
+        _ensure_db_exists(db)
         ensure_schema(db)
     # Warm the default dashboard windows into the report cache in the background
     # so the first request after a (re)boot — exactly when a Render cold start
