@@ -1,4 +1,4 @@
-function defaultApiBase(): string {
+export function getApiBase(): string {
   if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
   if (typeof window !== "undefined") {
     const host = window.location.hostname;
@@ -9,7 +9,7 @@ function defaultApiBase(): string {
   return "http://localhost:8000";
 }
 
-const API_BASE = defaultApiBase();
+const API_BASE = getApiBase();
 const AUTH_TOKEN_KEY = "hyros_auth_token";
 const configuredTimeoutMs = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS || 90000);
 const API_TIMEOUT_MS = Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
