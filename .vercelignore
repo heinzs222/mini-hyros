@@ -1,4 +1,10 @@
-dashboard/
+# Applies to BOTH Vercel projects that deploy from this single repo:
+#   - the API project       (Root Directory = repo root, app.py)
+#   - the dashboard project (Root Directory = dashboard)
+#
+# IMPORTANT: do NOT add "dashboard/" here. This file is applied to the dashboard
+# project's build too, and excluding the directory empties that build — it was
+# observed failing the dashboard deployment until the entry was removed.
 data/
 *.sqlite
 *.sqlite-shm

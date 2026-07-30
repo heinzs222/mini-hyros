@@ -14,7 +14,9 @@ dependencies = [
 [tool.pytest.ini_options]
 # Make the repo root importable so `import attributionops` / `import backend` work.
 pythonpath = ["."]
-testpaths = ["tests"]
+# backend/tests holds the database-export suite; without it listed here those
+# tests are never collected (and the module they cover looks untested).
+testpaths = ["tests", "backend/tests"]
 addopts = "-q --strict-markers"
 markers = [
     "integration: tests that exercise the FastAPI app end-to-end",

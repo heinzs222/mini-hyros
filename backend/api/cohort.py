@@ -44,10 +44,16 @@ def cohort_analysis(
     db_path = _db()
 
     # Get first touchpoint per customer (acquisition date)
+    # First touchpoint per customer (acquisition date + its platform/campaign).
+    # A window pick is used rather than MIN(ts) with bare platform/campaign
+    # columns: SQLite returns the columns from the min-ts row, but Postgres
+    # rejects non-grouped bare columns. ROW_NUMBER works identically on both.
     first_touch = db_query(db_path, """
-        SELECT customer_key, MIN(ts) as first_ts, platform, campaign_id
-        FROM touchpoints WHERE customer_key != ''
-        GROUP BY customer_key
+        SELECT customer_key, first_ts, platform, campaign_id FROM (
+            SELECT customer_key, ts AS first_ts, platform, campaign_id,
+                   ROW_NUMBER() OVER (PARTITION BY customer_key ORDER BY ts, rowid) AS rn
+            FROM touchpoints WHERE customer_key != ''
+        ) t WHERE rn = 1
     """)
 
     if not first_touch:

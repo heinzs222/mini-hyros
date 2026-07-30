@@ -38,11 +38,14 @@ def ltv_by_source(
     day_windows = [int(w.strip()) for w in windows.split(",") if w.strip().isdigit()]
 
     # Get first touchpoint per customer (acquisition source)
+    # First touchpoint per customer via a window pick (see cohort.py): SQLite's
+    # MIN(ts)-with-bare-columns idiom is not valid on Postgres.
     first_touch = db_query(db_path, """
-        SELECT customer_key, platform, campaign_id, ad_id, MIN(ts) as first_ts
-        FROM touchpoints
-        WHERE customer_key != ''
-        GROUP BY customer_key
+        SELECT customer_key, platform, campaign_id, ad_id, first_ts FROM (
+            SELECT customer_key, platform, campaign_id, ad_id, ts AS first_ts,
+                   ROW_NUMBER() OVER (PARTITION BY customer_key ORDER BY ts, rowid) AS rn
+            FROM touchpoints WHERE customer_key != ''
+        ) t WHERE rn = 1
     """)
 
     if not first_touch:
