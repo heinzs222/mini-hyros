@@ -47,6 +47,7 @@ from backend.api.ghl import (
     _resolve_platform,
     _insert_conversion,
     _insert_touchpoint,
+    _ensure_tracking_schema,
     normalized_phone_key,
 )
 
@@ -305,9 +306,9 @@ def _submission_source_info(submission: dict) -> dict[str, str]:
 
 
 def _write_session(db_path: str, session_id: str, ts: str, src_info: dict,
-                   landing: str, customer_key: str) -> None:
-    with connect(db_path) as conn:
-        conn.execute(
+                   landing: str, customer_key: str, conn: Any | None = None) -> None:
+    def write(active_conn: Any) -> None:
+        active_conn.execute(
             """INSERT OR IGNORE INTO sessions
                (session_id, ts, utm_source, utm_medium, utm_campaign, utm_content, utm_term,
                 referrer, landing_page, device, gclid, fbclid, ttclid, customer_key)
@@ -322,7 +323,14 @@ def _write_session(db_path: str, session_id: str, ts: str, src_info: dict,
                 src_info.get("ttclid", ""), customer_key,
             ),
         )
-        conn.commit()
+
+    if conn is not None:
+        write(conn)
+        return
+
+    with connect(db_path) as owned_conn:
+        write(owned_conn)
+        owned_conn.commit()
 
 
 # ── GHL API fetchers ───────────────────────────────────────────────────────────
@@ -476,6 +484,7 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
     leads = 0
     skipped = 0
     now = _now()
+    prepared: list[dict[str, Any]] = []
     for c in contacts:
         email = _contact_email(c)
         # Phone-only contacts are a real lead segment; skip only when the
@@ -493,41 +502,69 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
         contact_id = str(c.get("id") or customer_key)
         src_infos = _src_infos_from_attribution(c)
         src_info = src_infos[-1]
-
-        # Same canonical key as the webhook path so a lead captured by both the
-        # webhook and this sync is counted once, not twice. Keyed per local day
-        # so a later-day re-engagement is a new Lead event; rows written under
-        # the older contact-only key are rekeyed in place first.
-        _migrate_legacy_lead_conversion(db_path, contact_id)
         conv_id = _lead_conversion_id(contact_id, ts)
-        _insert_conversion(db_path, conv_id, ts, LEAD_TYPE, 0.0, conv_id, customer_key)
-
         session_id = _sha256(f"ghl_api_session|{contact_id}")
-        _write_session(db_path, session_id, ts, src_info,
-                       src_info.get("url", "") or "GHL Form", customer_key)
-        # This session id belongs exclusively to this importer. Replacing its
-        # touchpoints keeps recurring syncs idempotent while allowing GHL's
-        # attribution history to be refreshed.
-        with connect(db_path) as conn:
-            conn.execute("DELETE FROM touchpoints WHERE session_id = ?", (session_id,))
-            conn.commit()
-        for index, info in enumerate(src_infos):
-            if not _has_attribution(info):
-                continue
-            info_platform, info_channel = _resolve_platform(
-                info["utm_source"], info["utm_medium"], info["source"], src_info=info,
-            )
-            attr_ts = _ordered_attribution_ts(ts, index, len(src_infos))
-            _insert_touchpoint(
-                db_path,
-                attr_ts,
-                info_channel or "crm",
-                info_platform,
-                info,
-                customer_key,
-                session_id,
-            )
+        prepared.append({
+            "contact_id": contact_id,
+            "conversion_id": conv_id,
+            "customer_key": customer_key,
+            "session_id": session_id,
+            "src_info": src_info,
+            "src_infos": src_infos,
+            "ts": ts,
+        })
         leads += 1
+
+    _ensure_tracking_schema(db_path)
+    with connect(db_path) as conn:
+        for item in prepared:
+            # Same canonical key as the webhook path so overlapping webhook and
+            # pull deliveries remain idempotent.
+            _migrate_legacy_lead_conversion(
+                db_path, item["contact_id"], conn=conn
+            )
+            _insert_conversion(
+                db_path,
+                item["conversion_id"],
+                item["ts"],
+                LEAD_TYPE,
+                0.0,
+                item["conversion_id"],
+                item["customer_key"],
+                conn=conn,
+            )
+            _write_session(
+                db_path,
+                item["session_id"],
+                item["ts"],
+                item["src_info"],
+                item["src_info"].get("url", "") or "GHL Form",
+                item["customer_key"],
+                conn=conn,
+            )
+            # This importer owns these session ids, so refresh their attribution.
+            conn.execute(
+                "DELETE FROM touchpoints WHERE session_id = ?",
+                (item["session_id"],),
+            )
+            src_infos = item["src_infos"]
+            for index, info in enumerate(src_infos):
+                if not _has_attribution(info):
+                    continue
+                info_platform, info_channel = _resolve_platform(
+                    info["utm_source"], info["utm_medium"], info["source"], src_info=info,
+                )
+                _insert_touchpoint(
+                    db_path,
+                    _ordered_attribution_ts(item["ts"], index, len(src_infos)),
+                    info_channel or "crm",
+                    info_platform,
+                    info,
+                    item["customer_key"],
+                    item["session_id"],
+                    conn=conn,
+                )
+        conn.commit()
     return {"leads": leads, "skipped": skipped}
 
 
@@ -542,6 +579,7 @@ def _write_form_submissions(
     skipped = 0
     now = _now()
     contact_map = contacts_by_id or {}
+    prepared: list[dict[str, Any]] = []
     for submission in submissions:
         ts = _submission_ts(submission, now)
         if not _within(ts, start_date, end_date):
@@ -558,33 +596,58 @@ def _write_form_submissions(
             continue
 
         conv_id = _sha256(f"ghl_submission|{submission_id}")
-        _insert_conversion(db_path, conv_id, ts, "OptIn", 0.0, conv_id, customer_key)
-
         src_info = _submission_source_info(submission)
         platform, channel = _resolve_platform(
             src_info["utm_source"], src_info["utm_medium"], src_info["source"], src_info=src_info,
         )
         session_id = _sha256(f"ghl_submission_session|{submission_id}")
         form_name = str(submission.get("name") or submission.get("formId") or "GHL Form")
-        _write_session(
-            db_path,
-            session_id,
-            ts,
-            src_info,
-            src_info.get("url", "") or form_name,
-            customer_key,
-        )
-        if _has_attribution(src_info):
-            _insert_touchpoint(
-                db_path,
-                ts,
-                channel or "crm",
-                platform,
-                src_info,
-                customer_key,
-                session_id,
-            )
+        prepared.append({
+            "channel": channel,
+            "conversion_id": conv_id,
+            "customer_key": customer_key,
+            "form_name": form_name,
+            "platform": platform,
+            "session_id": session_id,
+            "src_info": src_info,
+            "ts": ts,
+        })
         optins += 1
+
+    _ensure_tracking_schema(db_path)
+    with connect(db_path) as conn:
+        for item in prepared:
+            _insert_conversion(
+                db_path,
+                item["conversion_id"],
+                item["ts"],
+                "OptIn",
+                0.0,
+                item["conversion_id"],
+                item["customer_key"],
+                conn=conn,
+            )
+            _write_session(
+                db_path,
+                item["session_id"],
+                item["ts"],
+                item["src_info"],
+                item["src_info"].get("url", "") or item["form_name"],
+                item["customer_key"],
+                conn=conn,
+            )
+            if _has_attribution(item["src_info"]):
+                _insert_touchpoint(
+                    db_path,
+                    item["ts"],
+                    item["channel"] or "crm",
+                    item["platform"],
+                    item["src_info"],
+                    item["customer_key"],
+                    item["session_id"],
+                    conn=conn,
+                )
+        conn.commit()
     return {"optins": optins, "skipped": skipped}
 
 
@@ -595,6 +658,7 @@ def _write_opportunities(db_path: str, opportunities: list[dict], start_date: st
     skipped = 0
     now = _now()
     won_stages = {"won", "closed won", "closedwon", "paid", "sale", "customer", "purchased"}
+    prepared: list[dict[str, Any]] = []
     for opp in opportunities:
         ts_raw = str(opp.get("createdAt") or opp.get("dateAdded") or "")
         _dt = try_parse_iso_ts(ts_raw) if ts_raw else None
@@ -617,22 +681,57 @@ def _write_opportunities(db_path: str, opportunities: list[dict], start_date: st
             # Canonical keys shared with the webhook path (ghl.py) so the same won
             # opportunity isn't double-counted when both paths run.
             order_id = _sha256(f"ghl_opp|{opp_id}")
-            with connect(db_path) as conn:
+            prepared.append({
+                "conversion_id": _sha256(f"ghl_oppconv|{opp_id}"),
+                "conversion_type": PURCHASE_TYPE,
+                "customer_key": customer_key,
+                "order_id": order_id,
+                "order_values": (
+                    order_id,
+                    ts,
+                    str(round(value, 2)),
+                    str(round(value, 2)),
+                    str(round(value * 0.029 + 0.30, 2)),
+                    customer_key,
+                ),
+                "ts": ts,
+                "value": value,
+            })
+            orders += 1
+        else:
+            conversion_id = _sha256(f"ghl_oppopen|{opp_id}")
+            prepared.append({
+                "conversion_id": conversion_id,
+                "conversion_type": "Opportunity",
+                "customer_key": customer_key,
+                "order_id": conversion_id,
+                "order_values": None,
+                "ts": ts,
+                "value": value,
+            })
+            open_opps += 1
+
+    _ensure_tracking_schema(db_path)
+    with connect(db_path) as conn:
+        for item in prepared:
+            if item["order_values"] is not None:
                 conn.execute(
                     """INSERT OR IGNORE INTO orders
                        (order_id, ts, gross, net, refunds, chargebacks, cogs, fees, customer_key, subscription_id)
                        VALUES (?, ?, ?, ?, '0', '0', '0', ?, ?, '')""",
-                    (order_id, ts, str(round(value, 2)), str(round(value, 2)),
-                     str(round(value * 0.029 + 0.30, 2)), customer_key),
+                    item["order_values"],
                 )
-                conn.commit()
-            _insert_conversion(db_path, _sha256(f"ghl_oppconv|{opp_id}"),
-                               ts, PURCHASE_TYPE, value, order_id, customer_key)
-            orders += 1
-        else:
-            _insert_conversion(db_path, _sha256(f"ghl_oppopen|{opp_id}"),
-                               ts, "Opportunity", value, _sha256(f"ghl_oppopen|{opp_id}"), customer_key)
-            open_opps += 1
+            _insert_conversion(
+                db_path,
+                item["conversion_id"],
+                item["ts"],
+                item["conversion_type"],
+                item["value"],
+                item["order_id"],
+                item["customer_key"],
+                conn=conn,
+            )
+        conn.commit()
     return {"orders": orders, "open_opportunities": open_opps, "skipped": skipped}
 
 

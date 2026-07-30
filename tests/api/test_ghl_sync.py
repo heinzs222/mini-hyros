@@ -171,6 +171,27 @@ def test_write_contacts_creates_leads_and_touchpoints(api_db):
     assert touches[0]["customer_key"] == gs._sha256("lead1@example.com")
 
 
+def test_write_contacts_reuses_one_writer_connection(api_db, monkeypatch):
+    original_connect = gs.connect
+    connection_calls = 0
+
+    def counted_connect(db_path):
+        nonlocal connection_calls
+        connection_calls += 1
+        return original_connect(db_path)
+
+    monkeypatch.setattr(gs, "connect", counted_connect)
+    contacts = [
+        _contact("c1", "lead1@example.com", fbclid="fb1"),
+        _contact("c2", "lead2@example.com", fbclid="fb2"),
+    ]
+
+    stats = gs._write_contacts(api_db, contacts, "2026-06-01", "2026-06-30")
+
+    assert stats["leads"] == 2
+    assert connection_calls == 1
+
+
 def test_write_contacts_replaces_imported_attribution_history(api_db):
     contact = {
         "id": "c-history",

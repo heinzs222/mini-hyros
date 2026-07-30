@@ -445,17 +445,25 @@ def _backfill_customer_key(db_path: str, customer_key: str, visitor_id: str = ""
 
 def _insert_conversion(db_path: str, conv_id: str, ts: str, conv_type: str,
                        value: float, order_id: str, customer_key: str,
-                       session_id: str = "", visitor_id: str = "") -> None:
+                       session_id: str = "", visitor_id: str = "",
+                       conn: Any | None = None) -> None:
     """Insert a conversion record."""
-    _ensure_tracking_schema(db_path)
-    with connect(db_path) as conn:
-        conn.execute(
+    def write(active_conn: Any) -> None:
+        active_conn.execute(
             """INSERT OR IGNORE INTO conversions
                (conversion_id, ts, type, value, order_id, customer_key, session_id, visitor_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (conv_id, ts, conv_type, str(value), order_id, customer_key, session_id, visitor_id),
         )
-        conn.commit()
+
+    if conn is not None:
+        write(conn)
+        return
+
+    _ensure_tracking_schema(db_path)
+    with connect(db_path) as owned_conn:
+        write(owned_conn)
+        owned_conn.commit()
 
 
 def _lead_conversion_id(contact_id: str, ts: str) -> str:
@@ -469,7 +477,9 @@ def _lead_conversion_id(contact_id: str, ts: str) -> str:
     return _sha256(f"ghl_lead|{contact_id}|{utc_ts_to_local_date(ts)}")
 
 
-def _migrate_legacy_lead_conversion(db_path: str, contact_id: str) -> None:
+def _migrate_legacy_lead_conversion(
+    db_path: str, contact_id: str, conn: Any | None = None
+) -> None:
     """Rekey a pre-dated Lead row (``ghl_lead|{contact_id}``) to its dated form.
 
     The dated key is derived from the legacy row's OWN ts so the original lead
@@ -477,28 +487,35 @@ def _migrate_legacy_lead_conversion(db_path: str, contact_id: str) -> None:
     duplicate is deleted instead. Idempotent — safe on every sync/webhook.
     """
     legacy_id = _sha256(f"ghl_lead|{contact_id}")
-    with connect(db_path) as conn:
-        row = conn.execute(
+    def migrate(active_conn: Any) -> None:
+        row = active_conn.execute(
             "SELECT ts FROM conversions WHERE conversion_id = ?", (legacy_id,)
         ).fetchone()
         if not row:
             return
         dated_id = _lead_conversion_id(contact_id, str(row[0] or ""))
-        exists = conn.execute(
+        exists = active_conn.execute(
             "SELECT 1 FROM conversions WHERE conversion_id = ?", (dated_id,)
         ).fetchone()
         if exists:
-            conn.execute("DELETE FROM conversions WHERE conversion_id = ?", (legacy_id,))
+            active_conn.execute("DELETE FROM conversions WHERE conversion_id = ?", (legacy_id,))
         else:
             # Lead rows carry order_id == conversion_id; keep them in lockstep.
-            conn.execute(
+            active_conn.execute(
                 """UPDATE conversions
                    SET conversion_id = ?,
                        order_id = CASE WHEN order_id = ? THEN ? ELSE order_id END
                    WHERE conversion_id = ?""",
                 (dated_id, legacy_id, dated_id, legacy_id),
             )
-        conn.commit()
+
+    if conn is not None:
+        migrate(conn)
+        return
+
+    with connect(db_path) as owned_conn:
+        migrate(owned_conn)
+        owned_conn.commit()
 
 
 def _insert_order(db_path: str, order: dict[str, Any]) -> None:
@@ -537,11 +554,10 @@ def _insert_order(db_path: str, order: dict[str, Any]) -> None:
 
 def _insert_touchpoint(db_path: str, ts: str, channel: str, platform: str,
                        src_info: dict, customer_key: str, session_id: str,
-                       visitor_id: str = "") -> None:
+                       visitor_id: str = "", conn: Any | None = None) -> None:
     """Insert a touchpoint for attribution."""
-    _ensure_tracking_schema(db_path)
-    with connect(db_path) as conn:
-        conn.execute(
+    def write(active_conn: Any) -> None:
+        active_conn.execute(
             """INSERT INTO touchpoints (
                    ts, channel, platform, campaign_id, adset_id, ad_id, creative_id,
                    gclid, fbclid, ttclid, customer_key, session_id, visitor_id
@@ -559,7 +575,15 @@ def _insert_touchpoint(db_path: str, ts: str, channel: str, platform: str,
                 customer_key, session_id, visitor_id,
             ),
         )
-        conn.commit()
+
+    if conn is not None:
+        write(conn)
+        return
+
+    _ensure_tracking_schema(db_path)
+    with connect(db_path) as owned_conn:
+        write(owned_conn)
+        owned_conn.commit()
 
 
 def _insert_session(db_path: str, session: dict[str, str]) -> None:
