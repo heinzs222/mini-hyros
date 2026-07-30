@@ -74,7 +74,7 @@ def _log_webhook(db_path: str, log_id: str, ts: str, source: str,
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 def _iso_ts(dt: datetime) -> str:
@@ -88,7 +88,7 @@ def _sha256(value: str) -> str:
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     try:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    except sqlite3.Error:
+    except Exception:
         return set()
     return {str(row[1]) for row in rows}
 

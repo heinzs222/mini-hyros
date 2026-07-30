@@ -19,6 +19,8 @@ import pytest
 # assertions stay deterministic regardless of the host zone. Production defaults
 # to America/Toronto (see attributionops.util.report_timezone).
 os.environ.setdefault("REPORT_TIMEZONE", "UTC")
+os.environ["SUPABASE_DB_URL"] = ""
+os.environ["DATABASE_URL"] = ""
 
 # Disable the short-lived report cache in tests so each request recomputes
 # against the test's freshly-seeded DB (no cross-test or within-test staleness).

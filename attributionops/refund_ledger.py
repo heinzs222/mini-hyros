@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from collections import defaultdict
 from typing import Any
 
@@ -73,7 +72,7 @@ def apply_refunds_as_of(
                     events[str(row[0] or "")][kind].append(
                         (event_ts, max(to_float(row[3]), 0.0))
                     )
-    except sqlite3.Error:
+    except Exception:
         return [dict(order) for order in orders]
 
     adjusted: list[dict[str, Any]] = []

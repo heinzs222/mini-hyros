@@ -25,7 +25,7 @@ UTC = timezone.utc
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 def _safe_float(val, default=0.0) -> float:

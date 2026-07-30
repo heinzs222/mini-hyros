@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from attributionops.db import query, query_iter, sql_rows
+from attributionops.db import _translate_postgres_sql, query, query_iter, sql_rows
 from attributionops.schema import DEFAULT_CAMPAIGN_SETTINGS, ensure_campaign_settings
 from attributionops.tools.audiences import audiences_sync
 from attributionops.tools.conversions import conversions_push
@@ -45,6 +45,41 @@ def test_query_iter_yields_each_row(empty_db):
 def test_sql_rows_missing_db_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         sql_rows(str(tmp_path / "nope.sqlite"), "SELECT 1;")
+
+
+def test_postgres_translation_handles_sqlite_placeholders_and_idempotent_insert():
+    sql, params = _translate_postgres_sql(
+        "INSERT OR IGNORE INTO orders (order_id, gross) VALUES (?, ?)",
+        ["o1", "10"],
+    )
+    assert sql == "INSERT INTO orders (order_id, gross) VALUES (%s, %s) ON CONFLICT DO NOTHING"
+    assert params == ["o1", "10"]
+
+
+def test_postgres_translation_handles_replace_upsert_and_sqlite_functions():
+    sql, _params = _translate_postgres_sql(
+        """
+        INSERT OR REPLACE INTO platform_tokens
+            (platform, access_token, updated_at)
+        VALUES ('tiktok', ?, ?)
+        """
+    )
+    assert "ON CONFLICT (platform) DO UPDATE SET" in sql
+    assert "access_token = EXCLUDED.access_token" in sql
+
+    sql, _params = _translate_postgres_sql(
+        """
+        SELECT t.rowid AS marker,
+               strftime('%Y-%m-%dT%H:%M:%SZ', o.ts, :lookback) AS win_start,
+               CAST(CAST(o.net AS REAL) - ? AS TEXT) AS adjusted
+        FROM orders o JOIN touchpoints t ON t.customer_key = o.customer_key
+        WHERE date(substr(o.ts,1,10)) >= date(:start_date)
+        """
+    )
+    assert "t.ctid::text AS marker" in sql
+    assert "to_char((o.ts::timestamptz + %(lookback)s::interval)" in sql
+    assert "CAST(COALESCE(NULLIF((o.net)::text, ''), '0') AS DOUBLE PRECISION)" in sql
+    assert "substr(o.ts, 1, 10) >= %(start_date)s" in sql
 
 
 # ── warehouse.query tool ──────────────────────────────────────────────────────

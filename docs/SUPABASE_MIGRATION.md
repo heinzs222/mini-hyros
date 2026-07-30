@@ -1,9 +1,8 @@
 # Supabase Database Migration
 
 Vigil currently consists of a Next.js frontend on Vercel and a FastAPI API on
-Render. Supabase can replace the persistent SQLite database immediately, but it
-does not host an existing FastAPI container. Moving API compute off Render is a
-separate API rewrite or deployment change.
+Render. Supabase replaces the persistent SQLite database; Render still runs the
+FastAPI container.
 
 The browser publishable key is intentionally not used for warehouse reads or
 writes. All warehouse tables have row-level security enabled with no anonymous
@@ -80,21 +79,30 @@ python scripts/migrate_sqlite_to_supabase.py --sqlite-path .\production-attribut
 python scripts/migrate_sqlite_to_supabase.py --sqlite-path .\production-attributionops.sqlite --replace
 ```
 
-`--replace` imports all ten warehouse tables in one transaction. The command
-rolls back if any source and target row count differs. Without `--replace`, it
-refuses to write into a populated target.
+`--replace` imports the warehouse tables plus optional runtime tables
+(`platform_tokens`, `stripe_sync_coverage`, `capi_log`, `webhook_log`,
+`email_sms_events`) in one transaction. Older SQLite snapshots that do not have
+the optional tables still migrate cleanly. The command rolls back if any source
+and target row count differs. Without `--replace`, it refuses to write into a
+populated target.
 
 ## 4. Production cutover
 
-Do not point production at Supabase until the backend has a Postgres data-access
-adapter and report parity has been tested. The current code contains SQLite SQL
-(`PRAGMA`, `rowid`, `strftime`, `julianday`, and SQLite placeholders), so changing
-only `ATTRIBUTIONOPS_DB_PATH` or installing `@supabase/supabase-js` would break
-reporting.
+Set this private environment variable on the Render backend:
+
+```powershell
+SUPABASE_DB_URL=postgresql://...
+```
+
+`SUPABASE_DB_URL` takes precedence over `ATTRIBUTIONOPS_DB_PATH`. Leave the
+SQLite path in place as a rollback fallback, but remove or blank
+`SUPABASE_DB_URL` if you need to return to the persistent disk.
 
 The recommended sequence is:
 
 1. Import a snapshot and verify row counts.
-2. Add and test the FastAPI Postgres adapter against the imported project.
-3. Pause ingestion briefly, import a final snapshot, and switch the backend.
-4. Move API compute only after database/report parity is confirmed.
+2. Run the backend locally with `SUPABASE_DB_URL` set and compare `/api/report`
+   against the SQLite source for the same date range.
+3. Pause ingestion briefly, import a final snapshot with `--replace`, and set
+   `SUPABASE_DB_URL` on Render.
+4. Hit `/api/health` and a report endpoint before resuming traffic.

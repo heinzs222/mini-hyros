@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from attributionops.db import query
+from attributionops.db import db_label, is_postgres_dsn, query
 from attributionops.util import parse_iso_ts, to_float, to_int
 
 
 def integrations_status(db_path: str) -> dict[str, object]:
-    # Local-only stub: infer "health" from presence of tables + last timestamps.
+    # Infer health from presence of warehouse tables and last timestamps.
     tables = query(
         db_path,
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;",
@@ -57,8 +57,8 @@ def integrations_status(db_path: str) -> dict[str, object]:
         "connected": True,
         "mode": "local_warehouse",
         "warehouse": {
-            "type": "sqlite",
-            "db_path": db_path,
+            "type": "postgres" if is_postgres_dsn(db_path) else "sqlite",
+            "db_path": db_label(db_path),
             "tables": table_names,
         },
         "tracking": {
@@ -73,6 +73,6 @@ def integrations_status(db_path: str) -> dict[str, object]:
             "platforms": _spend_platforms(),
         },
         "notes": [
-            "Local warehouse status based on available SQLite tables and timestamps.",
+            "Warehouse status based on available database tables and timestamps.",
         ],
     }

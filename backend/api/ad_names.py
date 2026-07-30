@@ -32,7 +32,7 @@ AD_NAMES_PLATFORM_TIMEOUT_SECONDS = int(os.environ.get("AD_NAMES_PLATFORM_TIMEOU
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 def _now() -> str:

@@ -18,6 +18,8 @@ services:
     envVars:
       - key: ATTRIBUTIONOPS_DB_PATH
         value: /var/data/attributionops.sqlite
+      - key: SUPABASE_DB_URL
+        sync: false
       - key: REPORT_TIMEZONE
         value: Etc/GMT+6
       - key: TRACKING_DOMAIN

@@ -34,6 +34,8 @@ def api_db(tmp_path, monkeypatch) -> str:
     db_path = tmp_path / "api.sqlite"
     _init_schema(str(db_path))
     monkeypatch.setenv("ATTRIBUTIONOPS_DB_PATH", str(db_path))
+    monkeypatch.setenv("SUPABASE_DB_URL", "")
+    monkeypatch.setenv("DATABASE_URL", "")
     monkeypatch.setenv("AUTH_ENABLED", "false")  # default: auth off, even if .env enables it
     # Existing endpoint tests mock one selected-range request. Dedicated
     # history tests opt in explicitly.

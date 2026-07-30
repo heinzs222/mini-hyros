@@ -29,7 +29,7 @@ UTC = timezone.utc
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 def _table_columns(db_path: str, table: str) -> set[str]:

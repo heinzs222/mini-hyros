@@ -17,10 +17,9 @@ fixtures that predate the feature keep working.
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 
-from ..db import sql_rows
+from ..db import connect, sql_rows
 from ..schema import ensure_campaign_settings
 
 _lock = threading.Lock()
@@ -32,11 +31,10 @@ def ensure_campaign_settings_table(db_path: str) -> None:
         if db_path in _ensured:
             return
     try:
-        with sqlite3.connect(db_path) as conn:
-            conn.execute("PRAGMA busy_timeout=5000;")
+        with connect(db_path) as conn:
             ensure_campaign_settings(conn)
             conn.commit()
-    except sqlite3.Error:
+    except Exception:
         return
     with _lock:
         _ensured.add(db_path)
@@ -50,7 +48,7 @@ def excluded_campaign_keys(db_path: str) -> set[tuple[str, str]]:
             db_path,
             "SELECT platform, campaign_id FROM campaign_settings WHERE tracked = 0",
         )
-    except sqlite3.Error:
+    except Exception:
         return set()
     return {
         (str(r.get("platform", "")).lower(), str(r.get("campaign_id", "")))

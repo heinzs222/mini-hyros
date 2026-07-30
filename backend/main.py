@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from attributionops.config import default_db_path
+from attributionops.db import db_label, is_postgres_dsn
 from attributionops.report import ReportInputs, build_hyros_like_report
 from attributionops.report_integrity import resolve_attribution_dimensions
 from attributionops.schema import ensure_schema
@@ -97,6 +98,9 @@ manager = ConnectionManager()
 
 # ── App ────────────────────────────────────────────────────────────────────────
 def _ensure_db_exists(db_path: str) -> None:
+    if is_postgres_dsn(db_path):
+        return
+
     p = Path(db_path)
     if p.exists():
         return
@@ -205,13 +209,10 @@ async def lifespan(app: FastAPI):
     db = default_db_path()
     # Apply idempotent migrations (unique indexes, campaign_settings) to any
     # pre-existing database so read-time guarantees hold on older DBs too.
-    # Supabase is migrated separately from the canonical PostgreSQL schema.
-    # Keep SQLite bootstrap behavior for local development and tests only.
-    from attributionops.db import using_postgres
-
-    if not using_postgres():
+    # Keep SQLite file bootstrap behavior for local development and tests only.
+    if not is_postgres_dsn(db):
         _ensure_db_exists(db)
-        ensure_schema(db)
+    ensure_schema(db)
     # Warm the default dashboard windows into the report cache in the background
     # so the first request after a (re)boot — exactly when a Render cold start
     # already makes things feel slow — is served from cache instead of paying a
@@ -334,7 +335,7 @@ async def auth_middleware(request: Request, call_next):
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 # The report endpoints run as sync `def` so FastAPI executes them in its
@@ -517,7 +518,7 @@ async def health():
     # Expose the reporting timezone so the dashboard computes preset windows
     # (Today/Yesterday/7d/30d) in the SAME zone the backend buckets days into,
     # and surface any migration failure that would otherwise silently zero reports.
-    payload: dict[str, Any] = {"status": "ok", "db": _db(), "timezone": report_timezone_name()}
+    payload: dict[str, Any] = {"status": "ok", "db": db_label(_db()), "timezone": report_timezone_name()}
     try:
         from attributionops.schema import last_migration_error
 

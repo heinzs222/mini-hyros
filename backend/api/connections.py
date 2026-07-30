@@ -78,8 +78,7 @@ def _ghl_credentials() -> tuple[str, str]:
     try:
         from api.ghl_sync import get_ghl_credentials
         from attributionops.config import default_db_path
-        db_path = os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
-        return get_ghl_credentials(db_path)
+        return get_ghl_credentials(default_db_path())
     except Exception:
         token = (os.environ.get("GHL_API_TOKEN", "") or os.environ.get("GHL_ACCESS_TOKEN", "")).strip()
         return token, os.environ.get("GHL_LOCATION_ID", "").strip()
@@ -151,9 +150,9 @@ async def _validate_tiktok(client: httpx.AsyncClient) -> tuple[str, str]:
         from api.platform_auth import get_or_refresh_tiktok_token, get_tiktok_advertiser_id
         from attributionops.config import default_db_path
 
-        db_path = os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
-        db_token = (await get_or_refresh_tiktok_token(db_path)).strip()
-        db_advertiser_id = get_tiktok_advertiser_id(db_path).strip()
+        db_target = default_db_path()
+        db_token = (await get_or_refresh_tiktok_token(db_target)).strip()
+        db_advertiser_id = get_tiktok_advertiser_id(db_target).strip()
         if db_token:
             token = db_token
             token_source = "oauth"
@@ -262,8 +261,8 @@ async def _platform_status(platform: str, validate: bool, client: httpx.AsyncCli
                 from api.platform_auth import get_tiktok_advertiser_id, get_tiktok_token
                 from attributionops.config import default_db_path
 
-                db_path = os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
-                if get_tiktok_token(db_path).strip() and get_tiktok_advertiser_id(db_path).strip():
+                db_target = default_db_path()
+                if get_tiktok_token(db_target).strip() and get_tiktok_advertiser_id(db_target).strip():
                     configured = True
             except Exception:
                 pass

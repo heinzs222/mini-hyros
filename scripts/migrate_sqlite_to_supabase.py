@@ -17,7 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCHEMA = ROOT / "supabase" / "migrations" / "202607210001_initial_schema.sql"
-TABLES = (
+REQUIRED_TABLES = (
     "spend",
     "sessions",
     "touchpoints",
@@ -26,9 +26,17 @@ TABLES = (
     "reported_value",
     "ad_names",
     "video_metrics",
+)
+OPTIONAL_TABLES = (
     "campaign_settings",
     "refund_log",
+    "platform_tokens",
+    "stripe_sync_coverage",
+    "capi_log",
+    "webhook_log",
+    "email_sms_events",
 )
+TABLES = REQUIRED_TABLES + OPTIONAL_TABLES
 
 
 def parse_args() -> argparse.Namespace:
@@ -131,10 +139,13 @@ def redacted_url(value: str) -> str:
 
 def validate_source(connection: sqlite3.Connection) -> dict[str, int]:
     available = source_tables(connection)
-    missing = [table for table in TABLES if table not in available]
+    missing = [table for table in REQUIRED_TABLES if table not in available]
     if missing:
         raise RuntimeError(f"SQLite source is missing tables: {', '.join(missing)}")
-    return {table: source_count(connection, table) for table in TABLES}
+    return {
+        table: source_count(connection, table) if table in available else 0
+        for table in TABLES
+    }
 
 
 def execute_schema(postgres_connection: object, schema_file: Path) -> None:
@@ -191,6 +202,11 @@ def insert_table(
     columns = source_columns(sqlite_connection, table)
     if not columns:
         raise RuntimeError(f"SQLite table {table} has no columns")
+    missing_target = sorted(set(columns) - target_columns(postgres_connection, table))
+    if missing_target:
+        raise RuntimeError(
+            f"Supabase table {table} is missing source columns: {', '.join(missing_target)}"
+        )
     column_sql = ", ".join(f'"{column}"' for column in columns)
     placeholders = ", ".join(["%s"] * len(columns))
     insert_sql = (
@@ -203,6 +219,35 @@ def insert_table(
             cursor.executemany(insert_sql, batch)
             inserted += len(batch)
     return inserted
+
+
+def backfill_legacy_video_columns(postgres_connection: object) -> None:
+    postgres_connection.execute(
+        """
+        UPDATE public.video_metrics
+        SET
+          views_25pct = CASE
+            WHEN COALESCE(views_25pct, '') IN ('', '0') THEN COALESCE(NULLIF(views_25, ''), views_25pct)
+            ELSE views_25pct
+          END,
+          views_50pct = CASE
+            WHEN COALESCE(views_50pct, '') IN ('', '0') THEN COALESCE(NULLIF(views_50, ''), views_50pct)
+            ELSE views_50pct
+          END,
+          views_75pct = CASE
+            WHEN COALESCE(views_75pct, '') IN ('', '0') THEN COALESCE(NULLIF(views_75, ''), views_75pct)
+            ELSE views_75pct
+          END,
+          views_100pct = CASE
+            WHEN COALESCE(views_100pct, '') IN ('', '0') THEN COALESCE(NULLIF(views_100, ''), views_100pct)
+            ELSE views_100pct
+          END,
+          click_through_rate = CASE
+            WHEN COALESCE(click_through_rate, '') IN ('', '0') THEN COALESCE(NULLIF(ctr, ''), click_through_rate)
+            ELSE click_through_rate
+          END
+        """
+    )
 
 
 def print_counts(counts: dict[str, int], label: str) -> None:
@@ -225,6 +270,7 @@ def main() -> int:
 
     sqlite_connection = sqlite3.connect(str(args.sqlite_path))
     try:
+        available_source_tables = source_tables(sqlite_connection)
         source = validate_source(sqlite_connection)
         print_counts(source, f"SQLite source: {args.sqlite_path.resolve()}")
         if args.dry_run:
@@ -272,16 +318,25 @@ def main() -> int:
 
             inserted: dict[str, int] = {}
             for table in TABLES:
+                if table not in available_source_tables:
+                    inserted[table] = 0
+                    print(f"Skipped {table}: source table not present")
+                    continue
                 inserted[table] = insert_table(
                     sqlite_connection, postgres_connection, table, args.batch_size
                 )
                 print(f"Imported {table}: {inserted[table]} rows")
+            backfill_legacy_video_columns(postgres_connection)
 
             after = target_counts(postgres_connection)
-            if source != inserted or source != after:
+            verified_tables = [table for table in TABLES if table in available_source_tables]
+            source_verified = {table: source[table] for table in verified_tables}
+            inserted_verified = {table: inserted[table] for table in verified_tables}
+            after_verified = {table: after[table] for table in verified_tables}
+            if source_verified != inserted_verified or source_verified != after_verified:
                 raise RuntimeError(
                     "Row-count verification failed; transaction will be rolled back. "
-                    f"source={source}, inserted={inserted}, target={after}"
+                    f"source={source_verified}, inserted={inserted_verified}, target={after_verified}"
                 )
             print_counts(after, "Verified Supabase target")
             print("Migration committed successfully.")

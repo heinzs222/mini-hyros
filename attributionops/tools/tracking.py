@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from attributionops.db import query
+from attributionops.db import is_postgres_dsn, query, using_postgres
 from attributionops.util import local_day_bounds_utc, session_identity_agg_exprs, table_columns
 
 
@@ -207,7 +207,7 @@ def tracking_health_check(
 
     return {
         "status": status,
-        "mode": "local_warehouse",
+        "mode": "postgres_warehouse" if is_postgres_dsn(db_path) or using_postgres() else "local_warehouse",
         "scope": {
             "type": "date_range" if scoped else "lifetime",
             "start_date": start_date or None,
@@ -228,7 +228,7 @@ def tracking_health_check(
         "errors": [],
         "top_tracking_gaps": gaps,
         "notes": [
-            "Tracking health computed from live local SQLite warehouse tables.",
+            "Tracking health computed from live warehouse tables.",
             "Coverage is scoped to the selected report range." if scoped else "Coverage is lifetime.",
         ],
     }

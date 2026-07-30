@@ -37,7 +37,8 @@ git push -u origin main
    - **Runtime**: **Docker**
    - **Instance Type**: **Free**
 5. Add these **Environment Variables**:
-   - `ATTRIBUTIONOPS_DB_PATH` = `/var/data/attributionops.sqlite` (on the persistent disk — see Notes; `render.yaml` sets this automatically)
+   - `SUPABASE_DB_URL` = your private Supabase Postgres connection string
+   - `ATTRIBUTIONOPS_DB_PATH` = `/var/data/attributionops.sqlite` (fallback SQLite path if `SUPABASE_DB_URL` is blank)
    - `TRACKING_DOMAIN` = `https://mini-hyros-api.onrender.com` (your Render URL)
    - `SITE_TOKEN` = `your-site-token` (pick any string)
    - `GOOGLE_ADS_SCRIPT_TOKEN` = `your-private-google-ads-script-token` (optional, for Google Ads Script spend push)
@@ -107,5 +108,5 @@ Your main tracking script will be:
 ## Notes
 
 - **Render free tier** sleeps after 15 min of inactivity. First request after sleep takes ~30s. To keep it awake, use a free cron pinger like https://cron-job.org to hit `/api/health` every 14 min.
-- **Persistent data**: `render.yaml` attaches a Render persistent disk (`disk: data`, mounted at `/var/data`, 1 GB) and points `ATTRIBUTIONOPS_DB_PATH` at `/var/data/attributionops.sqlite`, so the SQLite database survives redeploys and spin-downs. **Important:** Render persistent disks require a **paid instance type** — the disk is only provisioned once you upgrade the service from **Free** to a paid plan (e.g. Starter, ~$7/mo). On the free tier there is no attached disk, so data still resets on redeploy (or switch to Turso, a free SQLite cloud DB, as an alternative).
+- **Persistent data**: set `SUPABASE_DB_URL` on the Render backend to use Supabase Postgres. `ATTRIBUTIONOPS_DB_PATH` remains a SQLite fallback only when `SUPABASE_DB_URL` is blank.
 - **Auto-deploy**: Both Vercel and Render auto-deploy when you push to GitHub.

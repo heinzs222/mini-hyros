@@ -129,26 +129,49 @@ create table if not exists public.ad_names (
 create table if not exists public.video_metrics (
   platform text,
   date text,
+  account_id text,
   campaign_id text,
   adset_id text,
   ad_id text,
   creative_id text,
   video_id text,
   video_name text,
-  views text,
-  views_3s text,
-  views_25 text,
-  views_50 text,
-  views_75 text,
-  views_100 text,
-  avg_watch_time_sec text,
-  thumb_stop_rate text,
-  hook_rate text,
-  hold_rate text,
-  ctr text,
-  cost text,
-  cost_per_view text
+  views text default '0',
+  views_3s text default '0',
+  views_25 text default '0',
+  views_50 text default '0',
+  views_75 text default '0',
+  views_100 text default '0',
+  views_25pct text default '0',
+  views_50pct text default '0',
+  views_75pct text default '0',
+  views_100pct text default '0',
+  avg_watch_time_sec text default '0',
+  video_length_sec text default '0',
+  thumb_stop_rate text default '0',
+  hook_rate text default '0',
+  hold_rate text default '0',
+  ctr text default '0',
+  click_through_rate text default '0',
+  cost text default '0',
+  cost_per_view text default '0',
+  impressions text default '0',
+  clicks text default '0'
 );
+
+alter table public.video_metrics add column if not exists account_id text;
+alter table public.video_metrics add column if not exists views_25 text default '0';
+alter table public.video_metrics add column if not exists views_50 text default '0';
+alter table public.video_metrics add column if not exists views_75 text default '0';
+alter table public.video_metrics add column if not exists views_100 text default '0';
+alter table public.video_metrics add column if not exists views_25pct text default '0';
+alter table public.video_metrics add column if not exists views_50pct text default '0';
+alter table public.video_metrics add column if not exists views_75pct text default '0';
+alter table public.video_metrics add column if not exists views_100pct text default '0';
+alter table public.video_metrics add column if not exists video_length_sec text default '0';
+alter table public.video_metrics add column if not exists click_through_rate text default '0';
+alter table public.video_metrics add column if not exists impressions text default '0';
+alter table public.video_metrics add column if not exists clicks text default '0';
 
 create table if not exists public.campaign_settings (
   platform text not null,
@@ -167,6 +190,57 @@ create table if not exists public.refund_log (
   type text,
   amount text,
   reason text,
+  source text
+);
+
+create table if not exists public.platform_tokens (
+  platform text primary key,
+  access_token text,
+  refresh_token text,
+  advertiser_id text,
+  expires_at text,
+  updated_at text
+);
+
+create table if not exists public.stripe_sync_coverage (
+  start_date text not null,
+  end_date text not null,
+  updated_at text not null,
+  primary key (start_date, end_date)
+);
+
+create table if not exists public.capi_log (
+  id text primary key,
+  ts text,
+  platform text,
+  event_name text,
+  customer_key text,
+  order_id text,
+  value text,
+  status text,
+  response text,
+  error text
+);
+
+create table if not exists public.webhook_log (
+  id text primary key,
+  ts text,
+  source text,
+  event_type text,
+  payload text,
+  result text
+);
+
+create table if not exists public.email_sms_events (
+  id text primary key,
+  ts text,
+  customer_key text,
+  channel text,
+  event_type text,
+  sequence_name text,
+  step_number text,
+  subject_line text,
+  link_url text,
   source text
 );
 
@@ -199,10 +273,16 @@ create index if not exists idx_conversions_order_id on public.conversions (order
 
 create index if not exists idx_spend_date on public.spend (date);
 create index if not exists idx_spend_platform_date on public.spend (platform, date);
+create index if not exists idx_video_metrics_date on public.video_metrics (date);
+create index if not exists idx_video_metrics_platform_date on public.video_metrics (platform, date);
 create index if not exists idx_reported_value_date on public.reported_value (date);
 create index if not exists idx_reported_value_platform_date on public.reported_value (platform, date);
 create index if not exists idx_refund_log_order_ts on public.refund_log (order_id, ts);
 create index if not exists idx_refund_log_ts on public.refund_log (ts);
+create index if not exists idx_capi_log_order_status on public.capi_log (order_id, status);
+create index if not exists idx_capi_log_platform_status on public.capi_log (platform, status);
+create index if not exists idx_webhook_log_source_ts on public.webhook_log (source, ts);
+create index if not exists idx_email_sms_events_customer_ts on public.email_sms_events (customer_key, ts);
 
 insert into public.campaign_settings (platform, campaign_id, tracked, note, updated_at)
 values
@@ -223,3 +303,8 @@ alter table public.ad_names enable row level security;
 alter table public.video_metrics enable row level security;
 alter table public.campaign_settings enable row level security;
 alter table public.refund_log enable row level security;
+alter table public.platform_tokens enable row level security;
+alter table public.stripe_sync_coverage enable row level security;
+alter table public.capi_log enable row level security;
+alter table public.webhook_log enable row level security;
+alter table public.email_sms_events enable row level security;
