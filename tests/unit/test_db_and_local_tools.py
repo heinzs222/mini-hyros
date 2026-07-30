@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import attributionops.db as db_module
 from attributionops.db import _translate_postgres_sql, query, query_iter, sql_rows
 from attributionops.schema import DEFAULT_CAMPAIGN_SETTINGS, ensure_campaign_settings
 from attributionops.tools.audiences import audiences_sync
@@ -80,6 +81,59 @@ def test_postgres_translation_handles_replace_upsert_and_sqlite_functions():
     assert "to_char((o.ts::timestamptz + %(lookback)s::interval)" in sql
     assert "CAST(COALESCE(NULLIF((o.net)::text, ''), '0') AS DOUBLE PRECISION)" in sql
     assert "substr(o.ts, 1, 10) >= %(start_date)s" in sql
+
+
+def test_postgres_queries_reuse_one_autocommit_connection(monkeypatch):
+    class FakeCursor:
+        description = [("value",)]
+
+        def fetchall(self):
+            return [(1,)]
+
+        def close(self):
+            return None
+
+    class FakeRaw:
+        closed = False
+
+    class FakeConnection:
+        def __init__(self, url, *, autocommit=False):
+            self.url = url
+            self.autocommit = autocommit
+            self.raw = FakeRaw()
+            self.execute_count = 0
+
+        def execute(self, _sql, _params=None):
+            self.execute_count += 1
+            return FakeCursor()
+
+        def commit(self):
+            raise AssertionError("autocommit query connections must not commit")
+
+        def rollback(self):
+            raise AssertionError("successful query connections must not roll back")
+
+        def close(self):
+            self.raw.closed = True
+
+    created = []
+
+    def create_connection(url, *, autocommit=False):
+        connection = FakeConnection(url, autocommit=autocommit)
+        created.append(connection)
+        return connection
+
+    monkeypatch.setattr(db_module, "PostgresConnection", create_connection)
+    monkeypatch.setattr(db_module._query_connection_state, "postgres", None, raising=False)
+    dsn = "postgresql://user:password@example.test/postgres"
+
+    assert query(dsn, "SELECT 1 AS value").rows == [{"value": 1}]
+    assert query(dsn, "SELECT 1 AS value").rows == [{"value": 1}]
+
+    assert len(created) == 1
+    assert created[0].autocommit is True
+    assert created[0].execute_count == 2
+    monkeypatch.setattr(db_module._query_connection_state, "postgres", None, raising=False)
 
 
 # ── warehouse.query tool ──────────────────────────────────────────────────────

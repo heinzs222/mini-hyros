@@ -10,6 +10,7 @@ def tracking_health_check(
     lookback_days_for_order_source: int = 30,
     start_date: str = "",
     end_date: str = "",
+    orders_with_source_override: int | None = None,
 ) -> dict[str, object]:
     """Measure tracking coverage, optionally inside one report date range.
 
@@ -92,9 +93,10 @@ def tracking_health_check(
         ]
     )
 
-    orders_with_source = query(
-        db_path,
-        f"""
+    if orders_with_source_override is None:
+        orders_with_source = query(
+            db_path,
+            f"""
         WITH conversion_identity AS (
             SELECT order_id,
                    MAX(NULLIF(customer_key, '')) AS customer_key,
@@ -156,8 +158,13 @@ def tracking_health_check(
               )
           );
         """,
-        params,
-    ).rows[0]["n"]
+            params,
+        ).rows[0]["n"]
+    else:
+        orders_with_source = max(
+            0,
+            min(int(orders_total), int(orders_with_source_override)),
+        )
 
     last_session_ts = query(
         db_path, f"SELECT MAX(ts) AS max_ts FROM sessions {session_where};", params

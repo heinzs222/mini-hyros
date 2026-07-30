@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import threading
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -452,13 +454,19 @@ class PostgresCursor:
 
 
 class PostgresConnection:
-    def __init__(self, url: str):
+    def __init__(self, url: str, *, autocommit: bool = False):
         try:
             import psycopg
             from psycopg.rows import dict_row
         except ImportError as exc:
             raise RuntimeError("PostgreSQL requires psycopg. Install backend/requirements.txt.") from exc
-        self.raw = psycopg.connect(url, row_factory=dict_row, prepare_threshold=None)
+        self.raw = psycopg.connect(
+            url,
+            row_factory=dict_row,
+            prepare_threshold=None,
+            autocommit=autocommit,
+        )
+        self.autocommit = autocommit
         with self.raw.cursor() as cursor:
             cursor.execute("SET statement_timeout = '55s'")
         self._conflicts: dict[str, list[str]] = {}
@@ -541,6 +549,53 @@ def connect(db_path: str | os.PathLike[str]) -> sqlite3.Connection | PostgresCon
     return _sqlite_connect(db_path)
 
 
+_query_connection_state = threading.local()
+
+
+def _cached_postgres_connection(url: str) -> PostgresConnection:
+    state = getattr(_query_connection_state, "postgres", None)
+    if state is not None:
+        cached_url, connection = state
+        if cached_url == url and not connection.raw.closed:
+            return connection
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+    connection = PostgresConnection(url, autocommit=True)
+    _query_connection_state.postgres = (url, connection)
+    return connection
+
+
+@contextmanager
+def _query_connection(
+    db_path: str | os.PathLike[str],
+) -> Iterable[sqlite3.Connection | PostgresConnection]:
+    path_text = str(db_path)
+    url = path_text if is_postgres_dsn(path_text) else database_url()
+    if not is_postgres_dsn(url):
+        with _sqlite_connect(db_path) as connection:
+            yield connection
+        return
+
+    connection = _cached_postgres_connection(url)
+    try:
+        yield connection
+        if not connection.autocommit:
+            connection.commit()
+    except Exception:
+        try:
+            if not connection.autocommit:
+                connection.rollback()
+        except Exception:
+            try:
+                connection.close()
+            finally:
+                _query_connection_state.postgres = None
+        raise
+
+
 def _column_names(description: Any) -> list[str]:
     if not description:
         return []
@@ -564,10 +619,13 @@ def _requires_existing_sqlite_file(db_path: str | os.PathLike[str]) -> bool:
 def query(db_path: str, sql: str, params: dict[str, Any] | None = None) -> QueryResult:
     if _requires_existing_sqlite_file(db_path) and not os.path.exists(db_path):
         raise FileNotFoundError(db_path)
-    with connect(db_path) as conn:
+    with _query_connection(db_path) as conn:
         cursor = conn.execute(sql, params or {})
-        columns = _column_names(cursor.description)
-        rows = _dict_rows(cursor.fetchall(), columns)
+        try:
+            columns = _column_names(cursor.description)
+            rows = _dict_rows(cursor.fetchall(), columns)
+        finally:
+            cursor.close()
         return QueryResult(
             columns=columns,
             rows=rows,
@@ -580,10 +638,13 @@ def query(db_path: str, sql: str, params: dict[str, Any] | None = None) -> Query
 def sql_rows(db_path: str, sql: str, params: Any = None) -> list[dict[str, Any]]:
     if _requires_existing_sqlite_file(db_path) and not os.path.exists(db_path):
         raise FileNotFoundError(db_path)
-    with connect(db_path) as conn:
+    with _query_connection(db_path) as conn:
         cursor = conn.execute(sql) if params is None else conn.execute(sql, params)
-        columns = _column_names(cursor.description)
-        return _dict_rows(cursor.fetchall(), columns)
+        try:
+            columns = _column_names(cursor.description)
+            return _dict_rows(cursor.fetchall(), columns)
+        finally:
+            cursor.close()
 
 
 def query_iter(db_path: str, sql: str, params: dict[str, Any] | None = None) -> Iterable[dict[str, Any]]:

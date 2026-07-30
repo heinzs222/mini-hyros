@@ -31,17 +31,18 @@ def apply_report_integrity_fixes(target: Path) -> bool:
         "report-integrity imports",
     )
 
-    text = _replace_once(
-        text,
-        "    health = tracking_health_check(db_path)\n",
-        "    health = tracking_health_check(\n"
-        "        db_path,\n"
-        "        start_date=inputs.start_date,\n"
-        "        end_date=inputs.end_date,\n"
-        "        lookback_days_for_order_source=inputs.lookback_days,\n"
-        "    )\n",
-        "date-scoped tracking health",
-    )
+    if "orders_with_source_override=int(_attr[\"run\"][\"source_attributed_orders\"])" not in text:
+        text = _replace_once(
+            text,
+            "    health = tracking_health_check(db_path)\n",
+            "    health = tracking_health_check(\n"
+            "        db_path,\n"
+            "        start_date=inputs.start_date,\n"
+            "        end_date=inputs.end_date,\n"
+            "        lookback_days_for_order_source=inputs.lookback_days,\n"
+            "    )\n",
+            "date-scoped tracking health",
+        )
 
     text = _replace_once(
         text,

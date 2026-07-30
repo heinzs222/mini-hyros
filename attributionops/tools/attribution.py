@@ -302,11 +302,15 @@ def _load_orders_and_touchpoints(
                 if not str(order.get(col) or "").strip() and str(conv.get(col) or "").strip():
                     order[col] = str(conv.get(col) or "").strip()
 
+    if not orders:
+        return [], {}, {}, {}
+
     # Touchpoints only need to span [start_d - lookback, orders_end_d]. They are
     # grouped by multiple identities because browser-side purchases can be
     # anonymous at checkout time but still carry the same session/visitor id as
-    # prior ad clicks. This mirrors HYROS-style stitching more closely than
-    # requiring customer_key on every order.
+    # prior ad clicks. Restrict the SQL to identities present on these orders:
+    # fetching every touchpoint in a lookback window is prohibitively expensive
+    # over a remote warehouse and cannot affect attribution for unrelated users.
     win_start = local_day_start_utc(start_d - timedelta(days=lookback_days))
     touchpoint_cols = table_columns(db_path, "touchpoints")
     session_cols = table_columns(db_path, "sessions")
@@ -316,26 +320,111 @@ def _load_orders_and_touchpoints(
         else "COALESCE(s.visitor_id, '') AS visitor_id"
     )
     session_visitor_agg, session_customer_agg = session_identity_agg_exprs(session_cols)
+
+    customer_keys = sorted(
+        {str(order.get("customer_key") or "").strip() for order in orders}
+        - {""}
+    )
+    session_ids = sorted(
+        {str(order.get("session_id") or "").strip() for order in orders}
+        - {""}
+    )
+    visitor_ids = sorted(
+        {str(order.get("visitor_id") or "").strip() for order in orders}
+        - {""}
+    )
+    anonymous_timestamps = sorted(
+        {
+            timestamp
+            for order in orders
+            if not _identity_keys(order)
+            for timestamp in (
+                str(order.get("ts") or "").strip(),
+                str(order.get("_conversion_ts") or "").strip(),
+            )
+            if timestamp
+        }
+    )
+
+    touch_params: dict[str, Any] = {
+        "win_start": win_start,
+        "end_excl": orders_end_excl,
+    }
+
+    def bind_values(prefix: str, values: list[str]) -> str:
+        placeholders: list[str] = []
+        for index, value in enumerate(values):
+            key = f"{prefix}_{index}"
+            touch_params[key] = value
+            placeholders.append(f":{key}")
+        return ", ".join(placeholders)
+
+    customer_values = bind_values("customer", customer_keys)
+    session_values = bind_values("session", session_ids)
+    visitor_values = bind_values("visitor", visitor_ids)
+    anonymous_ts_values = bind_values("anonymous_ts", anonymous_timestamps)
+
+    session_filters: list[str] = []
+    if session_values:
+        session_filters.append(f"session_id IN ({session_values})")
+    if customer_values and "customer_key" in session_cols:
+        session_filters.append(f"customer_key IN ({customer_values})")
+    if visitor_values and "visitor_id" in session_cols:
+        session_filters.append(f"visitor_id IN ({visitor_values})")
+    if anonymous_ts_values:
+        session_filters.append(
+            "session_id IN (SELECT session_id FROM anonymous_sessions)"
+        )
+
+    touch_filters: list[str] = []
+    if customer_values:
+        touch_filters.append(f"t.customer_key IN ({customer_values})")
+    if session_values:
+        touch_filters.append(f"t.session_id IN ({session_values})")
+    if visitor_values and "visitor_id" in touchpoint_cols:
+        touch_filters.append(f"t.visitor_id IN ({visitor_values})")
+    if session_filters:
+        touch_filters.append("s.session_id IS NOT NULL")
+    if anonymous_ts_values:
+        touch_filters.append(
+            "t.session_id IN (SELECT session_id FROM anonymous_sessions)"
+        )
+        touch_filters.append(f"t.ts IN ({anonymous_ts_values})")
+
+    session_identity_where = " OR ".join(session_filters) or "1 = 0"
+    touch_identity_where = " OR ".join(touch_filters) or "1 = 0"
+    anonymous_sessions_sql = (
+        "SELECT DISTINCT session_id FROM touchpoints "
+        f"WHERE ts IN ({anonymous_ts_values}) AND COALESCE(session_id, '') != ''"
+        if anonymous_ts_values
+        else "SELECT '' AS session_id WHERE 1 = 0"
+    )
     touchpoints = query(
         db_path,
         f"""
+        WITH anonymous_sessions AS (
+            {anonymous_sessions_sql}
+        ),
+        session_identity AS (
+            SELECT session_id,
+                   {session_visitor_agg},
+                   {session_customer_agg}
+            FROM sessions
+            WHERE COALESCE(session_id, '') != ''
+              AND ({session_identity_where})
+            GROUP BY session_id
+        )
         SELECT t.rowid AS _rowid, t.ts, t.channel, t.platform, t.campaign_id, t.adset_id,
                t.ad_id, t.creative_id, t.gclid, t.fbclid, t.ttclid,
                COALESCE(NULLIF(t.customer_key, ''), s.customer_key, '') AS customer_key,
                t.session_id,
                {touchpoint_visitor_expr}
         FROM touchpoints t
-        LEFT JOIN (
-            SELECT session_id,
-                   {session_visitor_agg},
-                   {session_customer_agg}
-            FROM sessions
-            WHERE COALESCE(session_id, '') != ''
-            GROUP BY session_id
-        ) s ON s.session_id = t.session_id
-        WHERE t.ts >= :win_start AND t.ts < :end_excl;
+        LEFT JOIN session_identity s ON s.session_id = t.session_id
+        WHERE t.ts >= :win_start AND t.ts < :end_excl
+          AND ({touch_identity_where});
         """,
-        {"win_start": win_start, "end_excl": orders_end_excl},
+        touch_params,
     ).rows
 
     excluded_raw = excluded_raw or set()

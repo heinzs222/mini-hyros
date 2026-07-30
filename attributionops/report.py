@@ -690,40 +690,8 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
     # rendering an all-zero report that looks identical to "no data".
     data_errors: list[dict[str, str]] = []
 
-    # 1) integrations.status + tracking.health_check
+    # 1) integrations.status
     integrations = integrations_status(db_path)
-    # Scope the health check to the SELECTED report window. Called unscoped it
-    # scans full lifetime sessions/orders/touchpoints/conversions on every build,
-    # which dominated report latency and made every date-range switch equally slow
-    # regardless of how much data the window actually contains.
-    health = tracking_health_check(
-        db_path,
-        start_date=inputs.start_date,
-        end_date=inputs.end_date,
-        lookback_days_for_order_source=inputs.lookback_days,
-    )
-
-    cov = health.get("coverage", {})
-    orders_with_source = int(cov.get("orders_with_source", 0))
-    orders_total = int(cov.get("orders_total", 0))
-    sessions_with_click_id = int(cov.get("sessions_with_click_id", 0))
-    sessions_total = int(cov.get("sessions_total", 0))
-
-    order_rate = (orders_with_source / orders_total) if orders_total else 0.0
-    click_id_rate = (sessions_with_click_id / sessions_total) if sessions_total else 0.0
-    tracking_percentage = round(100.0 * (0.5 * order_rate + 0.5 * click_id_rate), 2)
-
-    tracking = {
-        "tracking_percentage": tracking_percentage,
-        "how_computed": "50% orders_with_source/orders_total + 50% sessions_with_click_id/sessions_total, based on local warehouse tables.",
-        "coverage_breakdown": {
-            "orders_with_source": orders_with_source,
-            "orders_total": orders_total,
-            "sessions_with_click_id": sessions_with_click_id,
-            "sessions_total": sessions_total,
-        },
-        "top_tracking_gaps": health.get("top_tracking_gaps", []),
-    }
 
     breakdown = _tab_to_breakdown(inputs.active_tab)
     date_basis = "click" if inputs.use_date_of_click_attribution else "conversion"
@@ -749,6 +717,38 @@ def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any
         value_type="revenue",
         date_basis=date_basis,
     )
+    # Scope health to the selected report window and reuse the attribution pass's
+    # source count. Recomputing it with a second touchpoint/session join adds no
+    # information to this response and is expensive on a remote warehouse.
+    health = tracking_health_check(
+        db_path,
+        start_date=inputs.start_date,
+        end_date=inputs.end_date,
+        lookback_days_for_order_source=inputs.lookback_days,
+        orders_with_source_override=int(_attr["run"]["source_attributed_orders"]),
+    )
+
+    cov = health.get("coverage", {})
+    orders_with_source = int(cov.get("orders_with_source", 0))
+    orders_total = int(cov.get("orders_total", 0))
+    sessions_with_click_id = int(cov.get("sessions_with_click_id", 0))
+    sessions_total = int(cov.get("sessions_total", 0))
+
+    order_rate = (orders_with_source / orders_total) if orders_total else 0.0
+    click_id_rate = (sessions_with_click_id / sessions_total) if sessions_total else 0.0
+    tracking_percentage = round(100.0 * (0.5 * order_rate + 0.5 * click_id_rate), 2)
+
+    tracking = {
+        "tracking_percentage": tracking_percentage,
+        "how_computed": "50% orders_with_source/orders_total + 50% sessions_with_click_id/sessions_total, based on local warehouse tables.",
+        "coverage_breakdown": {
+            "orders_with_source": orders_with_source,
+            "orders_total": orders_total,
+            "sessions_with_click_id": sessions_with_click_id,
+            "sessions_total": sessions_total,
+        },
+        "top_tracking_gaps": health.get("top_tracking_gaps", []),
+    }
     # Alias resolution must not depend on the selected window: build the alias
     # candidates from the LIFETIME spend catalog so an alias that is ambiguous
     # across the account's history stays unmapped in every date range, instead
