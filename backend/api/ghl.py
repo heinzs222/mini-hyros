@@ -28,7 +28,7 @@ from fastapi import APIRouter, Request, HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
-from attributionops.db import connect, sql_rows as db_query
+from attributionops.db import connect, is_postgres_dsn, sql_rows as db_query
 from attributionops.schema import ensure_order_semantics
 from attributionops.util import utc_ts_to_local_date
 
@@ -94,6 +94,11 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _ensure_tracking_schema(db_path: str) -> None:
+    # Supabase schema changes are applied by migrations. Replaying SQLite's
+    # compatibility DDL per row can exceed the serverless statement timeout.
+    if is_postgres_dsn(db_path):
+        return
+
     with connect(db_path) as conn:
         session_cols = _table_columns(conn, "sessions")
         for col in ("visitor_id", "event_name", "page_title", "custom_data_json"):

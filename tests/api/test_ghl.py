@@ -34,6 +34,18 @@ def _count(db_path: str, table: str, where: str = "", params=()) -> int:
     return _rows(db_path, sql, params)[0]["n"]
 
 
+def test_tracking_schema_is_managed_by_migrations_for_postgres(monkeypatch):
+    import api.ghl as ghl
+
+    monkeypatch.setattr(
+        ghl,
+        "connect",
+        lambda _db_path: pytest.fail("Postgres ingestion must not run compatibility DDL"),
+    )
+
+    ghl._ensure_tracking_schema("postgresql://user:password@example.test/database")
+
+
 # ── Contact events ─────────────────────────────────────────────────────────────
 
 def test_contact_create_only_stitches_matching_sessions(client, api_db):
