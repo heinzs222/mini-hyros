@@ -5,6 +5,7 @@ import html
 import json
 import logging
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -21,6 +22,12 @@ from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, HTML
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
+
+try:
+    from .database_export import create_sqlite_snapshot, remove_file
+except ImportError:
+    from database_export import create_sqlite_snapshot, remove_file
 
 # Add parent dir so we can import attributionops
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -28,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from attributionops.config import default_db_path
-from attributionops.db import is_postgres
+from attributionops.db import db_label, is_postgres_dsn, using_postgres
 from attributionops.report import ReportInputs, build_hyros_like_report
 from attributionops.report_integrity import resolve_attribution_dimensions
 from attributionops.schema import ensure_schema
@@ -41,25 +48,25 @@ from attributionops.tools.tracking import tracking_health_check
 from attributionops.tools.forecasting import forecasting_run
 from attributionops.tools.warehouse import warehouse_query
 
-from api.webhooks import router as webhooks_router
-from api.video_metrics import router as video_router
-from api.connections import router as connections_router
-from api.ghl import router as ghl_router
-from api.capi import router as capi_router
-from api.ltv import router as ltv_router
-from api.journey import router as journey_router
-from api.funnel import router as funnel_router
-from api.cohort import router as cohort_router
-from api.refunds import router as refunds_router
-from api.email_sms import router as email_sms_router
-from api.ai_recommendations import router as ai_router
-from api.campaign_settings import router as campaign_settings_router
-from api.ad_names import router as ad_names_router, get_name_map, get_thumbnails_map
-from api.spend_sync import router as spend_sync_router
-from api.stripe_sync import router as stripe_sync_router
-from api.ghl_sync import router as ghl_sync_router
-from api.platform_auth import router as platform_auth_router
-from api.auth import (
+from backend.api.webhooks import router as webhooks_router
+from backend.api.video_metrics import router as video_router
+from backend.api.connections import router as connections_router
+from backend.api.ghl import router as ghl_router
+from backend.api.capi import router as capi_router
+from backend.api.ltv import router as ltv_router
+from backend.api.journey import router as journey_router
+from backend.api.funnel import router as funnel_router
+from backend.api.cohort import router as cohort_router
+from backend.api.refunds import router as refunds_router
+from backend.api.email_sms import router as email_sms_router
+from backend.api.ai_recommendations import router as ai_router
+from backend.api.campaign_settings import router as campaign_settings_router
+from backend.api.ad_names import router as ad_names_router, get_name_map, get_thumbnails_map
+from backend.api.spend_sync import router as spend_sync_router
+from backend.api.stripe_sync import router as stripe_sync_router
+from backend.api.ghl_sync import router as ghl_sync_router
+from backend.api.platform_auth import router as platform_auth_router
+from backend.api.auth import (
     router as auth_router,
     is_auth_enabled,
     extract_request_token,
@@ -91,6 +98,9 @@ manager = ConnectionManager()
 
 # ── App ────────────────────────────────────────────────────────────────────────
 def _ensure_db_exists(db_path: str) -> None:
+    if is_postgres_dsn(db_path):
+        return
+
     p = Path(db_path)
     if p.exists():
         return
@@ -210,13 +220,14 @@ def _is_serverless() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # On SQLite (local/dev) create + migrate the file. On Postgres the schema is
-    # provisioned once by migrations/postgres/0001_schema.sql, and the serverless
-    # filesystem is read-only anyway, so there is nothing to create here.
-    if not is_postgres():
-        db = default_db_path()
+    # Ensure configured DB exists (create schema if missing)
+    db = default_db_path()
+    # Apply idempotent migrations (unique indexes, campaign_settings) to any
+    # pre-existing database so read-time guarantees hold on older DBs too.
+    # Keep SQLite file bootstrap behavior for local development and tests only.
+    if not is_postgres_dsn(db):
         _ensure_db_exists(db)
-        ensure_schema(db)
+    ensure_schema(db)
 
     serverless = _is_serverless()
 
@@ -318,6 +329,9 @@ def _is_public_path(path: str) -> bool:
         # Guards itself with CRON_SECRET; must bypass the dashboard auth cookie
         # so Vercel Cron (which sends only its own bearer token) can reach it.
         return True
+    if p == "/api/admin/database-export":
+        # Guards itself with DATABASE_EXPORT_TOKEN.
+        return True
     if p.startswith("/t/"):
         return True
     if p.startswith("/v1/lst/"):
@@ -347,7 +361,7 @@ async def auth_middleware(request: Request, call_next):
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 # The report endpoints run as sync `def` so FastAPI executes them in its
@@ -530,7 +544,7 @@ async def health():
     # Expose the reporting timezone so the dashboard computes preset windows
     # (Today/Yesterday/7d/30d) in the SAME zone the backend buckets days into,
     # and surface any migration failure that would otherwise silently zero reports.
-    payload: dict[str, Any] = {"status": "ok", "db": _db(), "timezone": report_timezone_name()}
+    payload: dict[str, Any] = {"status": "ok", "db": db_label(_db()), "timezone": report_timezone_name()}
     try:
         from attributionops.schema import last_migration_error
 
@@ -540,7 +554,7 @@ async def health():
             payload["migration_error"] = mig_err
     except Exception:
         pass
-    payload["backend"] = "postgres" if is_postgres() else "sqlite"
+    payload["backend"] = "postgres" if using_postgres() else "sqlite"
     return payload
 
 
@@ -640,6 +654,33 @@ def live_recent(
 
     cursor = events[-1]["ts"] if events else since
     return {"events": events, "cursor": cursor}
+
+
+@app.get("/api/admin/database-export")
+def database_export(request: Request):
+    expected = os.environ.get("DATABASE_EXPORT_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="Database export is not configured")
+
+    supplied = request.headers.get("X-Mini-Hyros-Export-Token", "")
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        snapshot_path = create_sqlite_snapshot(_db())
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Database file not found")
+    except Exception:
+        logging.exception("Database export failed")
+        raise HTTPException(status_code=500, detail="Database export failed")
+
+    filename = f"mini-hyros-{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.sqlite"
+    return FileResponse(
+        snapshot_path,
+        media_type="application/vnd.sqlite3",
+        filename=filename,
+        background=BackgroundTask(remove_file, snapshot_path),
+    )
 
 
 # NOTE: the report/data endpoints below are declared as sync `def` (not `async

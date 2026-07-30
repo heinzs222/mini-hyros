@@ -25,8 +25,7 @@ from fastapi.responses import RedirectResponse, HTMLResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
-from attributionops.db import connect, sql_rows  # noqa
-from attributionops.db import is_postgres
+from attributionops.db import connect, sql_rows
 
 router = APIRouter()
 UTC = timezone.utc
@@ -46,7 +45,7 @@ TIKTOK_REQUIRED_ENDPOINT_PERMISSIONS = [
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 def _request_origin(request: Request) -> str:
@@ -66,9 +65,10 @@ def _tiktok_redirect_uri(request: Request) -> str:
         return backend_url
 
     return (
-        _request_origin(request)
-        or os.environ.get("TRACKING_DOMAIN", "").strip().rstrip("/")
-        or "https://mini-hyros-api.vercel.app"
+        os.environ.get("PUBLIC_API_URL")
+        or os.environ.get("API_PUBLIC_URL")
+        or _request_origin(request)
+        or "https://vigil-api.vercel.app"
     )
 
 
@@ -103,10 +103,6 @@ def _now() -> str:
 
 
 def _ensure_tokens_table(db_path: str) -> None:
-    if is_postgres():
-        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
-        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
-        return
     with connect(db_path) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS platform_tokens (
             platform TEXT PRIMARY KEY,

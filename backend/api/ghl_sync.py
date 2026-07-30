@@ -31,8 +31,7 @@ from fastapi import APIRouter, Query, Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
-from attributionops.db import connect, sql_rows as db_query  # noqa
-from attributionops.db import is_postgres
+from attributionops.db import connect, sql_rows as db_query
 from attributionops.util import try_parse_iso_ts, utc_ts_to_local_date
 
 logger = logging.getLogger("ghl_sync")
@@ -40,7 +39,7 @@ logger = logging.getLogger("ghl_sync")
 # Reuse the webhook write-helpers so GHL leads stitch to the same customer_key
 # (sha256 of email, or the shared normalized-phone key) as Stripe orders and
 # the tracking pixel.
-from api.ghl import (
+from backend.api.ghl import (
     _sha256,
     _iso_ts,
     _lead_conversion_id,
@@ -64,7 +63,7 @@ PURCHASE_TYPE = "Purchase"
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 def _now() -> str:
@@ -74,10 +73,6 @@ def _now() -> str:
 # ── Credential storage (shared platform_tokens table) ──────────────────────────
 
 def _ensure_tokens_table(db_path: str) -> None:
-    if is_postgres():
-        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
-        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
-        return
     with connect(db_path) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS platform_tokens (
             platform TEXT PRIMARY KEY,

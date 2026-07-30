@@ -2,7 +2,7 @@
 
 import React from "react";
 import { formatMoney, formatNumber, formatPercentValue, formatRatio, profitColor } from "@/lib/utils";
-import { fetchChildren, apiFetch } from "@/lib/api";
+import { fetchChildren, apiFetch, getApiBase } from "@/lib/api";
 import {
   ChevronDown,
   ChevronRight,
@@ -25,7 +25,7 @@ import {
 import { memo, useState, useCallback, useEffect, useMemo, useRef } from "react";
 import PlatformBadge, { isKnownPlatform } from "./PlatformBadge";
 
-const BACKEND = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const BACKEND = getApiBase();
 
 type MetricValues = {
   impressions?: number;
@@ -630,7 +630,7 @@ function AttributionTable({ columns, rows, totals, activeTab, dataTab, onTabChan
                       const parts = row.id.split("|");
                       const ad_id = parts[parts.length - 1];
                       try {
-                        const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+                        const API_BASE = getApiBase();
                         const r = await apiFetch(`${API_BASE}/api/ad-names/thumbnail?ad_id=${ad_id}`);
                         const d = await r.json();
                         if (d.thumbnail_url) img.src = d.thumbnail_url;

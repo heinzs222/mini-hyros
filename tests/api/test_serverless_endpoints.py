@@ -128,3 +128,35 @@ def test_live_recent_cursor_is_incremental(client, api_db):
     second = client.get(f"/api/live/recent?since={cursor}&limit=50").json()
     assert second["events"] == []
     assert second["cursor"] == cursor
+
+
+# ── serverless detection ─────────────────────────────────────────────────────
+# _is_serverless gates real production behavior: on Vercel the boot cache-warmer
+# thread and the in-process auto-sync loop must NOT start, because background
+# work does not survive between serverless invocations (Vercel Cron drives the
+# sync instead).
+@pytest.mark.parametrize(
+    "env_var", ["VERCEL", "SERVERLESS", "AWS_LAMBDA_FUNCTION_NAME"]
+)
+def test_is_serverless_detects_each_platform_marker(monkeypatch, env_var):
+    for var in ("VERCEL", "SERVERLESS", "AWS_LAMBDA_FUNCTION_NAME"):
+        monkeypatch.delenv(var, raising=False)
+    assert main._is_serverless() is False
+    monkeypatch.setenv(env_var, "1")
+    assert main._is_serverless() is True
+
+
+def test_is_serverless_false_when_unset(monkeypatch):
+    for var in ("VERCEL", "SERVERLESS", "AWS_LAMBDA_FUNCTION_NAME"):
+        monkeypatch.delenv(var, raising=False)
+    assert main._is_serverless() is False
+
+
+def test_sync_interval_minutes_parsing(monkeypatch):
+    monkeypatch.setenv("SYNC_INTERVAL_MINUTES", "15")
+    assert main._sync_interval_minutes() == 15.0
+    monkeypatch.setenv("SYNC_INTERVAL_MINUTES", "0")
+    assert main._sync_interval_minutes() == 0.0
+    # A malformed value must disable the loop rather than crash boot.
+    monkeypatch.setenv("SYNC_INTERVAL_MINUTES", "not-a-number")
+    assert main._sync_interval_minutes() == 0.0

@@ -21,7 +21,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-from attributionops.db import is_postgres
+from pathlib import Path
+
+from attributionops.db import connect, is_postgres_dsn
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ _ensured_paths: set[str] = set()
 # broken migration (the root cause of downstream all-zero reports) is visible in
 # monitoring rather than only in logs that may not be tailed.
 _last_migration_error: dict[str, str] = {}
+_POSTGRES_SCHEMA = Path(__file__).resolve().parents[1] / "supabase" / "migrations" / "202607210001_initial_schema.sql"
 
 
 ORDER_SEMANTIC_COLUMNS: dict[str, str] = {
@@ -411,21 +414,59 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
     ensure_refund_log(conn)
 
 
+def _split_sql_statements(sql_text: str) -> list[str]:
+    statements: list[str] = []
+    current: list[str] = []
+    in_single_quote = False
+    index = 0
+    while index < len(sql_text):
+        char = sql_text[index]
+        if char == "'":
+            current.append(char)
+            if in_single_quote and index + 1 < len(sql_text) and sql_text[index + 1] == "'":
+                current.append("'")
+                index += 2
+                continue
+            in_single_quote = not in_single_quote
+        elif char == ";" and not in_single_quote:
+            statement = "".join(current).strip()
+            if statement:
+                statements.append(statement)
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    tail = "".join(current).strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
+def _ensure_postgres_schema(database_url: str) -> None:
+    schema_text = _POSTGRES_SCHEMA.read_text(encoding="utf-8")
+    with connect(database_url) as conn:
+        for statement in _split_sql_statements(schema_text):
+            conn.execute(statement)
+        conn.commit()
+
+
 def ensure_schema(db_path: str) -> None:
     """Idempotently upgrade an existing database; memoized per process+path."""
-    if is_postgres():
-        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
-        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
-        return
     with _ensured_lock:
         if db_path in _ensured_paths:
             return
     try:
+        if is_postgres_dsn(db_path):
+            _ensure_postgres_schema(db_path)
+            _last_migration_error.pop(db_path, None)
+            with _ensured_lock:
+                _ensured_paths.add(db_path)
+            return
         with sqlite3.connect(db_path) as conn:
             conn.execute("PRAGMA busy_timeout=5000;")
             apply_migrations(conn)
             conn.commit()
-    except sqlite3.Error as exc:
+    except Exception as exc:
         # Never let a migration hiccup crash startup; the individual lazy
         # ensure_* helpers will retry on first use. But DO record it — a failed
         # migration leaves report queries referencing columns that never got

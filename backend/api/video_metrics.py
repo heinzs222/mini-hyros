@@ -10,21 +10,16 @@ from fastapi import APIRouter, Query
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
-from attributionops.db import connect, query  # noqa
-from attributionops.db import is_postgres
+from attributionops.db import connect, query
 
 router = APIRouter()
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 def _ensure_video_table(db_path: str) -> None:
-    if is_postgres():
-        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
-        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
-        return
     with connect(db_path) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS video_metrics (

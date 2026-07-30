@@ -29,13 +29,12 @@ UTC = timezone.utc
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 def _table_columns(db_path: str, table: str) -> set[str]:
-    from attributionops.util import table_columns
-
-    return table_columns(db_path, table)
+    with connect(db_path) as conn:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
 def _identity_predicate(

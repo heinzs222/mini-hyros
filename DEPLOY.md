@@ -46,16 +46,20 @@ Mini Hyros now runs entirely on Vercel:
 1. Go to https://vercel.com → **Add New → Project** and import the repo.
 2. Configure:
    - **Root Directory**: leave as the repository root (`.`)
-   - **Framework Preset**: **Other** (Vercel auto-detects the Python function
-     from `api/index.py` + `requirements.txt` and the `vercel.json` routing)
+   - **Framework Preset**: **Other**. `vercel.json` builds the ASGI entrypoint
+     `app.py` with `@vercel/python` and routes every path to it.
 3. Add **Environment Variables** (see the full reference below). At minimum:
-   - `DATABASE_URL` = the Supabase transaction-pooler URI from Step 1
-   - `TRACKING_DOMAIN` = your backend URL (e.g. `https://mini-hyros-api.vercel.app`)
+   - `SUPABASE_DB_URL` = the Supabase transaction-pooler URI from Step 1
+     (`DATABASE_URL` also works; `SUPABASE_DB_URL` takes precedence)
+   - `TRACKING_DOMAIN` = your backend URL (e.g. `https://vigil-api.vercel.app`)
    - `SITE_TOKEN` = any string you choose
    - `CRON_SECRET` = a random string (Vercel Cron sends it as a bearer token)
    - `REPORT_TIMEZONE`, `REPORT_CURRENCY`, plus any ad-platform/webhook secrets
+   - Optional: `DATABASE_EXPORT_TOKEN` to enable `/api/admin/database-export`
+   - Do **not** set `ATTRIBUTIONOPS_DB_PATH` in production — it is the local
+     SQLite fallback used only when no Postgres URL is configured.
 4. **Deploy.** Your backend URL will be something like
-   `https://mini-hyros-api.vercel.app`.
+   `https://vigil-api.vercel.app`.
 5. The `crons` entry in `vercel.json` registers an hourly call to
    `/api/cron/sync`. Adjust the schedule there if you want it more/less frequent
    (minute-level cron requires a Vercel Pro plan).
@@ -143,15 +147,23 @@ optionally `NEXT_PUBLIC_LIVE_POLL_MS` (live-feed poll interval, default 4000).
 
 ## Notes
 
-- **Migrations**: `migrations/postgres/0001_schema.sql` is the single source of
-  truth for the Postgres schema. The app never runs SQLite-style
-  `CREATE`/`ALTER`/`PRAGMA`/trigger DDL against Postgres — apply the migration
-  once (Step 1) and re-apply it (it is idempotent) when the schema changes.
-- **Periodic sync**: driven by Vercel Cron hitting `/api/cron/sync`. The old
-  in-process 30-minute loop is disabled on serverless.
-- **Live feed**: the dashboard polls `/api/live/recent` (every 4s by default);
-  there is no long-lived WebSocket on serverless.
+- **Migrations**: `supabase/migrations/202607210001_initial_schema.sql` is the
+  single source of truth for the Postgres schema. Apply it once (Step 1) and
+  re-apply it (it is idempotent) whenever the schema changes.
+- **Data migration**: `scripts/migrate_sqlite_to_supabase.py` copies an existing
+  SQLite warehouse into Supabase; see `docs/SUPABASE_MIGRATION.md`.
+- **SQL dialect**: the data layer translates the warehouse's SQLite SQL to
+  Postgres at runtime (placeholders, `INSERT OR IGNORE/REPLACE` → `ON CONFLICT`,
+  `CAST(x AS REAL)`, `rowid`, `PRAGMA table_info` / `sqlite_master`), so both
+  backends run the same queries.
+- **Periodic sync**: driven by Vercel Cron hitting `/api/cron/sync`. The
+  in-process 30-minute loop still runs when self-hosting, but is disabled on
+  serverless (`VERCEL`), where background tasks do not survive between requests.
+- **Live feed**: the dashboard polls `/api/live/recent` (every 4s by default).
+  The `/ws` WebSocket endpoint still exists for self-hosted runs, but serverless
+  functions cannot hold it open, so the dashboard no longer relies on it.
 - **Cold starts**: serverless functions cold-start after inactivity; the first
   request may be slower while the report cache warms lazily.
 - **Local development** is unchanged: without a Postgres URL the app uses SQLite
   and `uvicorn main:app --app-dir backend` (see `README.md`).
+- **Auto-deploy**: Vercel auto-deploys when you push to GitHub.

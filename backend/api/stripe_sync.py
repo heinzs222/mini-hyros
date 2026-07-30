@@ -22,8 +22,7 @@ from fastapi import APIRouter, BackgroundTasks, Query
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
-from attributionops.db import connect, sql_rows  # noqa
-from attributionops.db import is_postgres
+from attributionops.db import connect, sql_rows
 from attributionops.schema import ensure_order_semantics, ensure_refund_log
 from attributionops.util import local_day_bounds_utc, parse_iso_ts
 
@@ -40,7 +39,7 @@ _FEE_FIXED = 0.30
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 def _payment_intent_id(charge: dict) -> str:
@@ -72,7 +71,7 @@ def _sha256(value: str) -> str:
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     try:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    except sqlite3.Error:
+    except Exception:
         return set()
     return {str(row[1]) for row in rows}
 
@@ -85,10 +84,6 @@ def _get_stripe_key() -> str:
 
 
 def _ensure_orders_table(db_path: str) -> None:
-    if is_postgres():
-        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
-        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
-        return
     with connect(db_path) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS orders (
             order_id TEXT PRIMARY KEY,

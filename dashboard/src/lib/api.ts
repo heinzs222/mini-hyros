@@ -1,17 +1,17 @@
-function defaultApiBase(): string {
+export function getApiBase(): string {
   if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
   if (typeof window !== "undefined") {
     const host = window.location.hostname;
     if (host !== "localhost" && host !== "127.0.0.1") {
       // Production fallback when NEXT_PUBLIC_API_URL is unset. Set that env var
       // to your deployed backend URL; this placeholder just avoids localhost.
-      return "https://mini-hyros-api.vercel.app";
+      return "https://vigil-api.vercel.app";
     }
   }
   return "http://localhost:8000";
 }
 
-const API_BASE = defaultApiBase();
+const API_BASE = getApiBase();
 const AUTH_TOKEN_KEY = "hyros_auth_token";
 const configuredTimeoutMs = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS || 90000);
 const API_TIMEOUT_MS = Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0

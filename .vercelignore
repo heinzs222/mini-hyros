@@ -1,13 +1,15 @@
-# Both Vercel projects deploy from this single repo:
+# Applies to BOTH Vercel projects that deploy from this single repo:
+#   - the API project       (Root Directory = repo root, app.py)
 #   - the dashboard project (Root Directory = dashboard)
-#   - the backend project  (Root Directory = repo root, api/index.py)
-# A repo-root .vercelignore is applied to BOTH, so it must NOT exclude
-# dashboard/ — doing so empties the dashboard build. Keep this to backend-only
-# cruft that is safe to drop from either upload.
+#
+# IMPORTANT: do NOT add "dashboard/" here. This file is applied to the dashboard
+# project's build too, and excluding the directory empties that build — it was
+# observed failing the dashboard deployment until the entry was removed.
 data/
-tests/
-__pycache__/
-*.pyc
 *.sqlite
-*.sqlite-wal
 *.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+__pycache__/
+.pytest_cache/

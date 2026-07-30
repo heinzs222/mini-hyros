@@ -22,10 +22,9 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from attributionops.config import default_db_path
-from attributionops.db import connect  # noqa
-from attributionops.db import is_postgres
+from attributionops.db import connect
 from attributionops.tools.ads import report_currency, spend_fx_rates
-from api.platform_auth import get_or_refresh_tiktok_token, get_tiktok_advertiser_id
+from backend.api.platform_auth import get_or_refresh_tiktok_token, get_tiktok_advertiser_id
 
 router = APIRouter()
 UTC = timezone.utc
@@ -62,7 +61,7 @@ class GoogleAdsScriptSpendPayload(BaseModel):
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 def _now() -> str:
@@ -70,10 +69,6 @@ def _now() -> str:
 
 
 def _ensure_spend_table(db_path: str) -> None:
-    if is_postgres():
-        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
-        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
-        return
     with connect(db_path) as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS spend (
@@ -114,10 +109,6 @@ def _spend_fx_status(currencies: list[str]) -> dict[str, Any]:
 
 
 def _ensure_ad_names_table(db_path: str) -> None:
-    if is_postgres():
-        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
-        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
-        return
     with connect(db_path) as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS ad_names (

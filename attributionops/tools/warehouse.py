@@ -12,9 +12,9 @@ def warehouse_query(db_path: str, sql: str, params: dict[str, Any] | None = None
         "metadata": {
             "columns": result.columns,
             "row_count": result.row_count,
-            "db_path": result.db_path,
-            "sql": result.sql,
-            "params": result.params,
+        "db_path": db_path,
+        "sql": sql,
+        "params": params or {},
         },
     }
 

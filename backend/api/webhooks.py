@@ -20,8 +20,7 @@ from fastapi import APIRouter, Request, HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
-from attributionops.db import connect  # noqa
-from attributionops.db import is_postgres
+from attributionops.db import connect
 from attributionops.schema import ensure_order_semantics, ensure_refund_log
 
 router = APIRouter()
@@ -36,7 +35,7 @@ _FEE_FIXED = 0.30
 
 
 def _db() -> str:
-    return os.environ.get("ATTRIBUTIONOPS_DB_PATH", default_db_path())
+    return default_db_path()
 
 
 def _norm_email(value: Any) -> str:
@@ -77,14 +76,14 @@ def _meta_campaign_from_adset(db_path: str, adset_id: str) -> str:
                 (adset_id,),
             ).fetchone()
             return str(row[0] if row and row[0] else "").strip()
-    except sqlite3.Error:
+    except Exception:
         return ""
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     try:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    except sqlite3.Error:
+    except Exception:
         return set()
     return {str(row[1]) for row in rows}
 
@@ -94,10 +93,6 @@ _tracking_schema_ready: set[str] = set()
 
 
 def _ensure_tracking_schema(db_path: str) -> None:
-    if is_postgres():
-        # Postgres schema is provisioned once by migrations/postgres/0001_schema.sql;
-        # the SQLite-style CREATE/ALTER/PRAGMA below never runs against Postgres.
-        return
     # Memoized per process+path: the ALTER/CREATE INDEX DDL only needs to run
     # once, not on every tracking hit (which serialized on the write lock).
     with _tracking_schema_lock:
