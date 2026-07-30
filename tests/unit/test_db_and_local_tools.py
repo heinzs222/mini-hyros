@@ -9,7 +9,13 @@ from pathlib import Path
 import pytest
 
 import attributionops.db as db_module
-from attributionops.db import _translate_postgres_sql, query, query_iter, sql_rows
+from attributionops.db import (
+    PostgresCompatRow,
+    _translate_postgres_sql,
+    query,
+    query_iter,
+    sql_rows,
+)
 from attributionops.schema import DEFAULT_CAMPAIGN_SETTINGS, ensure_campaign_settings
 from attributionops.tools.audiences import audiences_sync
 from attributionops.tools.conversions import conversions_push
@@ -81,6 +87,14 @@ def test_postgres_translation_handles_replace_upsert_and_sqlite_functions():
     assert "to_char((o.ts::timestamptz + %(lookback)s::interval)" in sql
     assert "CAST(COALESCE(NULLIF((o.net)::text, ''), '0') AS DOUBLE PRECISION)" in sql
     assert "substr(o.ts, 1, 10) >= %(start_date)s" in sql
+
+
+def test_postgres_compat_row_supports_named_and_numeric_access():
+    row = PostgresCompatRow({"cid": 0, "name": "spend", "type": "text"})
+
+    assert row["name"] == "spend"
+    assert row[1] == "spend"
+    assert row.get("type") == "text"
 
 
 def test_postgres_queries_reuse_one_autocommit_connection(monkeypatch):

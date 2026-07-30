@@ -417,10 +417,10 @@ class PostgresCursor:
         return self
 
     def fetchone(self) -> Any:
-        return self._cursor.fetchone()
+        return _postgres_compat_row(self._cursor.fetchone())
 
     def fetchall(self) -> list[Any]:
-        return list(self._cursor.fetchall())
+        return [_postgres_compat_row(row) for row in self._cursor.fetchall()]
 
     @property
     def description(self) -> Any:
@@ -444,13 +444,30 @@ class PostgresCursor:
         self._cursor.close()
 
     def __iter__(self):
-        return iter(self._cursor)
+        return (_postgres_compat_row(row) for row in self._cursor)
 
     def __enter__(self) -> "PostgresCursor":
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         self.close()
+
+
+class PostgresCompatRow(dict[str, Any]):
+    """Mapping row that also supports SQLite-style numeric column access."""
+
+    def __getitem__(self, key: str | int) -> Any:
+        if isinstance(key, int):
+            return tuple(self.values())[key]
+        return super().__getitem__(key)
+
+
+def _postgres_compat_row(row: Any) -> Any:
+    if row is None or isinstance(row, PostgresCompatRow):
+        return row
+    if isinstance(row, Mapping):
+        return PostgresCompatRow(row)
+    return row
 
 
 class PostgresConnection:
