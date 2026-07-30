@@ -57,10 +57,11 @@ class _FakeCursor:
 
 
 class _FakeRawConn:
-    def __init__(self, url, row_factory=None, prepare_threshold=None):
+    def __init__(self, url, row_factory=None, prepare_threshold=None, autocommit=False):
         self.url = url
         self.row_factory = row_factory
         self.prepare_threshold = prepare_threshold
+        self.autocommit = autocommit
         self.executed: list = []
         self.executemany_calls: list = []
         self.committed = 0
@@ -88,8 +89,8 @@ class _FakeRawConn:
 def fake_psycopg(monkeypatch):
     made: list[_FakeRawConn] = []
 
-    def _connect(url, row_factory=None, prepare_threshold=None):
-        conn = _FakeRawConn(url, row_factory, prepare_threshold)
+    def _connect(url, row_factory=None, prepare_threshold=None, autocommit=False):
+        conn = _FakeRawConn(url, row_factory, prepare_threshold, autocommit)
         made.append(conn)
         return conn
 

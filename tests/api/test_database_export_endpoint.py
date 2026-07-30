@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -68,7 +69,7 @@ def test_create_snapshot_copies_rows(tmp_path):
     snapshot = create_sqlite_snapshot(str(src))
     try:
         assert os.path.isfile(snapshot)
-        with sqlite3.connect(snapshot) as snap:
+        with closing(sqlite3.connect(snapshot)) as snap:
             assert snap.execute("SELECT a FROM t").fetchall() == [("x",)]
     finally:
         remove_file(snapshot)
