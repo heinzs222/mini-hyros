@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 from attributionops.db import connect, is_postgres_dsn
@@ -362,6 +363,82 @@ def ensure_campaign_settings(conn: sqlite3.Connection) -> None:
     )
 
 
+def ensure_customer_identities(conn: sqlite3.Connection) -> None:
+    """Create the contact book that maps a customer_key back to a person.
+
+    ``customer_key`` is a hash by design, so every ingestion path threw the
+    email and name away after computing it and the CRM could only show the
+    hash. This table keeps the human-readable identity beside the key.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS customer_identities (
+            customer_key TEXT PRIMARY KEY,
+            email TEXT DEFAULT '',
+            name TEXT DEFAULT '',
+            phone TEXT DEFAULT '',
+            source TEXT DEFAULT '',
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_customer_identities_email "
+        "ON customer_identities(email)"
+    )
+
+
+def upsert_customer_identity(
+    conn: sqlite3.Connection,
+    customer_key: str,
+    *,
+    email: str = "",
+    name: str = "",
+    phone: str = "",
+    source: str = "",
+    updated_at: str | None = None,
+) -> bool:
+    """Record what we know about a customer, never unlearning a known field.
+
+    Sources disagree about how much they carry — a Stripe charge may have an
+    email but no name while the GHL contact has both — so each write fills the
+    gaps it can and leaves populated fields alone. Callers run
+    ``ensure_customer_identities`` once per connection first; this is called
+    per row and must stay free of DDL.
+    """
+    key = str(customer_key or "").strip()
+    if not key:
+        return False
+
+    email = str(email or "").strip().lower()
+    name = " ".join(str(name or "").split())
+    phone = str(phone or "").strip()
+    if not (email or name or phone):
+        return False
+
+    stamp = updated_at or datetime.now(timezone.utc).replace(microsecond=0).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    conn.execute(
+        """
+        INSERT INTO customer_identities (customer_key, email, name, phone, source, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(customer_key) DO UPDATE SET
+            email = CASE WHEN COALESCE(excluded.email, '') != '' THEN excluded.email
+                         ELSE customer_identities.email END,
+            name = CASE WHEN COALESCE(excluded.name, '') != '' THEN excluded.name
+                        ELSE customer_identities.name END,
+            phone = CASE WHEN COALESCE(excluded.phone, '') != '' THEN excluded.phone
+                         ELSE customer_identities.phone END,
+            source = CASE WHEN COALESCE(excluded.source, '') != '' THEN excluded.source
+                          ELSE customer_identities.source END,
+            updated_at = excluded.updated_at
+        """,
+        (key, email, name, phone, str(source or ""), stamp),
+    )
+    return True
+
+
 def ensure_refund_log(conn: sqlite3.Connection) -> None:
     """Create the timestamped refund ledger used by historical reports."""
     conn.execute(
@@ -412,6 +489,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         ensure_order_attribution_integrity(conn)
     ensure_campaign_settings(conn)
     ensure_refund_log(conn)
+    ensure_customer_identities(conn)
 
 
 def _split_sql_statements(sql_text: str) -> list[str]:

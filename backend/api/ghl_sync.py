@@ -32,6 +32,7 @@ from fastapi import APIRouter, Query, Request
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows as db_query
+from attributionops.schema import upsert_customer_identity
 from attributionops.util import try_parse_iso_ts, utc_ts_to_local_date
 
 logger = logging.getLogger("ghl_sync")
@@ -508,6 +509,9 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
             "contact_id": contact_id,
             "conversion_id": conv_id,
             "customer_key": customer_key,
+            "email": email,
+            "name": _contact_name(c),
+            "phone": str(c.get("phone") or ""),
             "session_id": session_id,
             "src_info": src_info,
             "src_infos": src_infos,
@@ -522,6 +526,15 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
             # pull deliveries remain idempotent.
             _migrate_legacy_lead_conversion(
                 db_path, item["contact_id"], conn=conn
+            )
+            upsert_customer_identity(
+                conn,
+                item["customer_key"],
+                email=item["email"],
+                name=item["name"],
+                phone=item["phone"],
+                source="ghl",
+                updated_at=item["ts"],
             )
             _insert_conversion(
                 db_path,
@@ -606,7 +619,10 @@ def _write_form_submissions(
             "channel": channel,
             "conversion_id": conv_id,
             "customer_key": customer_key,
+            "email": email,
             "form_name": form_name,
+            "name": _contact_name(contact),
+            "phone": str(contact.get("phone") or submission.get("phone") or ""),
             "platform": platform,
             "session_id": session_id,
             "src_info": src_info,
@@ -617,6 +633,15 @@ def _write_form_submissions(
     _ensure_tracking_schema(db_path)
     with connect(db_path) as conn:
         for item in prepared:
+            upsert_customer_identity(
+                conn,
+                item["customer_key"],
+                email=item["email"],
+                name=item["name"],
+                phone=item["phone"],
+                source="ghl_form",
+                updated_at=item["ts"],
+            )
             _insert_conversion(
                 db_path,
                 item["conversion_id"],
@@ -670,6 +695,8 @@ def _write_opportunities(db_path: str, opportunities: list[dict], start_date: st
         contact = opp.get("contact") or {}
         email = str(contact.get("email") or "").strip().lower()
         customer_key = _sha256(email) if email else ""
+        contact_name = _contact_name(contact)
+        contact_phone = str(contact.get("phone") or "")
         opp_id = str(opp.get("id") or "")
         status = str(opp.get("status") or "").lower()
         try:
@@ -685,6 +712,9 @@ def _write_opportunities(db_path: str, opportunities: list[dict], start_date: st
                 "conversion_id": _sha256(f"ghl_oppconv|{opp_id}"),
                 "conversion_type": PURCHASE_TYPE,
                 "customer_key": customer_key,
+                "email": email,
+                "name": contact_name,
+                "phone": contact_phone,
                 "order_id": order_id,
                 "order_values": (
                     order_id,
@@ -704,6 +734,9 @@ def _write_opportunities(db_path: str, opportunities: list[dict], start_date: st
                 "conversion_id": conversion_id,
                 "conversion_type": "Opportunity",
                 "customer_key": customer_key,
+                "email": email,
+                "name": contact_name,
+                "phone": contact_phone,
                 "order_id": conversion_id,
                 "order_values": None,
                 "ts": ts,
@@ -714,6 +747,15 @@ def _write_opportunities(db_path: str, opportunities: list[dict], start_date: st
     _ensure_tracking_schema(db_path)
     with connect(db_path) as conn:
         for item in prepared:
+            upsert_customer_identity(
+                conn,
+                item["customer_key"],
+                email=item["email"],
+                name=item["name"],
+                phone=item["phone"],
+                source="ghl_opportunity",
+                updated_at=item["ts"],
+            )
             if item["order_values"] is not None:
                 conn.execute(
                     """INSERT OR IGNORE INTO orders

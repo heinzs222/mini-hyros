@@ -29,7 +29,11 @@ from fastapi import APIRouter, Request, HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, is_postgres_dsn, sql_rows as db_query
-from attributionops.schema import ensure_order_semantics
+from attributionops.schema import (
+    ensure_customer_identities,
+    ensure_order_semantics,
+    upsert_customer_identity,
+)
 from attributionops.util import utc_ts_to_local_date
 
 router = APIRouter()
@@ -138,7 +142,36 @@ def _ensure_tracking_schema(db_path: str) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_touchpoints_visitor_id ON touchpoints(visitor_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_session_id ON orders(session_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_visitor_id ON orders(visitor_id)")
+        ensure_customer_identities(conn)
         conn.commit()
+
+
+def _record_identity(
+    db_path: str,
+    customer_key: str,
+    *,
+    email: str = "",
+    name: str = "",
+    phone: str = "",
+    source: str = "ghl",
+    ts: str = "",
+) -> None:
+    """Keep the person behind a hashed customer_key, for the CRM lead views."""
+    if not customer_key or not (email or name or phone):
+        return
+    try:
+        with connect(db_path) as conn:
+            # Postgres gets this table from migrations; replaying DDL per webhook
+            # is what the tracking-schema helper already avoids there.
+            if not is_postgres_dsn(db_path):
+                ensure_customer_identities(conn)
+            if upsert_customer_identity(
+                conn, customer_key, email=email, name=name, phone=phone,
+                source=source, updated_at=ts or None,
+            ):
+                conn.commit()
+    except Exception:
+        logger.warning("Could not record identity for %s", customer_key[:8], exc_info=True)
 
 
 def _extract_email(payload: dict) -> str:
@@ -723,6 +756,7 @@ async def ghl_webhook(request: Request):
     customer_key = _sha256(email) if email else normalized_phone_key(phone)
     now = _iso_ts(datetime.now(UTC))
     db_path = _db()
+    _record_identity(db_path, customer_key, email=email, name=name, phone=phone, ts=now)
 
     contact_id = str(
         payload.get("contact_id") or

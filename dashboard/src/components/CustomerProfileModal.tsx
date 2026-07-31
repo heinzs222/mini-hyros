@@ -42,6 +42,10 @@ type TimelineEvent = {
 
 type Journey = {
   customer_key: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+  display_name?: string;
   summary: {
     total_sessions: number;
     total_touchpoints: number;
@@ -350,10 +354,14 @@ export default function CustomerProfileModal({ customerKey, label, email, onClos
   const properties = useMemo(() => buildProperties(timelineAsc), [timelineAsc]);
 
   const summary = data?.summary;
-  const initials = initialsOf(label, email);
+  // The caller may only know the hash; the journey response carries the
+  // contact details recorded at ingestion.
+  const displayLabel = label || data?.display_name || data?.name || data?.email || "";
+  const displayEmail = email || data?.email || "";
+  const initials = initialsOf(displayLabel, displayEmail);
 
   const handleCopy = async () => {
-    const text = email || customerKey;
+    const text = displayEmail || customerKey;
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
@@ -394,11 +402,11 @@ export default function CustomerProfileModal({ customerKey, label, email, onClos
             <div className="min-w-0">
               <div className="text-[10.5px] font-medium uppercase tracking-[.12em] text-[#7e828f]">Lead details</div>
               <div className="mt-0.5 truncate text-[18px] font-bold tracking-[-.01em] text-[#f0f1f6]">
-                {label || "Customer"}
+                {displayLabel || "Customer"}
               </div>
               <div className="mt-0.5 flex items-center gap-[7px]">
                 <span className="truncate font-mono text-[13px] font-medium text-[#a2a6b2]">
-                  {email || `${customerKey.slice(0, 18)}…`}
+                  {displayEmail || data?.phone || `${customerKey.slice(0, 18)}…`}
                 </span>
                 <button
                   onClick={handleCopy}

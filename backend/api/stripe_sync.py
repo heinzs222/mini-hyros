@@ -23,7 +23,12 @@ from fastapi import APIRouter, BackgroundTasks, Query
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows
-from attributionops.schema import ensure_order_semantics, ensure_refund_log
+from attributionops.schema import (
+    ensure_customer_identities,
+    ensure_order_semantics,
+    ensure_refund_log,
+    upsert_customer_identity,
+)
 from attributionops.util import local_day_bounds_utc, parse_iso_ts
 
 router = APIRouter()
@@ -139,6 +144,7 @@ def _ensure_orders_table(db_path: str) -> None:
             conn.execute("ALTER TABLE touchpoints ADD COLUMN visitor_id TEXT DEFAULT ''")
         ensure_order_semantics(conn)
         ensure_refund_log(conn)
+        ensure_customer_identities(conn)
         conn.commit()
 
 
@@ -334,6 +340,38 @@ async def _fetch_charge_refunds(
         if not starting_after:
             break
     return list(by_id.values())
+
+
+def _extract_name_from_charge(charge: dict) -> str:
+    """Best available human name for a charge.
+
+    ``billing_details.name`` is what the buyer typed at checkout, so it beats
+    the Customer object's name, which may be a stale account label.
+    """
+    billing = charge.get("billing_details") or {}
+    if billing.get("name"):
+        return " ".join(str(billing["name"]).split())
+
+    customer = charge.get("customer") or {}
+    if isinstance(customer, dict) and customer.get("name"):
+        return " ".join(str(customer["name"]).split())
+
+    meta = charge.get("metadata") or {}
+    for key in ("name", "customer_name", "full_name"):
+        if meta.get(key):
+            return " ".join(str(meta[key]).split())
+    return ""
+
+
+def _extract_phone_from_charge(charge: dict) -> str:
+    billing = charge.get("billing_details") or {}
+    if billing.get("phone"):
+        return str(billing["phone"]).strip()
+
+    customer = charge.get("customer") or {}
+    if isinstance(customer, dict) and customer.get("phone"):
+        return str(customer["phone"]).strip()
+    return ""
 
 
 def _extract_email_from_charge(charge: dict) -> str:
@@ -787,6 +825,15 @@ def _write_stripe_orders(db_path: str, charges: list[dict]) -> dict[str, int]:
                 customer_key,
                 visitor_id=tracking["visitor_id"],
                 session_id=tracking["session_id"],
+            )
+            upsert_customer_identity(
+                conn,
+                customer_key,
+                email=email,
+                name=_extract_name_from_charge(charge),
+                phone=_extract_phone_from_charge(charge),
+                source="stripe",
+                updated_at=ts,
             )
 
             # subscription lives on the (expanded) invoice, not the charge.

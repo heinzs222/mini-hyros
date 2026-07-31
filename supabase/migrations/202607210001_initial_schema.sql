@@ -193,6 +193,15 @@ create table if not exists public.refund_log (
   source text
 );
 
+create table if not exists public.customer_identities (
+  customer_key text primary key,
+  email text default '',
+  name text default '',
+  phone text default '',
+  source text default '',
+  updated_at text
+);
+
 create table if not exists public.platform_tokens (
   platform text primary key,
   access_token text,
@@ -279,6 +288,7 @@ create index if not exists idx_reported_value_date on public.reported_value (dat
 create index if not exists idx_reported_value_platform_date on public.reported_value (platform, date);
 create index if not exists idx_refund_log_order_ts on public.refund_log (order_id, ts);
 create index if not exists idx_refund_log_ts on public.refund_log (ts);
+create index if not exists idx_customer_identities_email on public.customer_identities (email);
 create index if not exists idx_capi_log_order_status on public.capi_log (order_id, status);
 create index if not exists idx_capi_log_platform_status on public.capi_log (platform, status);
 create index if not exists idx_webhook_log_source_ts on public.webhook_log (source, ts);
@@ -303,6 +313,7 @@ alter table public.ad_names enable row level security;
 alter table public.video_metrics enable row level security;
 alter table public.campaign_settings enable row level security;
 alter table public.refund_log enable row level security;
+alter table public.customer_identities enable row level security;
 alter table public.platform_tokens enable row level security;
 alter table public.stripe_sync_coverage enable row level security;
 alter table public.capi_log enable row level security;
