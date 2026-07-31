@@ -1,13 +1,19 @@
 """Platform OAuth token management.
 
-Handles OAuth flows for ad platforms that require user authorization (TikTok).
-Tokens are stored in a platform_tokens table in the DB.
+Handles OAuth flows for ad platforms that require user authorization (TikTok),
+and self-service credential updates for platforms whose tokens expire (Meta).
+Tokens are stored in a platform_tokens table in the DB, which every consumer
+reads before falling back to environment variables — so rotating a token never
+requires a redeploy.
 
 Endpoints:
   GET  /api/platform-auth/tiktok/connect      → returns authorization URL
   GET  /api/platform-auth/tiktok/callback     → exchanges auth_code, stores token
   POST /api/platform-auth/tiktok/refresh      → refreshes access token
   GET  /api/platform-auth/tiktok/status       → current token info
+  POST /api/platform-auth/meta/connect        → validates + stores a pasted token
+  POST /api/platform-auth/meta/disconnect     → drops the stored token (env wins)
+  GET  /api/platform-auth/meta/status         → current token info
 """
 
 from __future__ import annotations
@@ -30,6 +36,8 @@ from attributionops.db import connect, sql_rows
 router = APIRouter()
 UTC = timezone.utc
 logger = logging.getLogger(__name__)
+
+META_GRAPH_BASE = "https://graph.facebook.com"
 
 TIKTOK_TOKEN_URL = "https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/"
 TIKTOK_REFRESH_URL = "https://business-api.tiktok.com/open_api/v1.3/oauth2/refresh_token/"
@@ -112,6 +120,71 @@ def _ensure_tokens_table(db_path: str) -> None:
             expires_at TEXT,
             updated_at TEXT
         )""")
+        conn.commit()
+
+
+def _meta_api_version() -> str:
+    raw = str(os.environ.get("META_API_VERSION", "v18.0") or "").strip()
+    return raw or "v18.0"
+
+
+def _clean_ad_account_id(value: str) -> str:
+    return str(value or "").strip().replace("act_", "").strip()
+
+
+def _meta_token_row(db_path: str) -> dict[str, Any]:
+    _ensure_tokens_table(db_path)
+    rows = sql_rows(
+        db_path,
+        "SELECT access_token, advertiser_id, expires_at, updated_at FROM platform_tokens WHERE platform='meta'",
+    )
+    return dict(rows[0]) if rows else {}
+
+
+def get_meta_credentials(db_path: str) -> tuple[str, str]:
+    """Return (access_token, ad_account_id), preferring the DB then env vars.
+
+    A token pasted into Settings has to win over the environment: it is the one
+    the operator just rotated, while the env var is whatever the last deploy
+    baked in (and is exactly the value that expired).
+    """
+    try:
+        row = _meta_token_row(db_path)
+    except Exception:
+        row = {}
+
+    token = str(row.get("access_token") or "").strip()
+    account = str(row.get("advertiser_id") or "").strip()
+    if not token:
+        token = os.environ.get("META_ACCESS_TOKEN", "").strip()
+    if not account:
+        account = os.environ.get("META_AD_ACCOUNT_ID", "").strip()
+    return token, account
+
+
+def get_meta_access_token(db_path: str) -> str:
+    """Return the best available Meta access token (DB first, env fallback)."""
+    return get_meta_credentials(db_path)[0]
+
+
+def save_meta_credentials(
+    db_path: str, access_token: str, ad_account_id: str, expires_at: str = ""
+) -> None:
+    _ensure_tokens_table(db_path)
+    with connect(db_path) as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO platform_tokens
+               (platform, access_token, refresh_token, advertiser_id, expires_at, updated_at)
+               VALUES ('meta', ?, '', ?, ?, ?)""",
+            (access_token.strip(), _clean_ad_account_id(ad_account_id), expires_at, _now()),
+        )
+        conn.commit()
+
+
+def clear_meta_credentials(db_path: str) -> None:
+    _ensure_tokens_table(db_path)
+    with connect(db_path) as conn:
+        conn.execute("DELETE FROM platform_tokens WHERE platform='meta'")
         conn.commit()
 
 
@@ -223,7 +296,165 @@ def _tiktok_expires_at(token_data: dict[str, Any]) -> str:
     return ""
 
 
+def _meta_error_text(payload: Any, fallback: str) -> str:
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return fallback
+    message = str(error.get("message") or "").strip()
+    subcode = error.get("error_subcode")
+    code = error.get("code")
+    bits = [bit for bit in (f"code={code}" if code is not None else "",
+                            f"subcode={subcode}" if subcode is not None else "") if bit]
+    if message and bits:
+        return f"{message} ({' '.join(bits)})"
+    return message or fallback
+
+
+async def _exchange_meta_long_lived(client: httpx.AsyncClient, token: str) -> tuple[str, str, str]:
+    """Trade a short-lived token for a ~60-day one.
+
+    Returns (token, expires_at, note). Falls back to the original token — a
+    short-lived token that works today beats refusing to connect at all.
+    """
+    app_id = os.environ.get("META_APP_ID", "").strip()
+    app_secret = os.environ.get("META_APP_SECRET", "").strip()
+    if not app_id or not app_secret:
+        return token, "", (
+            "Set META_APP_ID and META_APP_SECRET to auto-upgrade pasted tokens to "
+            "long-lived (60-day) ones."
+        )
+
+    try:
+        resp = await client.get(
+            f"{META_GRAPH_BASE}/{_meta_api_version()}/oauth/access_token",
+            params={
+                "grant_type": "fb_exchange_token",
+                "client_id": app_id,
+                "client_secret": app_secret,
+                "fb_exchange_token": token,
+            },
+        )
+        payload = resp.json()
+    except Exception as exc:
+        return token, "", f"Long-lived token exchange failed ({exc}); stored the token as pasted."
+
+    long_lived = str((payload or {}).get("access_token") or "").strip()
+    if not long_lived:
+        detail = _meta_error_text(payload, "no access_token returned")
+        return token, "", f"Long-lived token exchange failed ({detail}); stored the token as pasted."
+
+    expires_at = ""
+    try:
+        seconds = int((payload or {}).get("expires_in") or 0)
+        if seconds > 0:
+            expires_at = (datetime.now(UTC) + timedelta(seconds=seconds)).replace(microsecond=0).isoformat()
+    except (TypeError, ValueError):
+        expires_at = ""
+    return long_lived, expires_at, ""
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.post("/meta/connect")
+async def meta_connect(request: Request):
+    """Validate and store a Meta access token pasted from the dashboard.
+
+    Meta tokens die on password changes and security resets (OAuth subcode 460),
+    which used to mean editing a hosting env var and redeploying just to resume
+    spend syncing.
+    """
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        body = {}
+
+    token = str(body.get("access_token") or body.get("token") or "").strip()
+    if not token:
+        return {"connected": False, "error": "An access token is required."}
+
+    db_path = _db()
+    _, current_account = get_meta_credentials(db_path)
+    ad_account_id = _clean_ad_account_id(
+        body.get("ad_account_id") or body.get("adAccountId") or current_account
+    )
+
+    api_version = _meta_api_version()
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                f"{META_GRAPH_BASE}/{api_version}/me",
+                params={"fields": "id,name", "access_token": token},
+            )
+            payload = resp.json()
+            if resp.status_code != 200 or not (payload or {}).get("id"):
+                return {
+                    "connected": False,
+                    "error": _meta_error_text(payload, f"Meta rejected the token (HTTP {resp.status_code})."),
+                }
+            account_name = str((payload or {}).get("name") or "")
+
+            token, expires_at, note = await _exchange_meta_long_lived(client, token)
+
+            # A token can be valid and still not see the ad account we sync.
+            account_detail = ""
+            if ad_account_id:
+                acct_resp = await client.get(
+                    f"{META_GRAPH_BASE}/{api_version}/act_{ad_account_id}",
+                    params={"fields": "name,currency,account_status", "access_token": token},
+                )
+                acct_payload = acct_resp.json()
+                if acct_resp.status_code != 200:
+                    return {
+                        "connected": False,
+                        "error": _meta_error_text(
+                            acct_payload,
+                            f"Token cannot read ad account act_{ad_account_id} (HTTP {acct_resp.status_code}).",
+                        ),
+                    }
+                account_detail = str((acct_payload or {}).get("name") or "")
+    except Exception as exc:
+        return {"connected": False, "error": f"Could not reach the Meta API: {exc}"}
+
+    save_meta_credentials(db_path, token, ad_account_id, expires_at)
+    return {
+        "connected": True,
+        "user": account_name,
+        "ad_account_id": ad_account_id,
+        "ad_account_name": account_detail,
+        "expires_at": expires_at,
+        "note": note,
+    }
+
+
+@router.post("/meta/disconnect")
+async def meta_disconnect():
+    """Forget the stored Meta token and fall back to the environment."""
+    clear_meta_credentials(_db())
+    token, ad_account_id = get_meta_credentials(_db())
+    return {"connected": False, "env_fallback": bool(token and ad_account_id)}
+
+
+@router.get("/meta/status")
+async def meta_status():
+    """Return where the active Meta credentials come from and when they expire."""
+    db_path = _db()
+    try:
+        row = _meta_token_row(db_path)
+    except Exception:
+        row = {}
+    token, ad_account_id = get_meta_credentials(db_path)
+    return {
+        "connected": bool(token and ad_account_id),
+        "source": "database" if row.get("access_token") else ("env" if token else "none"),
+        "ad_account_id": _clean_ad_account_id(ad_account_id),
+        "expires_at": str(row.get("expires_at") or ""),
+        "updated_at": str(row.get("updated_at") or ""),
+        "can_exchange_long_lived": bool(
+            os.environ.get("META_APP_ID", "").strip() and os.environ.get("META_APP_SECRET", "").strip()
+        ),
+        "token_help_url": "https://developers.facebook.com/tools/explorer/",
+    }
+
 
 @router.get("/tiktok/connect")
 async def tiktok_connect(request: Request):

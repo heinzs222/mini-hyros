@@ -841,3 +841,66 @@ def test_google_ads_script_push_campaign_total_matches_ad_sum_no_double_count(cl
             "SELECT SUM(CAST(cost AS REAL)) FROM spend WHERE platform='google'"
         ).fetchone()[0]
     assert total_cost == 10.0
+
+
+# ── platform="all" concurrency ────────────────────────────────────────────────
+
+def test_all_platforms_sync_concurrently(client, api_db, monkeypatch):
+    """The three vendors are independent; syncing them in series made the wall
+    time the sum of all three pulls."""
+    import asyncio
+
+    from backend.api import spend_sync
+
+    running = 0
+    peak = 0
+
+    def _slow_platform(name):
+        async def _run(start_date, end_date):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            try:
+                await asyncio.sleep(0.05)
+            finally:
+                running -= 1
+            return {"synced": 1, "platform": name}
+
+        return _run
+
+    monkeypatch.setattr(spend_sync, "_sync_meta_spend", _slow_platform("meta"))
+    monkeypatch.setattr(spend_sync, "_sync_google_spend", _slow_platform("google"))
+    monkeypatch.setattr(spend_sync, "_sync_tiktok_spend", _slow_platform("tiktok"))
+
+    body = client.post(
+        "/api/spend/sync",
+        params={"platform": "all", "start_date": "2026-01-01", "end_date": "2026-01-07"},
+    ).json()
+
+    assert peak == 3
+    assert body["synced"] == 3
+    assert set(body["platforms"]) == {"meta", "google", "tiktok"}
+    assert body["errors"] == []
+
+
+def test_one_failing_platform_does_not_sink_the_others(client, api_db, monkeypatch):
+    from backend.api import spend_sync
+
+    async def _ok(start_date, end_date):
+        return {"synced": 2}
+
+    async def _boom(start_date, end_date):
+        raise RuntimeError("token expired")
+
+    monkeypatch.setattr(spend_sync, "_sync_meta_spend", _boom)
+    monkeypatch.setattr(spend_sync, "_sync_google_spend", _ok)
+    monkeypatch.setattr(spend_sync, "_sync_tiktok_spend", _ok)
+
+    body = client.post(
+        "/api/spend/sync",
+        params={"platform": "all", "start_date": "2026-01-01", "end_date": "2026-01-07"},
+    ).json()
+
+    assert body["synced"] == 4
+    assert body["errors"] == ["meta: Meta sync failed: token expired"]
+    assert body["platforms"]["google"]["synced"] == 2

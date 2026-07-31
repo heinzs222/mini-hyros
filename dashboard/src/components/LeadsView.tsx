@@ -33,6 +33,11 @@ interface Props {
 type LeadRow = {
   customer_key: string;
   customer_key_short: string;
+  /** Real identity when the ingestion path captured one; empty for hash-only leads. */
+  name?: string;
+  email?: string;
+  phone?: string;
+  display_name?: string;
   conversion_type: string;
   conversion_ts: string;
   order_id: string;
@@ -111,8 +116,27 @@ function avatarGradient(customerKey: string): string {
 }
 
 function initialsOf(label: string): string {
-  const alnum = (label || "").replace(/[^a-z0-9]/gi, "");
+  const words = (label || "").trim().split(/\s+/).filter(Boolean);
+  // "Marie Tremblay" reads better as MT than MA, and an email as its local part.
+  if (words.length >= 2 && !label.includes("@")) {
+    return (words[0][0] + words[1][0]).toUpperCase();
+  }
+  const local = label.includes("@") ? label.split("@")[0] : label;
+  const alnum = (local || "").replace(/[^a-z0-9]/gi, "");
   return alnum.slice(0, 2).toUpperCase() || "?";
+}
+
+/** What the CRM shows for a lead: their name, else email, else the hash. */
+function leadLabel(r: LeadRow): string {
+  return r.display_name || r.name || r.email || r.customer_key_short;
+}
+
+/** Secondary line — only when it adds something the primary label doesn't. */
+function leadSubLabel(r: LeadRow): string {
+  const primary = leadLabel(r);
+  if (r.email && r.email !== primary) return r.email;
+  if (r.phone && r.phone !== primary) return r.phone;
+  return "";
 }
 
 type SortKey = "lead" | "joined" | "first" | "last" | "income" | "status" | "stage";
@@ -129,7 +153,7 @@ const COLS: { label: string; key: SortKey; align?: "right" }[] = [
 
 function sortValue(r: LeadRow, key: SortKey): string | number {
   switch (key) {
-    case "lead": return r.customer_key_short.toLowerCase();
+    case "lead": return leadLabel(r).toLowerCase();
     case "joined": return r.conversion_ts;
     case "first": return originOf(r).toLowerCase();
     case "last": return lastSourceOf(r).toLowerCase();
@@ -229,7 +253,10 @@ export default function LeadsView({ startDate, endDate }: Props) {
     });
     if (q) {
       list = list.filter((r) =>
-        [r.customer_key_short, originOf(r), lastSourceOf(r)].join(" ").toLowerCase().includes(q),
+        [leadLabel(r), r.name || "", r.email || "", r.phone || "", r.customer_key_short, originOf(r), lastSourceOf(r)]
+          .join(" ")
+          .toLowerCase()
+          .includes(q),
       );
     }
     if (statusFilter !== "all") {
@@ -297,7 +324,9 @@ export default function LeadsView({ startDate, endDate }: Props) {
       const sale = isSaleBucket(r);
       const price = priceOf(r);
       return [
-        r.customer_key_short,
+        leadLabel(r),
+        r.email || "",
+        r.phone || "",
         fmtDate(r.conversion_ts),
         originOf(r),
         lastSourceOf(r),
@@ -306,7 +335,7 @@ export default function LeadsView({ startDate, endDate }: Props) {
         sale ? "Won" : "—",
       ];
     });
-    const headers = ["Lead", "Joined On", "First Source", "Last Source", "Income", "Status", "Stage"];
+    const headers = ["Lead", "Email", "Phone", "Joined On", "First Source", "Last Source", "Income", "Status", "Stage"];
     const csv = [headers, ...lines]
       .map((cols) => cols.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))
       .join("\n");
@@ -533,7 +562,9 @@ export default function LeadsView({ startDate, endDate }: Props) {
                   const last = lastSourceOf(r);
                   const rowBgClass = i % 2 === 0 ? "bg-[#0e0e13]" : "bg-[#0f0f16]";
                   const grad = avatarGradient(r.customer_key);
-                  const initials = initialsOf(r.customer_key_short);
+                  const label = leadLabel(r);
+                  const subLabel = leadSubLabel(r);
+                  const initials = initialsOf(label);
                   return (
                     <tr
                       key={`${r.customer_key}-${r.conversion_ts}-${i}`}
@@ -553,7 +584,7 @@ export default function LeadsView({ startDate, endDate }: Props) {
                       <td className="border-b border-white/[0.045] p-0">
                         <button
                           type="button"
-                          onClick={() => r.customer_key && setProfile({ customerKey: r.customer_key, label: r.customer_key_short })}
+                          onClick={() => r.customer_key && setProfile({ customerKey: r.customer_key, label })}
                           disabled={!r.customer_key}
                           title="Open customer details"
                           className="flex w-full items-center gap-2.5 px-4 py-3.5 text-left disabled:cursor-default"
@@ -564,7 +595,12 @@ export default function LeadsView({ startDate, endDate }: Props) {
                           >
                             {initials}
                           </span>
-                          <span className="whitespace-nowrap text-[13.5px] font-semibold text-[#dfe1ea]">{r.customer_key_short}</span>
+                          <span className="flex min-w-0 flex-col">
+                            <span className="truncate text-[13.5px] font-semibold text-[#dfe1ea]" title={label}>{label}</span>
+                            {subLabel && (
+                              <span className="truncate text-[11.5px] text-[#8b8f9c]" title={subLabel}>{subLabel}</span>
+                            )}
+                          </span>
                         </button>
                       </td>
                       <td className="whitespace-nowrap border-b border-white/[0.045] px-4 py-3.5 font-mono text-[12.5px] font-medium tabular text-[#8b8f9c]">

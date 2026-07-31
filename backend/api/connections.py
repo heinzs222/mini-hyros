@@ -84,6 +84,19 @@ def _ghl_credentials() -> tuple[str, str]:
         return token, os.environ.get("GHL_LOCATION_ID", "").strip()
 
 
+def _meta_credentials() -> tuple[str, str]:
+    """Return (access_token, ad_account_id) for Meta from the warehouse or env."""
+    try:
+        from api.platform_auth import get_meta_credentials
+        from attributionops.config import default_db_path
+        return get_meta_credentials(default_db_path())
+    except Exception:
+        return (
+            os.environ.get("META_ACCESS_TOKEN", "").strip(),
+            os.environ.get("META_AD_ACCOUNT_ID", "").strip(),
+        )
+
+
 def _missing_env(platform: str) -> list[str]:
     return [v for v in REQUIRED_ENV.get(platform, []) if not os.environ.get(v, "").strip()]
 
@@ -96,7 +109,7 @@ def _stripe_key() -> str:
 # state ∈ {"connected", "expired", "invalid", "error", "not_configured"}
 
 async def _validate_meta(client: httpx.AsyncClient) -> tuple[str, str]:
-    token = os.environ.get("META_ACCESS_TOKEN", "").strip()
+    token = _meta_credentials()[0]
     try:
         resp = await client.get(
             "https://graph.facebook.com/v18.0/me",
@@ -109,7 +122,10 @@ async def _validate_meta(client: httpx.AsyncClient) -> tuple[str, str]:
         code = err.get("code")
         msg = err.get("message") or "Unknown Meta API error."
         if code == 190:
-            return "expired", f"Access token expired or revoked — {msg}"
+            return "expired", (
+                "Access token expired or revoked — paste a fresh token below to reconnect "
+                f"without a redeploy. Meta said: {msg}"
+            )
         if code in (10, 200, 803):
             return "invalid", f"Token lacks required permissions — {msg}"
         return "invalid", msg
@@ -251,6 +267,18 @@ async def _platform_status(platform: str, validate: bool, client: httpx.AsyncCli
         configured = bool(token and location_id)
         required = ["GHL_API_TOKEN + GHL_LOCATION_ID (or connect in Settings)"]
         fields = {"api_token": bool(token), "location_id": bool(location_id)}
+    elif platform == "meta":
+        # A token pasted into Settings counts exactly like an env var, otherwise
+        # a freshly reconnected account would still read as "not configured".
+        token, ad_account_id = _meta_credentials()
+        configured = bool(token and ad_account_id)
+        required = ["META_ACCESS_TOKEN + META_AD_ACCOUNT_ID (or connect in Settings)"]
+        fields = {
+            "access_token": bool(token),
+            "app_secret": bool(os.environ.get("META_APP_SECRET", "").strip()),
+            "pixel_id": bool(os.environ.get("META_PIXEL_ID", "").strip()),
+            "ad_account_id": bool(ad_account_id),
+        }
     else:
         missing = _missing_env(platform)
         configured = not missing

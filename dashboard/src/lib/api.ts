@@ -460,10 +460,15 @@ export async function syncAdNames(platform = "all", signal?: AbortSignal) {
 export async function syncStripe(params: {
   start_date?: string;
   end_date?: string;
+  defer_history?: boolean;
 } = {}, signal?: AbortSignal) {
   const sp = new URLSearchParams();
   if (params.start_date) sp.set("start_date", params.start_date);
   if (params.end_date) sp.set("end_date", params.end_date);
+  // The repeat-buyer history backfill (a year of charges by default) must not
+  // run inside the request the browser is waiting on — that is what pushed the
+  // manual sync past its deadline. The backend queues it as background work.
+  if (params.defer_history) sp.set("defer_history", "true");
   const url = `${API_BASE}/api/stripe/sync${sp.toString() ? `?${sp.toString()}` : ""}`;
   const res = await apiFetch(url, { method: "POST" }, signal);
   if (!res.ok) throw new Error(`Stripe sync failed: ${res.status}`);
@@ -526,6 +531,28 @@ export async function fetchTikTokConnectUrl() {
 export async function refreshTikTokToken() {
   const res = await apiFetch(`${API_BASE}/api/platform-auth/tiktok/refresh`, { method: "POST" });
   if (!res.ok) throw new Error(`TikTok refresh failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchMetaAuthStatus(signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/api/platform-auth/meta/status`, {}, signal);
+  if (!res.ok) throw new Error(`Meta status failed: ${res.status}`);
+  return res.json();
+}
+
+export async function connectMeta(payload: { access_token: string; ad_account_id?: string }) {
+  const res = await apiFetch(`${API_BASE}/api/platform-auth/meta/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok && res.status !== 400) throw new Error(`Meta connect failed: ${res.status}`);
+  return res.json();
+}
+
+export async function disconnectMeta() {
+  const res = await apiFetch(`${API_BASE}/api/platform-auth/meta/disconnect`, { method: "POST" });
+  if (!res.ok) throw new Error(`Meta disconnect failed: ${res.status}`);
   return res.json();
 }
 

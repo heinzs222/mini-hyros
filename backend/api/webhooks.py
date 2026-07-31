@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import json
@@ -21,7 +22,12 @@ from fastapi import APIRouter, Request, HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect
-from attributionops.schema import ensure_order_semantics, ensure_refund_log
+from attributionops.schema import (
+    ensure_customer_identities,
+    ensure_order_semantics,
+    ensure_refund_log,
+    upsert_customer_identity,
+)
 
 router = APIRouter()
 logger = logging.getLogger("webhooks")
@@ -152,7 +158,33 @@ def _run_tracking_schema(db_path: str) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_session_id ON orders(session_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_visitor_id ON orders(visitor_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_conversions_customer_key ON conversions(customer_key)")
+        ensure_customer_identities(conn)
         conn.commit()
+
+
+def _record_identity(
+    db_path: str,
+    customer_key: str,
+    *,
+    email: str = "",
+    name: str = "",
+    phone: str = "",
+    source: str = "",
+    ts: str = "",
+) -> None:
+    """Keep the person behind a hashed customer_key, for the CRM lead views."""
+    if not customer_key or not (email or name or phone):
+        return
+    try:
+        with connect(db_path) as conn:
+            ensure_customer_identities(conn)
+            if upsert_customer_identity(
+                conn, customer_key, email=email, name=name, phone=phone,
+                source=source, updated_at=ts or None,
+            ):
+                conn.commit()
+    except Exception:
+        logger.warning("Could not record identity for %s", customer_key[:8], exc_info=True)
 
 
 def _lookup_customer_key(db_path: str, visitor_id: str = "", session_id: str = "") -> str:
@@ -348,6 +380,24 @@ async def shopify_webhook(request: Request):
     }
 
     await anyio.to_thread.run_sync(_insert_order, _db(), order)
+    shopify_customer = payload.get("customer") or {}
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _record_identity,
+            _db(),
+            customer_key,
+            email=email,
+            name=" ".join(
+                part for part in (
+                    str(shopify_customer.get("first_name") or ""),
+                    str(shopify_customer.get("last_name") or ""),
+                ) if part
+            ),
+            phone=str(payload.get("phone") or shopify_customer.get("phone") or ""),
+            source="shopify",
+            ts=order["ts"],
+        )
+    )
 
     # Broadcast to WebSocket clients
     from main import manager
@@ -529,6 +579,20 @@ async def stripe_webhook(request: Request):
     }
 
     await anyio.to_thread.run_sync(_insert_order, _db(), order)
+    # checkout.session carries customer_details; charge.* carries billing_details.
+    stripe_details = data.get("customer_details") or data.get("billing_details") or {}
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _record_identity,
+            _db(),
+            customer_key,
+            email=email,
+            name=str(stripe_details.get("name") or ""),
+            phone=str(stripe_details.get("phone") or ""),
+            source="stripe_webhook",
+            ts=ts,
+        )
+    )
 
     from main import manager
     import asyncio
@@ -568,6 +632,30 @@ async def track_event(request: Request):
         customer_key = await anyio.to_thread.run_sync(
             _lookup_customer_key, db_path, visitor_id, session_id
         )
+    # Opt-in beacons carry the form's own fields; that is often the first (and
+    # for pure-tracking leads the only) place a name/email is ever seen.
+    if customer_key and any(custom_data.get(k) for k in ("email", "name", "first_name", "phone")):
+        await anyio.to_thread.run_sync(
+            functools.partial(
+                _record_identity,
+                db_path,
+                customer_key,
+                email=str(custom_data.get("email") or ""),
+                name=str(
+                    custom_data.get("name")
+                    or " ".join(
+                        part for part in (
+                            str(custom_data.get("first_name") or ""),
+                            str(custom_data.get("last_name") or ""),
+                        ) if part
+                    )
+                ),
+                phone=str(custom_data.get("phone") or ""),
+                source="tracking",
+                ts=now,
+            )
+        )
+
     utm_source = str(payload.get("utm_source", ""))
     utm_medium = str(payload.get("utm_medium", ""))
     event_name = str(payload.get("event", "")).strip() or "pageview"

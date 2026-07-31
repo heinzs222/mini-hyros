@@ -30,6 +30,7 @@ from fastapi import APIRouter, Query, HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows as db_query
+from backend.api.platform_auth import get_meta_access_token
 
 router = APIRouter()
 UTC = timezone.utc
@@ -93,7 +94,7 @@ def _log_push_many(db_path: str, entries: list[dict]) -> None:
 
 async def _push_meta(event: dict) -> dict:
     """Push conversion to Meta (Facebook) Conversions API."""
-    access_token = os.environ.get("META_ACCESS_TOKEN", "")
+    access_token = get_meta_access_token(_db())
     pixel_id = os.environ.get("META_PIXEL_ID", "")
 
     if not access_token or not pixel_id:
@@ -433,7 +434,7 @@ async def capi_status():
 
     platforms = {
         "meta": {
-            "configured": bool(os.environ.get("META_ACCESS_TOKEN") and os.environ.get("META_PIXEL_ID")),
+            "configured": bool(get_meta_access_token(db_path) and os.environ.get("META_PIXEL_ID")),
             "env_vars": ["META_ACCESS_TOKEN", "META_PIXEL_ID"],
         },
         "google": {

@@ -193,6 +193,15 @@ create table if not exists public.refund_log (
   source text
 );
 
+create table if not exists public.customer_identities (
+  customer_key text primary key,
+  email text default '',
+  name text default '',
+  phone text default '',
+  source text default '',
+  updated_at text
+);
+
 create table if not exists public.platform_tokens (
   platform text primary key,
   access_token text,
@@ -248,6 +257,8 @@ create index if not exists idx_sessions_session_id on public.sessions (session_i
 create index if not exists idx_sessions_visitor_id on public.sessions (visitor_id);
 create index if not exists idx_sessions_customer_key on public.sessions (customer_key);
 create index if not exists idx_sessions_ts on public.sessions (ts);
+-- Covers the landing-page visit breakdown over a date window.
+create index if not exists idx_sessions_ts_landing_session on public.sessions (ts, landing_page, session_id);
 
 create index if not exists idx_touchpoints_customer_ts on public.touchpoints (customer_key, ts);
 create index if not exists idx_touchpoints_session_id on public.touchpoints (session_id);
@@ -255,6 +266,8 @@ create index if not exists idx_touchpoints_visitor_id on public.touchpoints (vis
 create index if not exists idx_touchpoints_customer_key on public.touchpoints (customer_key);
 create index if not exists idx_touchpoints_ts on public.touchpoints (ts);
 create index if not exists idx_touchpoints_campaign_id on public.touchpoints (campaign_id);
+-- Covers the report's per-platform distinct-session count over a date window.
+create index if not exists idx_touchpoints_ts_platform_session on public.touchpoints (ts, platform, session_id);
 
 create unique index if not exists idx_orders_order_id_unique on public.orders (order_id);
 create index if not exists idx_orders_customer_key on public.orders (customer_key);
@@ -279,6 +292,7 @@ create index if not exists idx_reported_value_date on public.reported_value (dat
 create index if not exists idx_reported_value_platform_date on public.reported_value (platform, date);
 create index if not exists idx_refund_log_order_ts on public.refund_log (order_id, ts);
 create index if not exists idx_refund_log_ts on public.refund_log (ts);
+create index if not exists idx_customer_identities_email on public.customer_identities (email);
 create index if not exists idx_capi_log_order_status on public.capi_log (order_id, status);
 create index if not exists idx_capi_log_platform_status on public.capi_log (platform, status);
 create index if not exists idx_webhook_log_source_ts on public.webhook_log (source, ts);
@@ -303,6 +317,7 @@ alter table public.ad_names enable row level security;
 alter table public.video_metrics enable row level security;
 alter table public.campaign_settings enable row level security;
 alter table public.refund_log enable row level security;
+alter table public.customer_identities enable row level security;
 alter table public.platform_tokens enable row level security;
 alter table public.stripe_sync_coverage enable row level security;
 alter table public.capi_log enable row level security;

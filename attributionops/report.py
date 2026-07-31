@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from attributionops.db import query
 from attributionops.refund_ledger import apply_refunds_as_of
-from attributionops.tools.ads import ads_get_reported_value, ads_get_spend
+from attributionops.tools.ads import ads_get_reported_value, ads_get_spend, spend_read_scope
 from attributionops.tools.attribution import attribution_run_and_day_totals
 from attributionops.tools.campaign_filter import ensure_campaign_settings_table, not_excluded_sql
 from attributionops.tools.integrations import integrations_status
@@ -679,6 +679,17 @@ def _order_identity(row: dict[str, Any]) -> str:
 
 
 def build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any]:
+    """Assemble the dashboard report.
+
+    Wrapped in a spend read scope: the summary, the selected breakdown and the
+    day series all read the same spend window, and without the scope each one
+    re-queried and re-parsed it.
+    """
+    with spend_read_scope():
+        return _build_hyros_like_report(db_path, inputs)
+
+
+def _build_hyros_like_report(db_path: str, inputs: ReportInputs) -> dict[str, Any]:
     # Ensure the read-time exclusion table exists before any raw SQL references it
     # (memoized). Compute the timezone-aware, sargable date bounds once and reuse
     # them for every ts-range filter below (ts >= :start_utc AND ts < :end_excl_utc).

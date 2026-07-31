@@ -82,14 +82,28 @@ def _active_db_label(db_path: str | os.PathLike[str]) -> str:
     return str(db_path)
 
 
+# journal_mode is a persistent property of the database file, not of a
+# connection, but it was re-applied on all ~50 connections a single report
+# opens — the most expensive of the three PRAGMAs, and a write each time.
+_wal_lock = threading.Lock()
+_wal_applied: set[str] = set()
+
+
 def _sqlite_connect(db_path: str | os.PathLike[str]) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 30000")
+
+    key = str(path)
+    with _wal_lock:
+        needs_wal = key not in _wal_applied
+    if needs_wal:
+        conn.execute("PRAGMA journal_mode = WAL")
+        with _wal_lock:
+            _wal_applied.add(key)
     return conn
 
 
@@ -483,7 +497,11 @@ class PostgresConnection:
             prepare_threshold=None,
             autocommit=autocommit,
         )
+        self.url = url
         self.autocommit = autocommit
+        # Set by the idle pool; a pooled connection's close() parks it for reuse
+        # instead of tearing down the socket.
+        self.pooled = False
         with self.raw.cursor() as cursor:
             cursor.execute("SET statement_timeout = '55s'")
         self._conflicts: dict[str, list[str]] = {}
@@ -544,7 +562,16 @@ class PostgresConnection:
         self.raw.rollback()
 
     def close(self) -> None:
+        if self.pooled:
+            _release_pooled_connection(self)
+            return
         self.raw.close()
+
+    def hard_close(self) -> None:
+        try:
+            self.raw.close()
+        except Exception:
+            pass
 
     def __enter__(self) -> "PostgresConnection":
         return self
@@ -557,12 +584,73 @@ class PostgresConnection:
         self.close()
 
 
+# ── Idle connection pool for connect() ────────────────────────────────────────
+# Assembling one report calls connect() ~60 times (schema probes, spend reads,
+# attribution loads, integration status). Against SQLite that is a cheap file
+# open; against Supabase every one of them was a fresh TCP + TLS + auth
+# handshake plus a statement_timeout round trip, so the connection setup alone
+# dominated the response. Connections are now parked per thread and reused.
+_POOL_SIZE = max(0, int(os.environ.get("POSTGRES_IDLE_POOL_SIZE", "4") or 0))
+_pool_state = threading.local()
+
+
+def _idle_pool(url: str) -> list[PostgresConnection]:
+    pools = getattr(_pool_state, "pools", None)
+    if pools is None:
+        pools = {}
+        _pool_state.pools = pools
+    return pools.setdefault(url, [])
+
+
+def _acquire_pooled_connection(url: str) -> PostgresConnection:
+    pool = _idle_pool(url)
+    while pool:
+        connection = pool.pop()
+        if not connection.raw.closed:
+            return connection
+    connection = PostgresConnection(url)
+    connection.pooled = _POOL_SIZE > 0
+    return connection
+
+
+def _release_pooled_connection(connection: PostgresConnection) -> None:
+    """Park a finished connection for reuse, or drop it if it isn't reusable."""
+    if connection.raw.closed:
+        return
+    try:
+        # Never hand back a connection mid-transaction or in an aborted state.
+        # TransactionStatus.IDLE is 0; an unreadable status is treated as dirty.
+        status = getattr(getattr(connection.raw, "info", None), "transaction_status", None)
+        if status != 0:
+            connection.raw.rollback()
+    except Exception:
+        connection.hard_close()
+        return
+
+    pool = _idle_pool(connection.url)
+    if len(pool) >= _POOL_SIZE:
+        connection.hard_close()
+        return
+    pool.append(connection)
+
+
+def close_pooled_connections() -> None:
+    """Drop this thread's idle connections (used by tests and shutdown)."""
+    pools = getattr(_pool_state, "pools", None)
+    if not pools:
+        return
+    for pool in pools.values():
+        while pool:
+            pool.pop().hard_close()
+    pools.clear()
+
+
 def connect(db_path: str | os.PathLike[str]) -> sqlite3.Connection | PostgresConnection:
     path_text = str(db_path)
     if is_postgres_dsn(path_text):
-        return PostgresConnection(path_text)
+        return _acquire_pooled_connection(path_text)
     if using_postgres():
-        return PostgresConnection(database_url())
+        return _acquire_pooled_connection(database_url())
     return _sqlite_connect(db_path)
 
 

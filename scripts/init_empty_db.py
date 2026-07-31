@@ -10,7 +10,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from attributionops.schema import ensure_campaign_settings, ensure_refund_log
+from attributionops.schema import (
+    ensure_campaign_settings,
+    ensure_customer_identities,
+    ensure_refund_log,
+)
 
 
 def init_db(db_path: str) -> None:
@@ -131,6 +135,8 @@ def init_db(db_path: str) -> None:
         # Per-campaign tracked/excluded flags and parity defaults.
         ensure_campaign_settings(conn)
         ensure_refund_log(conn)
+        # Names/emails behind each hashed customer_key, for the CRM views.
+        ensure_customer_identities(conn)
 
         conn.commit()
 

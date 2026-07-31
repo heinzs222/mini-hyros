@@ -6,6 +6,7 @@ import {
   fetchReport,
   fetchChildren,
   syncSpend,
+  syncStripe,
   fetchLtvBySource,
 } from "@/lib/api";
 
@@ -244,5 +245,28 @@ describe("api activity counter (top progress bar)", () => {
     await apiFetch("http://localhost:8000/api/x");
     unsubscribe();
     expect(seen).toEqual([1, 0]);
+  });
+});
+
+describe("syncStripe", () => {
+  it("defers the history backfill so the request cannot outlive the sync deadline", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => makeResponse({ synced: 0 })));
+
+    await syncStripe({ start_date: "2026-01-01", end_date: "2026-01-07", defer_history: true });
+
+    const [url, init] = lastFetchCall();
+    expect(url).toBe(
+      `${API_BASE}/api/stripe/sync?start_date=2026-01-01&end_date=2026-01-07&defer_history=true`,
+    );
+    expect(init.method).toBe("POST");
+  });
+
+  it("omits defer_history when the caller wants the backfill inline", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => makeResponse({ synced: 0 })));
+
+    await syncStripe({ start_date: "2026-01-01" });
+
+    const [url] = lastFetchCall();
+    expect(url).toBe(`${API_BASE}/api/stripe/sync?start_date=2026-01-01`);
   });
 });

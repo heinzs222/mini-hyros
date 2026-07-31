@@ -26,6 +26,7 @@ from attributionops.db import connect, sql_rows as db_query
 
 router = APIRouter()
 UTC = timezone.utc
+logger = logging.getLogger("journey")
 
 
 def _db() -> str:
@@ -74,6 +75,60 @@ def _identity_label(customer_key: str = "", session_id: str = "", visitor_id: st
     if session_id:
         return f"session:{session_id}"
     return ""
+
+
+def _identity_map(db_path: str, customer_keys: list[str]) -> dict[str, dict[str, str]]:
+    """Look up the name/email behind each hashed customer key, in one query.
+
+    Returns an empty map on any failure (including a warehouse predating the
+    contact book) so the CRM degrades to hashes instead of erroring.
+    """
+    keys = sorted({str(key or "").strip() for key in customer_keys if str(key or "").strip()})
+    if not keys:
+        return {}
+
+    out: dict[str, dict[str, str]] = {}
+    chunk_size = 400
+    try:
+        for start in range(0, len(keys), chunk_size):
+            chunk = keys[start:start + chunk_size]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = db_query(
+                db_path,
+                f"""SELECT customer_key, email, name, phone
+                    FROM customer_identities
+                    WHERE customer_key IN ({placeholders})""",
+                chunk,
+            )
+            for row in rows:
+                out[str(row.get("customer_key") or "")] = {
+                    "email": str(row.get("email") or ""),
+                    "name": str(row.get("name") or ""),
+                    "phone": str(row.get("phone") or ""),
+                }
+    except Exception:
+        logger.debug("customer_identities lookup unavailable", exc_info=True)
+        return {}
+    return out
+
+
+def _display_label(identity: dict[str, str], fallback: str) -> str:
+    """Prefer a real name, then an email, before falling back to the hash."""
+    name = str(identity.get("name") or "").strip()
+    if name:
+        return name
+    email = str(identity.get("email") or "").strip()
+    if email:
+        return email
+    return fallback
+
+
+def _shorten_label(label: str) -> str:
+    # Hashes stay clipped hard; a name or email is worth more room before the
+    # ellipsis, and only the CRM's own column width limits it after that.
+    if "@" in label or " " in label:
+        return label if len(label) <= 32 else f"{label[:31]}…"
+    return f"{label[:10]}..." if len(label) > 13 else label
 
 
 def _parse_ts(ts: str) -> datetime | None:
@@ -500,8 +555,14 @@ def customer_journey(
         except (ValueError, TypeError):
             pass
 
+    identity = _identity_map(db_path, [customer_key]).get(customer_key) or {}
+
     return {
         "customer_key": customer_key,
+        "name": identity.get("name", ""),
+        "email": identity.get("email", ""),
+        "phone": identity.get("phone", ""),
+        "display_name": _display_label(identity, customer_key),
         "summary": {
             "total_sessions": len(sessions),
             "total_touchpoints": len(touchpoints),
@@ -573,6 +634,7 @@ def lead_paths(
 
     # Hoist name-map + table-column lookups out of the per-conversion loop.
     names = _ad_name_map(db_path)
+    identities = _identity_map(db_path, [str(c.get("customer_key") or "") for c in conversions])
     session_cols = _table_columns(db_path, "sessions")
     touchpoint_cols = _table_columns(db_path, "touchpoints")
     rows: list[dict[str, Any]] = []
@@ -588,13 +650,18 @@ def lead_paths(
         pre_conversion = [event for event in timeline if event.get("type") not in ("conversion", "order")]
         first_touch = pre_conversion[0] if pre_conversion else None
         last_touch = pre_conversion[-1] if pre_conversion else None
-        label = _identity_label(customer_key, session_id, visitor_id)
+        identity = identities.get(customer_key) or {}
+        label = _display_label(identity, _identity_label(customer_key, session_id, visitor_id))
 
         rows.append({
             "customer_key": customer_key,
             "session_id": session_id,
             "visitor_id": visitor_id,
-            "customer_key_short": f"{label[:10]}..." if len(label) > 13 else label,
+            "name": identity.get("name", ""),
+            "email": identity.get("email", ""),
+            "phone": identity.get("phone", ""),
+            "display_name": label,
+            "customer_key_short": _shorten_label(label),
             "conversion_id": conv.get("conversion_id", ""),
             "conversion_type": conv.get("type", ""),
             "conversion_ts": conversion_ts,
