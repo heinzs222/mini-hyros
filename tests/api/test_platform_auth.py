@@ -429,3 +429,162 @@ def test_get_or_refresh_auto_refreshes_when_expiring(api_db, monkeypatch):
     row = _token_row(api_db)[0]
     assert row["access_token"] == "auto_refreshed"
     assert row["expires_at"]
+
+
+# ── Meta credential reconnect ──────────────────────────────────────────────────
+
+def _meta_row(db_path: str):
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute("SELECT * FROM platform_tokens WHERE platform='meta'").fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [dict(r) for r in rows]
+
+
+def _clear_meta_env(monkeypatch):
+    for var in ("META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID", "META_APP_ID", "META_APP_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_meta_connect_stores_validated_token(client, api_db, monkeypatch):
+    _clear_meta_env(monkeypatch)
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith="https://graph.facebook.com/v18.0/me").mock(
+            return_value=httpx.Response(200, json={"id": "17", "name": "Ops User"})
+        )
+        router.get(url__startswith="https://graph.facebook.com/v18.0/act_123456").mock(
+            return_value=httpx.Response(200, json={"name": "XGuard Ads", "currency": "CAD"})
+        )
+        resp = client.post(
+            "/api/platform-auth/meta/connect",
+            json={"access_token": "EAA-fresh", "ad_account_id": "act_123456"},
+        )
+
+    body = resp.json()
+    assert body["connected"] is True
+    assert body["ad_account_id"] == "123456"
+    assert body["ad_account_name"] == "XGuard Ads"
+    # Without app credentials the token is stored as pasted, with a nudge.
+    assert "META_APP_ID" in body["note"]
+
+    row = _meta_row(api_db)[0]
+    assert row["access_token"] == "EAA-fresh"
+    assert row["advertiser_id"] == "123456"
+
+
+def test_meta_connect_exchanges_for_long_lived_token(client, api_db, monkeypatch):
+    _clear_meta_env(monkeypatch)
+    monkeypatch.setenv("META_APP_ID", "app-1")
+    monkeypatch.setenv("META_APP_SECRET", "sec-1")
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith="https://graph.facebook.com/v18.0/me").mock(
+            return_value=httpx.Response(200, json={"id": "17", "name": "Ops User"})
+        )
+        exchange = router.get(
+            url__startswith="https://graph.facebook.com/v18.0/oauth/access_token"
+        ).mock(return_value=httpx.Response(200, json={"access_token": "EAA-long", "expires_in": 5184000}))
+        resp = client.post("/api/platform-auth/meta/connect", json={"access_token": "EAA-short"})
+
+    assert exchange.called
+    body = resp.json()
+    assert body["connected"] is True
+    assert body["note"] == ""
+    assert body["expires_at"]
+    assert _meta_row(api_db)[0]["access_token"] == "EAA-long"
+
+
+def test_meta_connect_rejects_invalid_token_without_storing(client, api_db, monkeypatch):
+    _clear_meta_env(monkeypatch)
+
+    error = {"error": {"message": "Error validating access token", "code": 190, "error_subcode": 460}}
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith="https://graph.facebook.com/v18.0/me").mock(
+            return_value=httpx.Response(400, json=error)
+        )
+        resp = client.post("/api/platform-auth/meta/connect", json={"access_token": "EAA-dead"})
+
+    body = resp.json()
+    assert body["connected"] is False
+    assert "code=190" in body["error"]
+    assert _meta_row(api_db) == []
+
+
+def test_meta_connect_rejects_token_without_ad_account_access(client, api_db, monkeypatch):
+    _clear_meta_env(monkeypatch)
+    monkeypatch.setenv("META_AD_ACCOUNT_ID", "act_999")
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith="https://graph.facebook.com/v18.0/me").mock(
+            return_value=httpx.Response(200, json={"id": "17", "name": "Ops User"})
+        )
+        router.get(url__startswith="https://graph.facebook.com/v18.0/act_999").mock(
+            return_value=httpx.Response(
+                403, json={"error": {"message": "Ad account owner has NOT grant ads_management", "code": 200}}
+            )
+        )
+        resp = client.post("/api/platform-auth/meta/connect", json={"access_token": "EAA-scopeless"})
+
+    body = resp.json()
+    assert body["connected"] is False
+    assert "ads_management" in body["error"]
+    assert _meta_row(api_db) == []
+
+
+def test_meta_connect_requires_a_token(client, api_db, monkeypatch):
+    _clear_meta_env(monkeypatch)
+    body = client.post("/api/platform-auth/meta/connect", json={}).json()
+    assert body == {"connected": False, "error": "An access token is required."}
+
+
+def test_meta_status_and_disconnect_fall_back_to_env(client, api_db, monkeypatch):
+    _clear_meta_env(monkeypatch)
+    monkeypatch.setenv("META_ACCESS_TOKEN", "env-token")
+    monkeypatch.setenv("META_AD_ACCOUNT_ID", "act_777")
+
+    status = client.get("/api/platform-auth/meta/status").json()
+    assert status == {
+        "connected": True,
+        "source": "env",
+        "ad_account_id": "777",
+        "expires_at": "",
+        "updated_at": "",
+        "can_exchange_long_lived": False,
+        "token_help_url": "https://developers.facebook.com/tools/explorer/",
+    }
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(url__startswith="https://graph.facebook.com/v18.0/me").mock(
+            return_value=httpx.Response(200, json={"id": "17", "name": "Ops User"})
+        )
+        router.get(url__startswith="https://graph.facebook.com/v18.0/act_777").mock(
+            return_value=httpx.Response(200, json={"name": "Env Account"})
+        )
+        client.post("/api/platform-auth/meta/connect", json={"access_token": "EAA-db"})
+
+    assert client.get("/api/platform-auth/meta/status").json()["source"] == "database"
+
+    # Removing the stored token hands control back to the environment.
+    assert client.post("/api/platform-auth/meta/disconnect").json() == {
+        "connected": False,
+        "env_fallback": True,
+    }
+    assert _meta_row(api_db) == []
+    assert client.get("/api/platform-auth/meta/status").json()["source"] == "env"
+
+
+def test_stored_meta_token_wins_over_env_for_spend_sync(api_db, monkeypatch):
+    import api.platform_auth as pa
+
+    monkeypatch.setenv("META_ACCESS_TOKEN", "env-token")
+    monkeypatch.setenv("META_AD_ACCOUNT_ID", "act_env")
+    pa.save_meta_credentials(api_db, "db-token", "act_db")
+
+    assert pa.get_meta_credentials(api_db) == ("db-token", "db")
+    assert pa.get_meta_access_token(api_db) == "db-token"
+
+    pa.clear_meta_credentials(api_db)
+    assert pa.get_meta_credentials(api_db) == ("env-token", "act_env")

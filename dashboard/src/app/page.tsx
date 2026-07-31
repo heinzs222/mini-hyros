@@ -471,7 +471,11 @@ export default function DashboardPage() {
         // Spend can legitimately take longer than the old 60-second browser deadline.
         // The API's own timeout still caps the request.
         syncSpend({ platform: "all", start_date: syncStart, end_date: syncEnd }),
-        withSyncDeadline("Stripe sync", 180_000, (signal) => syncStripe({ start_date: syncStart, end_date: syncEnd }, signal)),
+        withSyncDeadline("Stripe sync", 180_000, (signal) => syncStripe({
+          start_date: syncStart,
+          end_date: syncEnd,
+          defer_history: true,
+        }, signal)),
         // Rely on the backend defaults (forms + opportunities included) so a
         // manual Sync backfills GHL form opt-ins and won-opportunity orders —
         // the pull-based catch-up path when the realtime webhook was down.
@@ -481,29 +485,40 @@ export default function DashboardPage() {
         }, signal)),
       ]);
       const errors: string[] = [];
+      const notices: string[] = [];
       const addSyncErrors = (scope: string, result: PromiseSettledResult<any>) => {
         if (result.status === "rejected") {
           errors.push(`${scope}: ${result.reason?.message || result.reason || "Sync failed"}`);
           return;
         }
-        for (const item of result.value?.errors || []) {
-          errors.push(`${scope}: ${item}`);
-        }
-        // The spend sync reports per-platform failures inside `platforms`, not a
-        // top-level `errors` array — surface them so a failing TikTok/Meta/Google
-        // sync (e.g. an expired token) is visible instead of silently producing
-        // no spend rows for that platform.
+        // The spend sync reports per-platform outcomes inside `platforms`, not a
+        // top-level `errors` array — surface failures so a broken TikTok/Meta/
+        // Google sync (e.g. an expired token) is visible instead of silently
+        // producing no spend rows for that platform.
         const platforms = result.value?.platforms;
+        const reportedPlatforms = new Set<string>();
         if (platforms && typeof platforms === "object") {
           for (const [name, info] of Object.entries<any>(platforms)) {
-            if (info && typeof info === "object" && info.error) {
+            if (!info || typeof info !== "object") continue;
+            if (info.error) {
+              reportedPlatforms.add(name.toLowerCase());
               errors.push(`${scope} (${name}): ${info.error}`);
-            } else if (info && typeof info === "object" && info.skipped) {
-              errors.push(
-                `${scope} (${name}): ${info.reason || "Platform refresh was skipped"}`,
-              );
+            } else if (info.skipped) {
+              // A platform that is deliberately turned off (e.g. Google Ads API
+              // sync in favour of the Ads Script push) is a note about how the
+              // system is configured, not a failure to fix.
+              reportedPlatforms.add(name.toLowerCase());
+              notices.push(`${scope} (${name}): ${info.reason || "Platform refresh was skipped"}`);
             }
           }
+        }
+        for (const item of result.value?.errors || []) {
+          // Those same platform failures also arrive prefixed ("meta: …") in the
+          // top-level list; reporting both made one expired token look like two
+          // separate issues.
+          const platformPrefix = String(item).split(":", 1)[0].trim().toLowerCase();
+          if (reportedPlatforms.has(platformPrefix)) continue;
+          errors.push(`${scope}: ${item}`);
         }
       };
       addSyncErrors("Spend", spendResult);
@@ -517,8 +532,10 @@ export default function DashboardPage() {
           toastRef.current.update(toastId, {
             type: "success",
             title: "Sync complete",
-            description: "Ad spend, Stripe orders and GHL data are up to date.",
-            duration: 4500,
+            description: notices.length
+              ? notices.map(compactSyncError).join("\n")
+              : "Ad spend, Stripe orders and GHL data are up to date.",
+            duration: notices.length ? 7000 : 4500,
           });
         } else {
           const detail =

@@ -24,7 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect
 from attributionops.tools.ads import report_currency, spend_fx_rates
-from backend.api.platform_auth import get_or_refresh_tiktok_token, get_tiktok_advertiser_id
+from backend.api.platform_auth import (
+    get_meta_credentials as _meta_credentials,
+    get_or_refresh_tiktok_token,
+    get_tiktok_advertiser_id,
+)
 
 router = APIRouter()
 UTC = timezone.utc
@@ -983,6 +987,11 @@ def _meta_api_error_message(response: httpx.Response | None, fallback: str) -> s
     code = error.get("code")
     subcode = error.get("error_subcode")
 
+    # An expired/revoked token is the one Meta failure an operator can actually
+    # fix, so say what to do instead of relaying a paragraph of Facebook prose.
+    if str(code) == "190":
+        return "Meta access token expired or revoked — reconnect Meta in Settings → Connections."
+
     meta_bits = []
     if error_type:
         meta_bits.append(error_type)
@@ -1324,16 +1333,18 @@ def _write_meta_spend_rows(
 
 
 async def _sync_meta_spend(start_date: str, end_date: str) -> dict[str, Any]:
-    access_token = os.environ.get("META_ACCESS_TOKEN", "").strip()
-    ad_account_id = os.environ.get("META_AD_ACCOUNT_ID", "").strip()
+    db_path = _db()
+    access_token, ad_account_id = _meta_credentials(db_path)
 
     if not access_token or not ad_account_id:
         return {
             "synced": 0,
-            "error": "META_ACCESS_TOKEN and META_AD_ACCOUNT_ID are required",
+            "error": (
+                "META_ACCESS_TOKEN and META_AD_ACCOUNT_ID are required — set them in the "
+                "environment or connect Meta in Settings → Connections"
+            ),
         }
 
-    db_path = _db()
     _ensure_spend_table(db_path)
 
     try:

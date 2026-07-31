@@ -11,7 +11,15 @@ import {
   Plug,
   Webhook,
 } from "lucide-react";
-import { fetchConnections, fetchTikTokConnectUrl, refreshTikTokToken, connectGhl } from "@/lib/api";
+import {
+  fetchConnections,
+  fetchTikTokConnectUrl,
+  refreshTikTokToken,
+  connectGhl,
+  connectMeta,
+  disconnectMeta,
+  fetchMetaAuthStatus,
+} from "@/lib/api";
 import { useToast } from "@/components/Toast";
 
 type ConnState = "connected" | "expired" | "invalid" | "error" | "not_configured" | "unknown";
@@ -36,6 +44,12 @@ const STATE_META: Record<ConnState, { label: string; cls: string; icon: React.Re
   unknown: { label: "Unknown", cls: "text-ink-faint bg-white/5 border-[var(--card-border)]", icon: <Circle size={14} /> },
 };
 
+function fmtExpiry(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
 function fmtChecked(iso: string | null): string {
   if (!iso) return "not checked";
   const d = new Date(iso);
@@ -49,6 +63,16 @@ export default function ConnectionsView() {
   const [loading, setLoading] = useState(true);
   const [tiktokBusy, setTiktokBusy] = useState(false);
   const [ghl, setGhl] = useState({ token: "", location: "", busy: false });
+  const [metaForm, setMetaForm] = useState({ token: "", account: "", busy: false, open: false });
+  const [metaAuth, setMetaAuth] = useState<any>(null);
+
+  const loadMetaAuth = async () => {
+    try {
+      setMetaAuth(await fetchMetaAuthStatus());
+    } catch {
+      setMetaAuth(null);
+    }
+  };
 
   const load = async (notify = false) => {
     setLoading(true);
@@ -81,8 +105,52 @@ export default function ConnectionsView() {
 
   useEffect(() => {
     void load(false);
+    void loadMetaAuth();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const connectMetaHandler = async () => {
+    const token = metaForm.token.trim();
+    if (!token) {
+      toast.error("Missing Meta token", { description: "Paste an access token with ads_read access." });
+      return;
+    }
+    setMetaForm((m) => ({ ...m, busy: true }));
+    try {
+      const res = await connectMeta({ access_token: token, ad_account_id: metaForm.account.trim() || undefined });
+      if (res?.connected) {
+        toast.success("Meta reconnected", {
+          description: res.note || `Spend will sync on the next refresh${res.ad_account_name ? ` for ${res.ad_account_name}` : ""}.`,
+          duration: res.note ? 9000 : 5000,
+        });
+        setMetaForm({ token: "", account: "", busy: false, open: false });
+        await Promise.all([load(false), loadMetaAuth()]);
+      } else {
+        toast.error("Meta connection failed", { description: res?.error || "Could not validate the token.", duration: 11000 });
+        setMetaForm((m) => ({ ...m, busy: false }));
+      }
+    } catch (e: any) {
+      toast.error("Meta connection failed", { description: e?.message || "Request failed." });
+      setMetaForm((m) => ({ ...m, busy: false }));
+    }
+  };
+
+  const disconnectMetaHandler = async () => {
+    setMetaForm((m) => ({ ...m, busy: true }));
+    try {
+      const res = await disconnectMeta();
+      toast.info("Stored Meta token removed", {
+        description: res?.env_fallback
+          ? "Falling back to the META_ACCESS_TOKEN set in the environment."
+          : "Meta spend sync is now unconfigured.",
+      });
+      await Promise.all([load(false), loadMetaAuth()]);
+    } catch (e: any) {
+      toast.error("Could not remove the stored token", { description: e?.message || "Request failed." });
+    } finally {
+      setMetaForm((m) => ({ ...m, busy: false }));
+    }
+  };
 
   const reconnectTikTok = async () => {
     setTiktokBusy(true);
@@ -239,9 +307,91 @@ export default function ConnectionsView() {
                     )}
                   </div>
 
-                  {needsAction && p.required_env?.length > 0 && p.platform !== "tiktok" && p.platform !== "ghl" && (
+                  {needsAction && p.required_env?.length > 0 && !["tiktok", "ghl", "meta"].includes(p.platform) && (
                     <div className="mt-2 rounded-lg bg-white/[0.02] p-2 text-[10px] text-ink-faint">
                       Set in environment: <span className="font-mono text-ink-dim">{p.required_env.join(", ")}</span>
+                    </div>
+                  )}
+
+                  {p.platform === "meta" && (
+                    <div className="mt-3 space-y-2 rounded-lg border border-[var(--card-border)] bg-white/[0.02] p-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] uppercase tracking-wide text-ink-dim">
+                          {needsAction ? "Reconnect with a new access token" : "Meta access token"}
+                        </span>
+                        {!needsAction && !metaForm.open && (
+                          <button
+                            onClick={() => setMetaForm((m) => ({ ...m, open: true }))}
+                            className="rounded-md border border-[var(--card-border)] px-2 py-0.5 text-[11px] text-ink-dim transition-colors hover:text-ink"
+                          >
+                            Update token
+                          </button>
+                        )}
+                      </div>
+
+                      {metaAuth && (
+                        <div className="text-[11px] leading-snug text-ink-faint">
+                          {metaAuth.source === "database"
+                            ? "Using the token saved here"
+                            : metaAuth.source === "env"
+                              ? "Using META_ACCESS_TOKEN from the environment"
+                              : "No Meta token available"}
+                          {metaAuth.ad_account_id ? ` · act_${metaAuth.ad_account_id}` : ""}
+                          {metaAuth.expires_at ? ` · expires ${fmtExpiry(metaAuth.expires_at)}` : ""}
+                        </div>
+                      )}
+
+                      {(needsAction || metaForm.open) && (
+                        <>
+                          <input
+                            type="password"
+                            value={metaForm.token}
+                            onChange={(e) => setMetaForm((m) => ({ ...m, token: e.target.value }))}
+                            placeholder="Access token (EAA…)"
+                            className="w-full rounded-md border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-[12px] text-ink placeholder:text-ink-faint focus:border-brand-500 focus:outline-none"
+                          />
+                          <input
+                            type="text"
+                            value={metaForm.account}
+                            onChange={(e) => setMetaForm((m) => ({ ...m, account: e.target.value }))}
+                            placeholder={metaAuth?.ad_account_id ? `Ad account ID (${metaAuth.ad_account_id})` : "Ad account ID (act_… — optional)"}
+                            className="w-full rounded-md border border-[var(--card-border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-[12px] text-ink placeholder:text-ink-faint focus:border-brand-500 focus:outline-none"
+                          />
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={connectMetaHandler}
+                              disabled={metaForm.busy}
+                              className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-brand-600 px-2.5 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-brand-700 disabled:opacity-50"
+                            >
+                              {metaForm.busy ? <RefreshCw size={12} className="animate-spin" /> : null}
+                              {metaForm.busy ? "Connecting…" : "Connect Meta"}
+                            </button>
+                            {metaAuth?.source === "database" && (
+                              <button
+                                onClick={disconnectMetaHandler}
+                                disabled={metaForm.busy}
+                                className="rounded-md border border-[var(--card-border)] px-2.5 py-1.5 text-[12px] text-ink-dim transition-colors hover:text-ink disabled:opacity-50"
+                              >
+                                Remove
+                              </button>
+                            )}
+                          </div>
+                          <a
+                            href={metaAuth?.token_help_url || "https://developers.facebook.com/tools/explorer/"}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-1 text-[11px] text-brand-400 hover:text-brand-300"
+                          >
+                            Generate a token in Graph API Explorer <ExternalLink size={10} />
+                          </a>
+                          <div className="text-[10px] leading-snug text-ink-faint">
+                            Needs the <span className="font-mono">ads_read</span> permission.
+                            {metaAuth?.can_exchange_long_lived
+                              ? " It is exchanged for a 60-day token automatically."
+                              : " Set META_APP_ID + META_APP_SECRET to auto-extend it to 60 days."}
+                          </div>
+                        </>
+                      )}
                     </div>
                   )}
 

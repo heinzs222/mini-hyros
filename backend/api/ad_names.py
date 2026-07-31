@@ -25,6 +25,7 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect, sql_rows
+from backend.api.platform_auth import get_meta_access_token, get_meta_credentials
 
 router = APIRouter()
 UTC = timezone.utc
@@ -263,7 +264,7 @@ def get_thumbnails_map(db_path: str) -> dict[str, dict[str, str]]:
 @router.get("/video-url")
 async def get_video_url(video_id: str = Query(...)):
     """Fetch the actual video source URL from Meta for a given video_id."""
-    access_token = os.environ.get("META_ACCESS_TOKEN", "")
+    access_token = get_meta_access_token(_db())
     if not access_token or not video_id:
         return {"video_url": "", "error": "missing credentials or video_id"}
     api_version = _meta_api_version()
@@ -300,7 +301,7 @@ async def get_thumbnail(ad_id: str = Query(...), platform: str = Query(default="
     creative_id = str(row.get("creative_id") or "")
 
     # Try to refresh from Meta API using creative_id
-    access_token = os.environ.get("META_ACCESS_TOKEN", "")
+    access_token = get_meta_access_token(db_path)
     if platform == "meta" and creative_id and access_token:
         api_version = _meta_api_version()
         try:
@@ -504,14 +505,19 @@ def _sync_meta_names_from_spend(db_path: str) -> int:
 
 async def _sync_meta() -> dict:
     """Fetch campaign/adset/ad names from Meta Marketing API."""
-    access_token = os.environ.get("META_ACCESS_TOKEN", "")
-    ad_account_id = os.environ.get("META_AD_ACCOUNT_ID", "")
+    db_path = _db()
+    access_token, ad_account_id = get_meta_credentials(db_path)
     account_id = str(ad_account_id or "").replace("act_", "").strip()
 
     if not access_token or not account_id:
-        return {"synced": 0, "error": "META_ACCESS_TOKEN and META_AD_ACCOUNT_ID required"}
+        return {
+            "synced": 0,
+            "error": (
+                "META_ACCESS_TOKEN and META_AD_ACCOUNT_ID required — set them in the "
+                "environment or connect Meta in Settings → Connections"
+            ),
+        }
 
-    db_path = _db()
     _ensure_table(db_path)
     spend_names_synced = _sync_meta_names_from_spend(db_path)
     synced = spend_names_synced
