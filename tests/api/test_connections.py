@@ -186,3 +186,64 @@ def test_setup_guide_returns_all_platforms(client):
     for plat in ("shopify", "stripe"):
         assert isinstance(body[plat]["steps"], list) and body[plat]["steps"]
         assert "api_docs" not in body[plat]
+
+
+# ── Credentials stored through Settings ───────────────────────────────────────
+# GHL, Meta and TikTok can all be connected from the dashboard, which writes the
+# credentials to platform_tokens. The status card has to read them from there:
+# reporting "Not configured" for a platform that is actively syncing is exactly
+# what a silently-swallowed lookup failure looks like.
+
+def _seed_platform_token(db_path: str, platform: str, token: str, advertiser_id: str) -> None:
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS platform_tokens (
+                platform TEXT PRIMARY KEY, access_token TEXT, refresh_token TEXT,
+                advertiser_id TEXT, expires_at TEXT, updated_at TEXT)"""
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO platform_tokens "
+            "(platform, access_token, refresh_token, advertiser_id, expires_at, updated_at) "
+            "VALUES (?, ?, '', ?, '', '2026-01-01T00:00:00Z')",
+            (platform, token, advertiser_id),
+        )
+        conn.commit()
+
+
+def test_ghl_connected_through_settings_reads_as_configured(client, api_db, monkeypatch):
+    _clear_all(monkeypatch)
+    _seed_platform_token(api_db, "ghl", "pit-abc123", "loc-789")
+
+    ghl = next(
+        p for p in client.get("/api/connections/status").json()["platforms"]
+        if p["platform"] == "ghl"
+    )
+    assert ghl["configured"] is True
+    assert ghl["fields"] == {"api_token": True, "location_id": True}
+    assert ghl["state"] == "unknown"  # configured, awaiting a live check
+
+
+def test_meta_connected_through_settings_reads_as_configured(client, api_db, monkeypatch):
+    _clear_all(monkeypatch)
+    _seed_platform_token(api_db, "meta", "EAA-from-settings", "123456")
+
+    meta = next(
+        p for p in client.get("/api/connections/status").json()["platforms"]
+        if p["platform"] == "meta"
+    )
+    assert meta["configured"] is True
+    assert meta["fields"]["access_token"] is True
+    assert meta["fields"]["ad_account_id"] is True
+
+
+def test_tiktok_connected_through_settings_reads_as_configured(client, api_db, monkeypatch):
+    _clear_all(monkeypatch)
+    _seed_platform_token(api_db, "tiktok", "tt-token", "adv-1")
+
+    tiktok = next(
+        p for p in client.get("/api/connections/status").json()["platforms"]
+        if p["platform"] == "tiktok"
+    )
+    assert tiktok["configured"] is True

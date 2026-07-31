@@ -141,9 +141,9 @@ async def _run_scheduled_sync() -> dict[str, Any]:
     """
     from fastapi import BackgroundTasks as _BackgroundTasks
 
-    from api.ghl_sync import ghl_sync as _ghl_sync
-    from api.spend_sync import sync_spend as _sync_spend
-    from api.stripe_sync import stripe_sync as _stripe_sync
+    from backend.api.ghl_sync import ghl_sync as _ghl_sync
+    from backend.api.spend_sync import sync_spend as _sync_spend
+    from backend.api.stripe_sync import stripe_sync as _stripe_sync
 
     log = logging.getLogger("vigil.autosync")
     today = datetime.now(report_timezone()).date()

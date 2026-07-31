@@ -1138,7 +1138,7 @@ async def ghl_debug(request: Request):
     # This route lives under the auth-exempt /api/webhooks prefix, so enforce the
     # dashboard auth token inside the handler.
     try:
-        from api.auth import is_auth_enabled, validate_token, extract_request_token
+        from backend.api.auth import is_auth_enabled, validate_token, extract_request_token
         if is_auth_enabled() and not validate_token(extract_request_token(request)):
             raise HTTPException(status_code=401, detail="Unauthorized")
     except HTTPException:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -10,6 +11,7 @@ import httpx
 from fastapi import APIRouter
 
 router = APIRouter()
+logger = logging.getLogger("connections")
 
 
 # ── Platform env-var maps ─────────────────────────────────────────────────────
@@ -76,10 +78,13 @@ def _now_iso() -> str:
 def _ghl_credentials() -> tuple[str, str]:
     """Return (token, location_id) for GHL from the warehouse or env."""
     try:
-        from api.ghl_sync import get_ghl_credentials
+        from backend.api.ghl_sync import get_ghl_credentials
         from attributionops.config import default_db_path
         return get_ghl_credentials(default_db_path())
     except Exception:
+        # Falling back to env means a platform connected through Settings reads
+        # as "not configured" even while its sync works, so say so out loud.
+        logger.warning("GHL credential lookup fell back to environment", exc_info=True)
         token = (os.environ.get("GHL_API_TOKEN", "") or os.environ.get("GHL_ACCESS_TOKEN", "")).strip()
         return token, os.environ.get("GHL_LOCATION_ID", "").strip()
 
@@ -87,10 +92,11 @@ def _ghl_credentials() -> tuple[str, str]:
 def _meta_credentials() -> tuple[str, str]:
     """Return (access_token, ad_account_id) for Meta from the warehouse or env."""
     try:
-        from api.platform_auth import get_meta_credentials
+        from backend.api.platform_auth import get_meta_credentials
         from attributionops.config import default_db_path
         return get_meta_credentials(default_db_path())
     except Exception:
+        logger.warning("Meta credential lookup fell back to environment", exc_info=True)
         return (
             os.environ.get("META_ACCESS_TOKEN", "").strip(),
             os.environ.get("META_AD_ACCOUNT_ID", "").strip(),
@@ -163,7 +169,7 @@ async def _validate_tiktok(client: httpx.AsyncClient) -> tuple[str, str]:
     advertiser_id = os.environ.get("TIKTOK_ADVERTISER_ID", "").strip()
     token_source = "env"
     try:
-        from api.platform_auth import get_or_refresh_tiktok_token, get_tiktok_advertiser_id
+        from backend.api.platform_auth import get_or_refresh_tiktok_token, get_tiktok_advertiser_id
         from attributionops.config import default_db_path
 
         db_target = default_db_path()
@@ -175,7 +181,7 @@ async def _validate_tiktok(client: httpx.AsyncClient) -> tuple[str, str]:
         if db_advertiser_id:
             advertiser_id = db_advertiser_id
     except Exception:
-        pass
+        logger.warning("TikTok credential lookup fell back to environment", exc_info=True)
 
     if not token or not advertiser_id:
         return "not_configured", "TikTok access token or advertiser ID is missing."
@@ -286,14 +292,14 @@ async def _platform_status(platform: str, validate: bool, client: httpx.AsyncCli
         fields = _env_fields(platform)
         if platform == "tiktok" and not configured:
             try:
-                from api.platform_auth import get_tiktok_advertiser_id, get_tiktok_token
+                from backend.api.platform_auth import get_tiktok_advertiser_id, get_tiktok_token
                 from attributionops.config import default_db_path
 
                 db_target = default_db_path()
                 if get_tiktok_token(db_target).strip() and get_tiktok_advertiser_id(db_target).strip():
                     configured = True
             except Exception:
-                pass
+                logger.warning("TikTok credential lookup fell back to environment", exc_info=True)
 
     base = {
         "platform": platform,

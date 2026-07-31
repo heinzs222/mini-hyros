@@ -28,7 +28,9 @@ def test_scheduled_sync_runs_all_parts_without_credentials(api_db):
 
 
 def test_scheduled_sync_isolates_a_failing_part(api_db, monkeypatch):
-    import api.spend_sync as spend_sync_module
+    # The scheduler imports the module by its deployed path; patching the
+    # backend/-relative alias would touch a different module object.
+    from backend.api import spend_sync as spend_sync_module
 
     async def boom(**kwargs):
         raise RuntimeError("simulated spend outage")
