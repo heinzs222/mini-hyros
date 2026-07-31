@@ -30,7 +30,7 @@ from attributionops.schema import (
     ensure_refund_log,
     upsert_customer_identity,
 )
-from attributionops.util import local_day_bounds_utc, parse_iso_ts
+from attributionops.util import invalidate_table_columns, local_day_bounds_utc, parse_iso_ts
 
 router = APIRouter()
 UTC = timezone.utc
@@ -151,6 +151,8 @@ def _ensure_orders_table(db_path: str) -> None:
         ensure_refund_log(conn)
         ensure_customer_identities(conn)
         conn.commit()
+    # Column sets are cached for reads; this may have just added one.
+    invalidate_table_columns(db_path)
 
 
 def _history_backfill_days() -> int:

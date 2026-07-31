@@ -480,12 +480,45 @@ async def _fetch_opportunities(client: httpx.AsyncClient, token: str, location_i
 
 # ── Writers ────────────────────────────────────────────────────────────────────
 
+def _write_identities(conn: Any, rows: list[dict[str, str]], *, source: str) -> int:
+    """Persist who each contact is, on the caller's connection.
+
+    Identity capture is additive to lead ingestion and must never sink it: a
+    failure here (an old warehouse without the table, say) rolls back only the
+    identity work so the caller's own writes still go through.
+    """
+    if not rows:
+        return 0
+    written = 0
+    try:
+        for row in rows:
+            if upsert_customer_identity(
+                conn,
+                row.get("customer_key", ""),
+                email=row.get("email", ""),
+                name=row.get("name", ""),
+                phone=row.get("phone", ""),
+                source=source,
+                updated_at=row.get("ts") or None,
+            ):
+                written += 1
+    except Exception:
+        logger.warning("could not record %s identities", source, exc_info=True)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return 0
+    return written
+
+
 def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
                     end_date: str) -> dict[str, int]:
     leads = 0
     skipped = 0
     now = _now()
     prepared: list[dict[str, Any]] = []
+    identities: list[dict[str, str]] = []
     for c in contacts:
         email = _contact_email(c)
         # Phone-only contacts are a real lead segment; skip only when the
@@ -494,12 +527,24 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
         if not email and not phone_key:
             skipped += 1
             continue
+        customer_key = _sha256(email) if email else phone_key
         ts = _contact_ts(c, now)
+
+        # Who this person is does not depend on the reporting window. Recording
+        # it before the window check means an ordinary sync also fills in names
+        # for rows already in the warehouse from before identities were kept.
+        identities.append({
+            "customer_key": customer_key,
+            "email": email,
+            "name": _contact_name(c),
+            "phone": str(c.get("phone") or ""),
+            "ts": ts,
+        })
+
         if not _within(ts, start_date, end_date):
             skipped += 1
             continue
 
-        customer_key = _sha256(email) if email else phone_key
         contact_id = str(c.get("id") or customer_key)
         src_infos = _src_infos_from_attribution(c)
         src_info = src_infos[-1]
@@ -521,20 +566,12 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
 
     _ensure_tracking_schema(db_path)
     with connect(db_path) as conn:
+        identities_written = _write_identities(conn, identities, source="ghl")
         for item in prepared:
             # Same canonical key as the webhook path so overlapping webhook and
             # pull deliveries remain idempotent.
             _migrate_legacy_lead_conversion(
                 db_path, item["contact_id"], conn=conn
-            )
-            upsert_customer_identity(
-                conn,
-                item["customer_key"],
-                email=item["email"],
-                name=item["name"],
-                phone=item["phone"],
-                source="ghl",
-                updated_at=item["ts"],
             )
             _insert_conversion(
                 db_path,
@@ -578,7 +615,7 @@ def _write_contacts(db_path: str, contacts: list[dict], start_date: str,
                     conn=conn,
                 )
         conn.commit()
-    return {"leads": leads, "skipped": skipped}
+    return {"leads": leads, "skipped": skipped, "identities": identities_written}
 
 
 def _write_form_submissions(
@@ -593,16 +630,27 @@ def _write_form_submissions(
     now = _now()
     contact_map = contacts_by_id or {}
     prepared: list[dict[str, Any]] = []
+    identities: list[dict[str, str]] = []
     for submission in submissions:
         ts = _submission_ts(submission, now)
-        if not _within(ts, start_date, end_date):
-            skipped += 1
-            continue
-
         contact_id = str(submission.get("contactId") or "").strip()
         contact = contact_map.get(contact_id) or {}
         email = str(submission.get("email") or _contact_email(contact) or "").strip().lower()
         customer_key = _sha256(email) if email else ""
+
+        if customer_key:
+            identities.append({
+                "customer_key": customer_key,
+                "email": email,
+                "name": _contact_name(contact),
+                "phone": str(contact.get("phone") or submission.get("phone") or ""),
+                "ts": ts,
+            })
+
+        if not _within(ts, start_date, end_date):
+            skipped += 1
+            continue
+
         submission_id = str(submission.get("id") or "").strip()
         if not submission_id:
             skipped += 1
@@ -632,16 +680,8 @@ def _write_form_submissions(
 
     _ensure_tracking_schema(db_path)
     with connect(db_path) as conn:
+        _write_identities(conn, identities, source="ghl_form")
         for item in prepared:
-            upsert_customer_identity(
-                conn,
-                item["customer_key"],
-                email=item["email"],
-                name=item["name"],
-                phone=item["phone"],
-                source="ghl_form",
-                updated_at=item["ts"],
-            )
             _insert_conversion(
                 db_path,
                 item["conversion_id"],
@@ -684,19 +724,31 @@ def _write_opportunities(db_path: str, opportunities: list[dict], start_date: st
     now = _now()
     won_stages = {"won", "closed won", "closedwon", "paid", "sale", "customer", "purchased"}
     prepared: list[dict[str, Any]] = []
+    identities: list[dict[str, str]] = []
     for opp in opportunities:
         ts_raw = str(opp.get("createdAt") or opp.get("dateAdded") or "")
         _dt = try_parse_iso_ts(ts_raw) if ts_raw else None
         ts = _iso_ts(_dt) if _dt is not None else now
-        if not _within(ts, start_date, end_date):
-            skipped += 1
-            continue
 
         contact = opp.get("contact") or {}
         email = str(contact.get("email") or "").strip().lower()
         customer_key = _sha256(email) if email else ""
         contact_name = _contact_name(contact)
         contact_phone = str(contact.get("phone") or "")
+
+        if customer_key:
+            identities.append({
+                "customer_key": customer_key,
+                "email": email,
+                "name": contact_name,
+                "phone": contact_phone,
+                "ts": ts,
+            })
+
+        if not _within(ts, start_date, end_date):
+            skipped += 1
+            continue
+
         opp_id = str(opp.get("id") or "")
         status = str(opp.get("status") or "").lower()
         try:
@@ -746,16 +798,8 @@ def _write_opportunities(db_path: str, opportunities: list[dict], start_date: st
 
     _ensure_tracking_schema(db_path)
     with connect(db_path) as conn:
+        _write_identities(conn, identities, source="ghl_opportunity")
         for item in prepared:
-            upsert_customer_identity(
-                conn,
-                item["customer_key"],
-                email=item["email"],
-                name=item["name"],
-                phone=item["phone"],
-                source="ghl_opportunity",
-                updated_at=item["ts"],
-            )
             if item["order_values"] is not None:
                 conn.execute(
                     """INSERT OR IGNORE INTO orders

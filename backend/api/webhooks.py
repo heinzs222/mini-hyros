@@ -22,6 +22,7 @@ from fastapi import APIRouter, Request, HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from attributionops.config import default_db_path
 from attributionops.db import connect
+from attributionops.util import invalidate_table_columns
 from attributionops.schema import (
     ensure_customer_identities,
     ensure_order_semantics,
@@ -160,6 +161,8 @@ def _run_tracking_schema(db_path: str) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_conversions_customer_key ON conversions(customer_key)")
         ensure_customer_identities(conn)
         conn.commit()
+    # Column sets are cached for reads; this may have just added one.
+    invalidate_table_columns(db_path)
 
 
 def _record_identity(

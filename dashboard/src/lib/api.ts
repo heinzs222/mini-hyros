@@ -557,6 +557,17 @@ export async function connectGhl(payload: { api_token: string; location_id: stri
   return res.json();
 }
 
+// ── CRM identities ────────────────────────────────────────────────────────────
+export async function backfillIdentities(params: { start_date?: string; end_date?: string } = {}) {
+  const sp = new URLSearchParams();
+  if (params.start_date) sp.set("start_date", params.start_date);
+  if (params.end_date) sp.set("end_date", params.end_date);
+  const url = `${API_BASE}/api/crm/backfill-identities${sp.toString() ? `?${sp.toString()}` : ""}`;
+  const res = await apiFetch(url, { method: "POST" });
+  if (!res.ok) throw new Error(`Identity backfill failed: ${res.status}`);
+  return res.json();
+}
+
 // ── Platform Auth ─────────────────────────────────────────────────────────────
 export async function fetchTikTokStatus(signal?: AbortSignal) {
   const res = await apiFetch(`${API_BASE}/api/platform-auth/tiktok/status`, {}, signal);

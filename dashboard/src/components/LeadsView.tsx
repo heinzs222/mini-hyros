@@ -5,6 +5,7 @@ import {
   RefreshCw,
   Download,
   Plus,
+  UserSearch,
   Search,
   SlidersHorizontal,
   Filter,
@@ -16,7 +17,7 @@ import {
   Check,
   Info,
 } from "lucide-react";
-import { fetchLeadJourneys, fetchRefundSummary } from "@/lib/api";
+import { fetchLeadJourneys, fetchRefundSummary, backfillIdentities } from "@/lib/api";
 import { formatMoney } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
 import CustomerProfileModal from "@/components/CustomerProfileModal";
@@ -166,6 +167,7 @@ function sortValue(r: LeadRow, key: SortKey): string | number {
 
 export default function LeadsView({ startDate, endDate }: Props) {
   const toast = useToast();
+  const [backfilling, setBackfilling] = useState(false);
   const [rows, setRows] = useState<LeadRow[]>([]);
   const [refundCount, setRefundCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -186,6 +188,42 @@ export default function LeadsView({ startDate, endDate }: Props) {
   // Monotonic request id: a newer load() supersedes any in-flight older one so a
   // slow older response can never overwrite newer rows (request race guard).
   const reqIdRef = useRef(0);
+
+  // Identities are recorded when a row is ingested, so anything imported before
+  // that existed still renders as its hash. This re-reads the sources for the
+  // last year and writes names/emails only — no orders, no conversions.
+  const runBackfill = async () => {
+    setBackfilling(true);
+    const toastId = toast.loading("Filling in names…", {
+      description: "Re-reading Stripe and GoHighLevel for the last year.",
+    });
+    try {
+      const res = await backfillIdentities();
+      const written = Number(res?.written || 0);
+      const failures = Object.entries<any>(res?.sources || {})
+        .filter(([, info]) => info?.error || info?.skipped)
+        .map(([name, info]) => `${name}: ${info.error || info.reason}`);
+      toast.update(toastId, {
+        type: written > 0 ? "success" : "info",
+        title: written > 0 ? `Matched ${written} customer${written === 1 ? "" : "s"}` : "No new names found",
+        description: failures.length
+          ? failures.join("\n")
+          : written > 0
+            ? "Names and emails now show for these rows."
+            : "Stripe and GoHighLevel returned nothing new for this window.",
+        duration: failures.length ? 12000 : 6000,
+      });
+      await load();
+    } catch (e: any) {
+      toast.update(toastId, {
+        type: "error",
+        title: "Could not fill in names",
+        description: e?.message || "Request failed.",
+      });
+    } finally {
+      setBackfilling(false);
+    }
+  };
 
   const load = async (signal?: AbortSignal) => {
     const myId = ++reqIdRef.current;
@@ -409,6 +447,14 @@ export default function LeadsView({ startDate, endDate }: Props) {
             title="Refresh"
           >
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+          </button>
+          <button
+            onClick={runBackfill}
+            disabled={backfilling}
+            className="flex h-9 items-center gap-1.5 rounded-[10px] border border-[#20202b] bg-[#121219] px-3.5 text-[12.5px] font-semibold text-[#9aa0ad] hover:text-[#eceef4] disabled:opacity-40"
+            title="Re-read Stripe and GoHighLevel to fill in names and emails for rows already imported"
+          >
+            <UserSearch size={13} /> {backfilling ? "Filling in names…" : "Fill in names"}
           </button>
           <button
             onClick={exportCsv}
