@@ -147,3 +147,80 @@ def test_exp_decay_weight_nonpositive_half_life_returns_one():
 def test_exp_decay_weight_matches_formula():
     lam = math.log(2.0) / 7.0
     assert exp_decay_weight(3.0, half_life_days=7.0) == pytest.approx(math.exp(-lam * 3.0))
+
+
+# ── Schema column cache ───────────────────────────────────────────────────────
+# One report asks for the columns of the same four tables nine times. On SQLite
+# a PRAGMA is free; on Postgres each is translated into an information_schema
+# query and costs a network round trip on the critical path of every report.
+
+def test_repeated_column_lookups_hit_the_cache(empty_db, monkeypatch):
+    from attributionops import util
+
+    util.invalidate_table_columns()
+    calls: list[str] = []
+    real_query = util.query
+
+    def counting(db_path, sql, params=None):
+        calls.append(sql)
+        return real_query(db_path, sql, params)
+
+    monkeypatch.setattr(util, "query", counting)
+
+    first = util.table_columns(empty_db, "orders")
+    for _ in range(5):
+        assert util.table_columns(empty_db, "orders") == first
+    assert len(calls) == 1
+    assert "order_id" in first
+
+
+def test_each_table_is_cached_separately(empty_db, monkeypatch):
+    from attributionops import util
+
+    util.invalidate_table_columns()
+    calls: list[str] = []
+    real_query = util.query
+    monkeypatch.setattr(
+        util, "query",
+        lambda db, sql, params=None: (calls.append(sql), real_query(db, sql, params))[1],
+    )
+
+    util.table_columns(empty_db, "orders")
+    util.table_columns(empty_db, "conversions")
+    util.table_columns(empty_db, "orders")
+    assert len(calls) == 2
+
+
+def test_a_writer_can_invalidate_after_adding_a_column(empty_db, monkeypatch):
+    import sqlite3
+
+    from attributionops import util
+
+    util.invalidate_table_columns()
+    assert "backfilled_col" not in util.table_columns(empty_db, "orders")
+
+    with sqlite3.connect(empty_db) as conn:
+        conn.execute("ALTER TABLE orders ADD COLUMN backfilled_col TEXT DEFAULT ''")
+        conn.commit()
+
+    # Still cached — that is the point of the cache.
+    assert "backfilled_col" not in util.table_columns(empty_db, "orders")
+    util.invalidate_table_columns(empty_db)
+    assert "backfilled_col" in util.table_columns(empty_db, "orders")
+
+
+def test_caching_can_be_disabled(empty_db, monkeypatch):
+    from attributionops import util
+
+    util.invalidate_table_columns()
+    monkeypatch.setattr(util, "_SCHEMA_CACHE_TTL", 0.0)
+    calls: list[str] = []
+    real_query = util.query
+    monkeypatch.setattr(
+        util, "query",
+        lambda db, sql, params=None: (calls.append(sql), real_query(db, sql, params))[1],
+    )
+
+    util.table_columns(empty_db, "orders")
+    util.table_columns(empty_db, "orders")
+    assert len(calls) == 2

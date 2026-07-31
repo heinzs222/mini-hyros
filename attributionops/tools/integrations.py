@@ -12,22 +12,34 @@ def integrations_status(db_path: str) -> dict[str, object]:
     ).rows
     table_names = [t["name"] for t in tables]
 
-    def _max_ts(table: str, col: str) -> str | None:
-        if table not in table_names:
-            return None
-        rows = query(db_path, f"SELECT MAX({col}) AS max_ts FROM {table};").rows
-        max_ts = (rows[0] or {}).get("max_ts")
-        if not max_ts:
-            return None
-        _ = parse_iso_ts(str(max_ts))
-        return str(max_ts)
+    # These six MAX() lookups were six separate statements. Against a warehouse
+    # on the other end of a network that is six round trips on the critical path
+    # of every report, for six scalars — one UNION ALL fetches them together.
+    wanted = (
+        ("sessions_last_ts", "sessions", "ts"),
+        ("touchpoints_last_ts", "touchpoints", "ts"),
+        ("orders_last_ts", "orders", "ts"),
+        ("conversions_last_ts", "conversions", "ts"),
+        ("spend_last_date", "spend", "date"),
+        ("reported_value_last_date", "reported_value", "date"),
+    )
+    available = [item for item in wanted if item[1] in table_names]
+    maxima: dict[str, str | None] = {label: None for label, _, _ in wanted}
+    if available:
+        union = " UNION ALL ".join(
+            f"SELECT '{label}' AS label, MAX({col}) AS value FROM {table}"
+            for label, table, col in available
+        )
+        for row in query(db_path, union).rows:
+            value = row.get("value")
+            maxima[str(row.get("label") or "")] = str(value) if value else None
 
-    def _max_date(table: str, col: str) -> str | None:
-        if table not in table_names:
+    def _max_ts(label: str) -> str | None:
+        value = maxima.get(label)
+        if not value:
             return None
-        rows = query(db_path, f"SELECT MAX({col}) AS max_date FROM {table};").rows
-        max_date = (rows[0] or {}).get("max_date")
-        return str(max_date) if max_date else None
+        _ = parse_iso_ts(value)
+        return value
 
     def _spend_platforms() -> dict[str, dict[str, object]]:
         if "spend" not in table_names:
@@ -62,14 +74,14 @@ def integrations_status(db_path: str) -> dict[str, object]:
             "tables": table_names,
         },
         "tracking": {
-            "sessions_last_ts": _max_ts("sessions", "ts"),
-            "touchpoints_last_ts": _max_ts("touchpoints", "ts"),
-            "orders_last_ts": _max_ts("orders", "ts"),
-            "conversions_last_ts": _max_ts("conversions", "ts"),
+            "sessions_last_ts": _max_ts("sessions_last_ts"),
+            "touchpoints_last_ts": _max_ts("touchpoints_last_ts"),
+            "orders_last_ts": _max_ts("orders_last_ts"),
+            "conversions_last_ts": _max_ts("conversions_last_ts"),
         },
         "ads": {
-            "spend_last_date": _max_date("spend", "date"),
-            "reported_value_last_date": _max_date("reported_value", "date"),
+            "spend_last_date": maxima.get("spend_last_date"),
+            "reported_value_last_date": maxima.get("reported_value_last_date"),
             "platforms": _spend_platforms(),
         },
         "notes": [

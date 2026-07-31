@@ -4,6 +4,8 @@ import json
 import math
 import os
 import re
+import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -251,11 +253,47 @@ def exp_decay_weight(delta_days: float, half_life_days: float = 7.0) -> float:
 
 
 # ── Warehouse schema helpers ─────────────────────────────────────────────────
+# One report asks for the columns of the same four tables nine times over.
+# Against SQLite a PRAGMA is free; against Postgres each one is translated into
+# an information_schema query and costs a network round trip, which is the
+# dominant cost of a report served from a different region than its warehouse.
+# Columns are only ever added (by a sync's ALTER), so a short TTL bounds how
+# long a reader can miss a new one, and the writers invalidate directly.
+_SCHEMA_CACHE_TTL = float(os.environ.get("SCHEMA_CACHE_TTL", "300") or 0)
+_schema_cache_lock = threading.Lock()
+_schema_cache: dict[tuple[str, str], tuple[float, set[str]]] = {}
+
+
+def invalidate_table_columns(db_path: str | None = None) -> None:
+    """Forget cached column sets after DDL adds a column."""
+    with _schema_cache_lock:
+        if db_path is None:
+            _schema_cache.clear()
+            return
+        for key in [k for k in _schema_cache if k[0] == str(db_path)]:
+            _schema_cache.pop(key, None)
+
+
 def table_columns(db_path: str, table: str) -> set[str]:
+    key = (str(db_path), str(table))
+    if _SCHEMA_CACHE_TTL > 0:
+        with _schema_cache_lock:
+            hit = _schema_cache.get(key)
+        if hit and (time.time() - hit[0]) < _SCHEMA_CACHE_TTL:
+            return set(hit[1])
+
     try:
-        return {str(r.get("name") or "") for r in query(db_path, f"PRAGMA table_info({table})").rows}
+        columns = {
+            str(r.get("name") or "")
+            for r in query(db_path, f"PRAGMA table_info({table})").rows
+        }
     except Exception:
         return set()
+
+    if _SCHEMA_CACHE_TTL > 0 and columns:
+        with _schema_cache_lock:
+            _schema_cache[key] = (time.time(), set(columns))
+    return columns
 
 
 def session_identity_agg_exprs(session_cols: set[str]) -> tuple[str, str]:

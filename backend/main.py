@@ -53,6 +53,7 @@ from backend import report_cache as report_cache_store
 from backend.api.webhooks import router as webhooks_router
 from backend.api.video_metrics import router as video_router
 from backend.api.connections import router as connections_router
+from backend.api.identities import router as identities_router
 from backend.api.ghl import router as ghl_router
 from backend.api.capi import router as capi_router
 from backend.api.ltv import router as ltv_router
@@ -299,6 +300,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.include_router(webhooks_router, prefix="/api/webhooks", tags=["webhooks"])
 app.include_router(video_router, prefix="/api/video", tags=["video"])
 app.include_router(connections_router, prefix="/api/connections", tags=["connections"])
+app.include_router(identities_router, prefix="/api/crm", tags=["crm"])
 app.include_router(ghl_router, prefix="/api/webhooks", tags=["ghl"])
 app.include_router(capi_router, prefix="/api/capi", tags=["capi"])
 app.include_router(ltv_router, prefix="/api/ltv", tags=["ltv"])
