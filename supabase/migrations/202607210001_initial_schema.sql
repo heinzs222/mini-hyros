@@ -211,6 +211,16 @@ create table if not exists public.platform_tokens (
   updated_at text
 );
 
+-- Finished report payloads, shared across server instances. A serverless
+-- instance is rarely the same process twice, so an in-memory cache alone means
+-- almost every request rebuilds a report another instance already built.
+create table if not exists public.report_cache (
+  key text primary key,
+  payload text not null,
+  built_at timestamptz not null default now(),
+  expires_at timestamptz not null
+);
+
 create table if not exists public.stripe_sync_coverage (
   start_date text not null,
   end_date text not null,
@@ -292,6 +302,7 @@ create index if not exists idx_reported_value_date on public.reported_value (dat
 create index if not exists idx_reported_value_platform_date on public.reported_value (platform, date);
 create index if not exists idx_refund_log_order_ts on public.refund_log (order_id, ts);
 create index if not exists idx_refund_log_ts on public.refund_log (ts);
+create index if not exists idx_report_cache_expires_at on public.report_cache (expires_at);
 create index if not exists idx_customer_identities_email on public.customer_identities (email);
 create index if not exists idx_capi_log_order_status on public.capi_log (order_id, status);
 create index if not exists idx_capi_log_platform_status on public.capi_log (platform, status);
@@ -318,6 +329,7 @@ alter table public.video_metrics enable row level security;
 alter table public.campaign_settings enable row level security;
 alter table public.refund_log enable row level security;
 alter table public.customer_identities enable row level security;
+alter table public.report_cache enable row level security;
 alter table public.platform_tokens enable row level security;
 alter table public.stripe_sync_coverage enable row level security;
 alter table public.capi_log enable row level security;

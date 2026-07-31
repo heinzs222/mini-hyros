@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import json
 import logging
@@ -48,6 +49,7 @@ from attributionops.tools.tracking import tracking_health_check
 from attributionops.tools.forecasting import forecasting_run
 from attributionops.tools.warehouse import warehouse_query
 
+from backend import report_cache as report_cache_store
 from backend.api.webhooks import router as webhooks_router
 from backend.api.video_metrics import router as video_router
 from backend.api.connections import router as connections_router
@@ -423,22 +425,34 @@ def _cache_ttl_for_window(end_date: str) -> float:
     return _REPORT_CACHE_TTL
 
 
+def _shared_cache_key(key: tuple) -> str:
+    """Stable text form of the in-memory cache key, for the warehouse store."""
+    return hashlib.sha256(
+        json.dumps([str(part) for part in key], separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _report_cache_get(key: tuple, db_path: str):
     if _REPORT_CACHE_TTL <= 0:
         return None
     with _report_cache_lock:
         hit = _report_cache.get(key)
-    if not hit:
-        return None
-    put_at, ttl, stamp, value = hit
-    if (time.time() - put_at) >= ttl:
-        return None
-    if stamp != _db_write_stamp(db_path):
-        # Warehouse changed since this was built (sync/webhook/import) — drop it.
+    if hit:
+        put_at, ttl, stamp, value = hit
+        if (time.time() - put_at) < ttl and stamp == _db_write_stamp(db_path):
+            return value
         with _report_cache_lock:
             _report_cache.pop(key, None)
-        return None
-    return value
+
+    # This process has not built it — but on serverless another instance very
+    # likely has, and rebuilding is seconds of work.
+    shared = report_cache_store.get(db_path, _shared_cache_key(key))
+    if shared is not None:
+        with _report_cache_lock:
+            _report_cache[key] = (
+                time.time(), _REPORT_CACHE_TTL, _db_write_stamp(db_path), shared,
+            )
+    return shared
 
 
 def _report_cache_put(key: tuple, value: Any, *, db_path: str, end_date: str) -> None:
@@ -455,6 +469,7 @@ def _report_cache_put(key: tuple, value: Any, *, db_path: str, end_date: str) ->
                 k for k, v in _report_cache.items() if (now - v[0]) >= v[1]
             ]:
                 _report_cache.pop(k, None)
+    report_cache_store.put(db_path, _shared_cache_key(key), value, ttl)
 
 
 def _default_dates() -> tuple[str, str]:
@@ -575,6 +590,10 @@ async def cron_sync(request: Request):
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     try:
         result = await _run_scheduled_sync()
+        # A sync rewrites the numbers every cached report was built from, and
+        # historical windows cache for hours — drop them so the next view is
+        # built from what just landed.
+        await asyncio.to_thread(report_cache_store.clear, _db())
         return {"status": "ok", "result": result}
     except Exception as exc:
         logging.getLogger("vigil.cron").exception("cron sync failed")
