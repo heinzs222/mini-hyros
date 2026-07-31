@@ -273,3 +273,18 @@ def test_no_real_network_on_analytics_calls(client, api_db):
         assert client.get("/api/platforms").status_code == 200
         assert client.get("/api/integrations").status_code == 200
         assert client.get("/api/tracking").status_code == 200
+
+
+def test_health_reports_the_running_build(client, api_db, monkeypatch):
+    """The dashboard and the API deploy as separate projects from one repo, so
+    they drift — an endpoint can 404 purely because the API has not redeployed.
+    Reading the commit off /api/health answers that in one request."""
+    monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", "abcdef1234567890abcdef")
+    body = client.get("/api/health").json()
+    assert body["commit"] == "abcdef123456"
+
+
+def test_health_omits_the_commit_when_the_platform_does_not_supply_one(client, api_db, monkeypatch):
+    for var in ("VERCEL_GIT_COMMIT_SHA", "RENDER_GIT_COMMIT", "GIT_COMMIT_SHA"):
+        monkeypatch.delenv(var, raising=False)
+    assert "commit" not in client.get("/api/health").json()

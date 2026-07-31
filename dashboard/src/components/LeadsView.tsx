@@ -215,10 +215,16 @@ export default function LeadsView({ startDate, endDate }: Props) {
       });
       await load();
     } catch (e: any) {
+      const message = String(e?.message || "Request failed.");
       toast.update(toastId, {
         type: "error",
         title: "Could not fill in names",
-        description: e?.message || "Request failed.",
+        // The dashboard and the API deploy as separate projects, so the button
+        // can ship before the endpoint it calls exists.
+        description: message.includes("404")
+          ? "The API does not have this endpoint yet — redeploy the API project, then try again."
+          : message,
+        duration: 12000,
       });
     } finally {
       setBackfilling(false);
