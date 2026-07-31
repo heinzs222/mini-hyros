@@ -242,3 +242,64 @@ def test_reported_value_invalid_breakdown_raises(reported_db):
     with pytest.raises(ValueError, match="breakdown must be one of"):
         ads_get_reported_value(reported_db, platform="all", start_date=JAN, end_date=JAN_END,
                                breakdown="nope", conversion_type="Purchase")
+
+
+# ── Per-build read memo ───────────────────────────────────────────────────────
+# One report reads the same spend window three times (summary, selected
+# breakdown, day series). Inside a scope that read happens once.
+
+def _count_spend_reads(db_path, monkeypatch):
+    import attributionops.tools.ads as ads_mod
+
+    calls = []
+    original = ads_mod._load_spend_rows
+
+    def counting(db, platform, start_date, end_date):
+        calls.append((platform, start_date, end_date))
+        return original(db, platform, start_date, end_date)
+
+    monkeypatch.setattr(ads_mod, "_load_spend_rows", counting)
+    return calls
+
+
+def test_spend_reads_repeat_without_a_scope(spend_db, monkeypatch):
+    calls = _count_spend_reads(spend_db, monkeypatch)
+    for breakdown in ("platform", "campaign", "day"):
+        ads_get_spend(spend_db, platform="all", start_date=JAN, end_date=JAN_END, breakdown=breakdown)
+    assert len(calls) == 3
+
+
+def test_a_scope_reads_each_window_once(spend_db, monkeypatch):
+    from attributionops.tools.ads import spend_read_scope
+
+    calls = _count_spend_reads(spend_db, monkeypatch)
+    with spend_read_scope():
+        results = {
+            breakdown: ads_get_spend(
+                spend_db, platform="all", start_date=JAN, end_date=JAN_END, breakdown=breakdown
+            )
+            for breakdown in ("platform", "campaign", "day")
+        }
+        # A different window is a different read.
+        ads_get_spend(spend_db, platform="all", start_date="2025-01-01", end_date="2025-12-31", breakdown="day")
+        # As is a platform-filtered read.
+        ads_get_spend(spend_db, platform="meta", start_date=JAN, end_date=JAN_END, breakdown="day")
+
+    assert len(calls) == 3
+    # Sharing the rows must not corrupt the aggregates each breakdown produces.
+    assert {r["name"] for r in results["platform"]["rows"]} == {"meta", "google"}
+    assert {r["name"] for r in results["day"]["rows"]} == {"2026-01-10", "2026-01-11"}
+    assert sum(r["cost"] for r in results["platform"]["rows"]) == pytest.approx(
+        sum(r["cost"] for r in results["campaign"]["rows"])
+    )
+
+
+def test_the_memo_does_not_outlive_the_scope(spend_db, monkeypatch):
+    from attributionops.tools.ads import spend_read_scope
+
+    calls = _count_spend_reads(spend_db, monkeypatch)
+    with spend_read_scope():
+        ads_get_spend(spend_db, platform="all", start_date=JAN, end_date=JAN_END, breakdown="day")
+    with spend_read_scope():
+        ads_get_spend(spend_db, platform="all", start_date=JAN, end_date=JAN_END, breakdown="day")
+    assert len(calls) == 2

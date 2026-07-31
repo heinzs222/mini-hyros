@@ -2,10 +2,45 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 
 from attributionops.db import query
 from attributionops.tools.campaign_filter import excluded_campaign_keys, is_excluded
 from attributionops.util import parse_json, to_float, to_int
+
+
+# ── Per-build read memo ───────────────────────────────────────────────────────
+# One report calls ads_get_spend four times — summary, selected breakdown, day
+# series, lifetime alias scan — and three of them read the identical spend rows
+# for the same window, re-running the query and re-parsing every metadata blob.
+# Inside a scope those reads happen once. Outside one (CLI, tests, other API
+# endpoints) nothing is cached, so this can never serve a stale row across
+# requests.
+_read_scope = threading.local()
+
+
+@contextmanager
+def spend_read_scope() -> Iterator[None]:
+    """Memoize spend reads for the duration of one report build."""
+    if getattr(_read_scope, "cache", None) is not None:
+        yield  # already inside a scope — reuse it rather than nesting
+        return
+    _read_scope.cache = {}
+    try:
+        yield
+    finally:
+        _read_scope.cache = None
+
+
+def _scoped(key: tuple, build: Callable[[], Any]) -> Any:
+    cache = getattr(_read_scope, "cache", None)
+    if cache is None:
+        return build()
+    if key not in cache:
+        cache[key] = build()
+    return cache[key]
 
 
 def report_currency() -> str:
@@ -53,15 +88,10 @@ def ads_list_platforms(db_path: str) -> dict[str, object]:
     return {"platforms": platforms}
 
 
-def ads_get_spend(
-    db_path: str,
-    *,
-    platform: str | None,
-    start_date: str,
-    end_date: str,
-    breakdown: str,
-) -> dict[str, object]:
-    breakdown = breakdown.lower().strip()
+def _load_spend_rows(
+    db_path: str, platform: str | None, start_date: str, end_date: str
+) -> list[dict[str, Any]]:
+    """Read the window's spend rows with metadata parsed and metrics coerced."""
     platform_filter = ""
     params = {"start_date": start_date, "end_date": end_date}
     if platform and platform.lower() != "all":
@@ -76,7 +106,7 @@ def ads_get_spend(
     }
     currency_select = "currency" if "currency" in spend_columns else "'' AS currency"
 
-    rows = query(
+    raw = query(
         db_path,
         f"""
         SELECT
@@ -89,10 +119,44 @@ def ads_get_spend(
         params,
     ).rows
 
+    return [
+        {
+            "platform": str(r.get("platform") or ""),
+            "date": str(r.get("date") or ""),
+            "account_id": str(r.get("account_id") or ""),
+            "campaign_id": str(r.get("campaign_id") or ""),
+            "adset_id": str(r.get("adset_id") or ""),
+            "ad_id": str(r.get("ad_id") or ""),
+            "creative_id": str(r.get("creative_id") or ""),
+            "clicks": to_int(r.get("clicks")),
+            "cost": to_float(r.get("cost")),
+            "impressions": to_int(r.get("impressions")),
+            "metadata": parse_json(r.get("metadata")),
+            "currency": str(r.get("currency") or "").strip().upper(),
+        }
+        for r in raw
+    ]
+
+
+def ads_get_spend(
+    db_path: str,
+    *,
+    platform: str | None,
+    start_date: str,
+    end_date: str,
+    breakdown: str,
+) -> dict[str, object]:
+    breakdown = breakdown.lower().strip()
+
+    rows = _scoped(
+        ("spend_rows", db_path, (platform or "all").lower(), start_date, end_date),
+        lambda: _load_spend_rows(db_path, platform, start_date, end_date),
+    )
+
     # Read-time exclusion: campaigns flagged tracked=0 are dropped before any
     # aggregation, so excluded campaigns disappear from spend totals AND every
     # breakdown this serves (day/platform/campaign/etc.).
-    excluded = excluded_campaign_keys(db_path)
+    excluded = _scoped(("excluded", db_path), lambda: excluded_campaign_keys(db_path))
 
     # Read-time FX conversion: spend rows store raw platform-billing-currency
     # cost. Rows whose currency is known and differs from REPORT_CURRENCY are
@@ -105,14 +169,14 @@ def ads_get_spend(
     agg: dict[tuple[str, ...], dict[str, object]] = {}
 
     for r in rows:
-        p = str(r.get("platform") or "")
-        d = str(r.get("date") or "")
-        account_id = str(r.get("account_id") or "")
-        campaign_id = str(r.get("campaign_id") or "")
-        adset_id = str(r.get("adset_id") or "")
-        ad_id = str(r.get("ad_id") or "")
-        creative_id = str(r.get("creative_id") or "")
-        md = parse_json(r.get("metadata"))
+        p = r["platform"]
+        d = r["date"]
+        account_id = r["account_id"]
+        campaign_id = r["campaign_id"]
+        adset_id = r["adset_id"]
+        ad_id = r["ad_id"]
+        creative_id = r["creative_id"]
+        md = r["metadata"]
 
         if is_excluded(excluded, p, campaign_id):
             continue
@@ -142,11 +206,11 @@ def ads_get_spend(
         else:
             raise ValueError("breakdown must be one of: day, platform, traffic_source, ad_account, campaign, ad_set, ad")
 
-        clicks = to_int(r.get("clicks"))
-        cost = to_float(r.get("cost"))
-        impressions = to_int(r.get("impressions"))
+        clicks = r["clicks"]
+        cost = r["cost"]
+        impressions = r["impressions"]
 
-        currency = str(r.get("currency") or "").strip().upper()
+        currency = r["currency"]
         rate = fx_rates.get(currency) if currency and currency != report_ccy else None
         bucket = spend_by_currency.setdefault(
             currency, {"cost": 0.0, "converted": rate is not None, "rate": rate}

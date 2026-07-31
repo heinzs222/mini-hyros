@@ -257,6 +257,8 @@ create index if not exists idx_sessions_session_id on public.sessions (session_i
 create index if not exists idx_sessions_visitor_id on public.sessions (visitor_id);
 create index if not exists idx_sessions_customer_key on public.sessions (customer_key);
 create index if not exists idx_sessions_ts on public.sessions (ts);
+-- Covers the landing-page visit breakdown over a date window.
+create index if not exists idx_sessions_ts_landing_session on public.sessions (ts, landing_page, session_id);
 
 create index if not exists idx_touchpoints_customer_ts on public.touchpoints (customer_key, ts);
 create index if not exists idx_touchpoints_session_id on public.touchpoints (session_id);
@@ -264,6 +266,8 @@ create index if not exists idx_touchpoints_visitor_id on public.touchpoints (vis
 create index if not exists idx_touchpoints_customer_key on public.touchpoints (customer_key);
 create index if not exists idx_touchpoints_ts on public.touchpoints (ts);
 create index if not exists idx_touchpoints_campaign_id on public.touchpoints (campaign_id);
+-- Covers the report's per-platform distinct-session count over a date window.
+create index if not exists idx_touchpoints_ts_platform_session on public.touchpoints (ts, platform, session_id);
 
 create unique index if not exists idx_orders_order_id_unique on public.orders (order_id);
 create index if not exists idx_orders_customer_key on public.orders (customer_key);

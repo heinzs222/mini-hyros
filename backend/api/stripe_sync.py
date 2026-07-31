@@ -7,6 +7,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -41,6 +42,10 @@ STRIPE_REFUNDS_URL = "https://api.stripe.com/v1/refunds"
 # Fee estimate used only when the real balance_transaction fee is unavailable.
 _FEE_RATE = 0.029
 _FEE_FIXED = 0.30
+
+# Per-charge refund lookups run concurrently; Stripe rate-limits at ~100 rps, so
+# stay well under that while still collapsing the serial round trips.
+_REFUND_FETCH_CONCURRENCY = 8
 
 
 def _db() -> str:
@@ -280,12 +285,22 @@ async def _fetch_stripe_charges(
         # ``amount_refunded`` is a lifetime scalar on the charge. Historical
         # reports also need each refund's creation time so a refund issued after
         # the selected window does not rewrite revenue inside that old window.
-        for charge in all_charges:
-            if int(charge.get("amount_refunded", 0) or 0) <= 0:
-                continue
-            charge["_mini_hyros_refunds"] = await _fetch_charge_refunds(
-                client, headers, charge
-            )
+        # These were fetched one charge at a time, which on a refund-heavy
+        # account added a full serial round trip per refunded charge.
+        refunded = [
+            charge for charge in all_charges
+            if int(charge.get("amount_refunded", 0) or 0) > 0
+        ]
+        if refunded:
+            gate = asyncio.Semaphore(_REFUND_FETCH_CONCURRENCY)
+
+            async def _load_refunds(charge: dict[str, Any]) -> None:
+                async with gate:
+                    charge["_mini_hyros_refunds"] = await _fetch_charge_refunds(
+                        client, headers, charge
+                    )
+
+            await asyncio.gather(*(_load_refunds(charge) for charge in refunded))
 
     # Return all successful charges — INCLUDING refunded/fully-refunded ones, so
     # their refund amount is recorded and net revenue is reduced correctly.

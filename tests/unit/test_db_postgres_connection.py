@@ -303,3 +303,85 @@ def test_query_over_postgres_maps_rows_and_redacts_label(fake_psycopg, monkeypat
     assert "hunter2" not in result.db_path
     assert dbmod.sql_rows(dsn, "SELECT COUNT(*) AS n FROM orders") == [{"n": 7}]
     assert list(dbmod.query_iter(dsn, "SELECT COUNT(*) AS n FROM orders")) == [{"n": 7}]
+
+
+# ── Idle connection pool ─────────────────────────────────────────────────────
+# Assembling one report calls connect() ~50 times. Against Postgres each of
+# those used to be a fresh TCP + TLS + auth handshake, so connection setup
+# dominated the response time; connect() now parks and reuses them per thread.
+
+@pytest.fixture(autouse=True)
+def _clean_pool():
+    dbmod.close_pooled_connections()
+    yield
+    dbmod.close_pooled_connections()
+
+
+DSN = "postgresql://u:p@h/db"
+
+
+def test_connect_reuses_a_parked_connection(fake_psycopg):
+    with dbmod.connect(DSN) as first:
+        first_raw = first.raw
+    with dbmod.connect(DSN) as second:
+        assert second.raw is first_raw
+
+    # One handshake for two sequential uses.
+    assert len(fake_psycopg) == 1
+    assert first_raw.closed is False
+
+
+def test_overlapping_connections_never_share_a_socket(fake_psycopg):
+    with dbmod.connect(DSN) as outer:
+        with dbmod.connect(DSN) as inner:
+            assert inner.raw is not outer.raw
+    assert len(fake_psycopg) == 2
+
+
+def test_released_connection_is_committed_not_closed(fake_psycopg):
+    with dbmod.connect(DSN) as conn:
+        conn.execute("SELECT 1 FROM orders")
+    raw = fake_psycopg[0]
+    assert raw.committed == 1
+    assert raw.closed is False
+
+
+def test_failed_block_rolls_back_before_reuse(fake_psycopg):
+    with pytest.raises(RuntimeError):
+        with dbmod.connect(DSN) as conn:
+            conn.execute("SELECT 1 FROM orders")
+            raise RuntimeError("boom")
+
+    raw = fake_psycopg[0]
+    assert raw.rolledback >= 1
+    # Still healthy, so it goes back to the pool rather than being discarded.
+    with dbmod.connect(DSN) as conn:
+        assert conn.raw is raw
+
+
+def test_pool_is_capped_so_idle_sockets_cannot_pile_up(fake_psycopg, monkeypatch):
+    monkeypatch.setattr(dbmod, "_POOL_SIZE", 1)
+
+    outer = dbmod.connect(DSN)
+    inner = dbmod.connect(DSN)
+    outer.close()
+    inner.close()
+
+    # The first release parks; the second exceeds the cap and is closed.
+    assert [raw.closed for raw in fake_psycopg].count(True) == 1
+
+
+def test_a_closed_connection_is_not_handed_back_out(fake_psycopg):
+    with dbmod.connect(DSN) as conn:
+        pass
+    fake_psycopg[0].closed = True
+
+    with dbmod.connect(DSN) as replacement:
+        assert replacement.raw is fake_psycopg[1]
+
+
+def test_pooling_can_be_disabled(fake_psycopg, monkeypatch):
+    monkeypatch.setattr(dbmod, "_POOL_SIZE", 0)
+    with dbmod.connect(DSN) as conn:
+        pass
+    assert fake_psycopg[0].closed is True

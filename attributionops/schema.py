@@ -462,6 +462,34 @@ def ensure_refund_log(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_refund_log_ts ON refund_log(ts)")
 
 
+def ensure_report_indexes(conn: sqlite3.Connection, tables: set[str] | None = None) -> None:
+    """Cover the report's two heaviest scans with composite indexes.
+
+    Both count distinct sessions over a date window and group by a second
+    column; with only the single-column ``ts`` index they read every matching
+    row from the table. Ordering the index ts-first keeps the range scan and
+    makes the grouping column and session id available without touching the
+    table.
+    """
+    if tables is None:
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    if "touchpoints" in tables:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_touchpoints_ts_platform_session "
+            "ON touchpoints(ts, platform, session_id)"
+        )
+    if "sessions" in tables:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_ts_landing_session "
+            "ON sessions(ts, landing_page, session_id)"
+        )
+
+
 def apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply all idempotent schema upgrades on an open connection."""
     tables = {
@@ -490,6 +518,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
     ensure_campaign_settings(conn)
     ensure_refund_log(conn)
     ensure_customer_identities(conn)
+    ensure_report_indexes(conn, tables)
 
 
 def _split_sql_statements(sql_text: str) -> list[str]:

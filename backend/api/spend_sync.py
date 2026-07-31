@@ -2189,26 +2189,27 @@ async def sync_spend(
         except Exception as exc:
             return {"synced": 0, "error": f"{label} sync failed: {exc}"}
 
+    # platform="all" used to await Meta, then Google, then TikTok in series, so
+    # the sync took as long as all three pulls added together even though they
+    # are independent HTTP calls to different vendors. Run them together and the
+    # wall time is the slowest one.
+    planned: list[tuple[str, str, Any]] = []
     if p in {"meta", "all"}:
-        meta_result = await run_platform("Meta", _sync_meta_spend(s, e))
-        results["platforms"]["meta"] = meta_result
-        results["synced"] += int(meta_result.get("synced", 0) or 0)
-        if meta_result.get("error"):
-            results["errors"].append(f"meta: {meta_result['error']}")
-
+        planned.append(("meta", "Meta", _sync_meta_spend(s, e)))
     if p in {"google", "all"}:
-        google_result = await run_platform("Google", _sync_google_spend(s, e))
-        results["platforms"]["google"] = google_result
-        results["synced"] += int(google_result.get("synced", 0) or 0)
-        if google_result.get("error"):
-            results["errors"].append(f"google: {google_result['error']}")
-
+        planned.append(("google", "Google", _sync_google_spend(s, e)))
     if p in {"tiktok", "all"}:
-        tiktok_result = await run_platform("TikTok", _sync_tiktok_spend(s, e))
-        results["platforms"]["tiktok"] = tiktok_result
-        results["synced"] += int(tiktok_result.get("synced", 0) or 0)
-        if tiktok_result.get("error"):
-            results["errors"].append(f"tiktok: {tiktok_result['error']}")
+        planned.append(("tiktok", "TikTok", _sync_tiktok_spend(s, e)))
+
+    outcomes = await asyncio.gather(
+        *(run_platform(label, coro) for _, label, coro in planned)
+    )
+
+    for (name, _label, _coro), result in zip(planned, outcomes):
+        results["platforms"][name] = result
+        results["synced"] += int(result.get("synced", 0) or 0)
+        if result.get("error"):
+            results["errors"].append(f"{name}: {result['error']}")
 
     return results
 
