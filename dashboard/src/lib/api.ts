@@ -159,7 +159,7 @@ export async function logout() {
   return res.json();
 }
 
-export async function fetchReport(params: {
+export type ReportParams = {
   start_date?: string;
   end_date?: string;
   model?: string;
@@ -168,7 +168,17 @@ export async function fetchReport(params: {
   conversion_type?: string;
   use_click_date?: boolean;
   no_cache?: boolean;
-}, signal?: AbortSignal) {
+};
+
+// Switching tabs re-requests the whole report, and a rebuild costs seconds —
+// so every click back to a tab you already looked at used to sit on a spinner
+// for the full round trip. Completed reports are kept here and served
+// instantly while a fresh copy is fetched in the background.
+const reportCache = new Map<string, { payload: any; fetchedAt: number }>();
+const REPORT_CACHE_MAX_AGE_MS = 5 * 60_000;
+const REPORT_CACHE_MAX_ENTRIES = 40;
+
+function reportUrl(params: ReportParams): string {
   const sp = new URLSearchParams();
   if (params.start_date) sp.set("start_date", params.start_date);
   if (params.end_date) sp.set("end_date", params.end_date);
@@ -179,9 +189,41 @@ export async function fetchReport(params: {
   if (params.conversion_type) sp.set("conversion_type", params.conversion_type);
   if (params.use_click_date) sp.set("use_click_date", "true");
   if (params.no_cache) sp.set("no_cache", "true");
-  const res = await apiFetch(`${API_BASE}/api/report?${sp.toString()}`, {}, signal);
+  return `${API_BASE}/api/report?${sp.toString()}`;
+}
+
+/** Cache key ignores no_cache: a forced refresh replaces the cached entry. */
+function reportCacheKey(params: ReportParams): string {
+  return reportUrl({ ...params, no_cache: false });
+}
+
+/** A previously-loaded report for these params, if it is still fresh enough. */
+export function getCachedReport(params: ReportParams): any | null {
+  const hit = reportCache.get(reportCacheKey(params));
+  if (!hit) return null;
+  if (Date.now() - hit.fetchedAt > REPORT_CACHE_MAX_AGE_MS) {
+    reportCache.delete(reportCacheKey(params));
+    return null;
+  }
+  return hit.payload;
+}
+
+/** Drop every cached report — call after a sync or import changes the data. */
+export function clearReportCache(): void {
+  reportCache.clear();
+}
+
+export async function fetchReport(params: ReportParams, signal?: AbortSignal) {
+  const res = await apiFetch(reportUrl(params), {}, signal);
   if (!res.ok) throw new ApiError(`Report fetch failed: ${res.status}`, res.status);
-  return res.json();
+  const payload = await res.json();
+
+  reportCache.set(reportCacheKey(params), { payload, fetchedAt: Date.now() });
+  if (reportCache.size > REPORT_CACHE_MAX_ENTRIES) {
+    const oldest = reportCache.keys().next();
+    if (!oldest.done) reportCache.delete(oldest.value);
+  }
+  return payload;
 }
 
 export async function fetchChildren(params: {

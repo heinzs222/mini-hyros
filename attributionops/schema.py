@@ -18,11 +18,14 @@ per process+path so the app pays the cost at most once per database.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
 import threading
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from attributionops.db import connect, is_postgres_dsn
 
@@ -549,11 +552,68 @@ def _split_sql_statements(sql_text: str) -> list[str]:
     return statements
 
 
+_SCHEMA_STATE_TABLE = "public.schema_state"
+
+
+def _schema_fingerprint(schema_text: str) -> str:
+    return hashlib.sha256(schema_text.encode("utf-8")).hexdigest()[:32]
+
+
+def _applied_schema_fingerprint(conn: Any) -> str:
+    """Return the fingerprint of the schema already applied, or ''.
+
+    Uses ``to_regclass`` rather than a plain SELECT so a warehouse that predates
+    the marker table answers with NULL instead of raising and poisoning the
+    transaction.
+    """
+    try:
+        row = conn.execute(
+            f"SELECT to_regclass('{_SCHEMA_STATE_TABLE}') IS NOT NULL AS present"
+        ).fetchone()
+        present = bool(row["present"] if isinstance(row, Mapping) else row[0])
+        if not present:
+            return ""
+        row = conn.execute(
+            f"SELECT value FROM {_SCHEMA_STATE_TABLE} WHERE key = 'initial_schema'"
+        ).fetchone()
+        if row is None:
+            return ""
+        return str((row["value"] if isinstance(row, Mapping) else row[0]) or "")
+    except Exception:
+        return ""
+
+
 def _ensure_postgres_schema(database_url: str) -> None:
+    """Apply the Postgres schema, skipping the replay when it is already current.
+
+    Every statement in the schema file is `IF NOT EXISTS`, so replaying it was
+    harmless — but it is 40-odd round trips to the warehouse, and it ran on
+    every cold start of a serverless instance, delaying the first request of
+    each one. The fingerprint check costs two queries instead.
+    """
     schema_text = _POSTGRES_SCHEMA.read_text(encoding="utf-8")
+    fingerprint = _schema_fingerprint(schema_text)
+
     with connect(database_url) as conn:
+        if _applied_schema_fingerprint(conn) == fingerprint:
+            return
+
         for statement in _split_sql_statements(schema_text):
             conn.execute(statement)
+        conn.execute(
+            f"""CREATE TABLE IF NOT EXISTS {_SCHEMA_STATE_TABLE} (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )"""
+        )
+        conn.execute(
+            f"""INSERT INTO {_SCHEMA_STATE_TABLE} (key, value, updated_at)
+                VALUES ('initial_schema', %s, now())
+                ON CONFLICT (key) DO UPDATE
+                    SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at""",
+            (fingerprint,),
+        )
         conn.commit()
 
 

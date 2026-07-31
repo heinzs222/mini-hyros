@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
-import { fetchReport, createLivePoller, fetchAuthMe, logout as logoutApi, syncSpend, syncStripe, syncGhl, type LiveConnection } from "@/lib/api";
+import { fetchReport, getCachedReport, clearReportCache, createLivePoller, fetchAuthMe, logout as logoutApi, syncSpend, syncStripe, syncGhl, type LiveConnection } from "@/lib/api";
 import { daysAgo, reportTodayIso, shiftIso } from "@/lib/utils";
 import Sidebar, { Section } from "@/components/Sidebar";
 import DateRangePicker from "@/components/DateRangePicker";
@@ -271,6 +271,7 @@ export default function DashboardPage() {
     // tick indefinitely: the dashboard sits on a spinner for half an hour with
     // no retry. Aborting here frees the guard so auto-refresh recovers.
     let deadlineHit = false;
+    let showedCached = false;
     const deadlineId = setTimeout(() => {
       deadlineHit = true;
       abortController.abort();
@@ -290,8 +291,21 @@ export default function DashboardPage() {
         no_cache: opts?.fresh === true,
       };
 
-      setLoading(true);
-      setError(null);
+      // A report already loaded this session renders immediately while the
+      // fresh copy is fetched behind it. Without this, every tab switch and
+      // every step back to a tab already seen blanks the screen for the whole
+      // rebuild, which is what made the dashboard feel unusable.
+      if (opts?.fresh === true) clearReportCache();
+      const cached = opts?.fresh === true ? null : getCachedReport(primaryParams);
+      if (cached) {
+        showedCached = true;
+        setReport(cached);
+        setError(null);
+        setLoading(false);
+      } else {
+        setLoading(true);
+        setError(null);
+      }
 
       // Only the PRIMARY report is on the critical path. The comparison period
       // is fetched lazily by a separate effect once this has rendered, so the
@@ -312,7 +326,9 @@ export default function DashboardPage() {
         // Surface the timeout instead of silently spinning; the backend keeps
         // building server-side and caches the result, so the auto-refresh retry
         // (within 60s) usually lands instantly.
-        setError("Report request timed out after 75s — the backend may be waking up or under load. Retrying automatically…");
+        if (!showedCached) {
+          setError("Report request timed out after 75s — the backend may be waking up or under load. Retrying automatically…");
+        }
         return;
       }
       const status = typeof err?.status === "number" ? err.status : 0;
@@ -320,6 +336,8 @@ export default function DashboardPage() {
         router.replace("/login");
         return;
       }
+      // A failed background revalidation must not blank a report already shown.
+      if (showedCached) return;
       setError(err.message || "Failed to load report");
     } finally {
       clearTimeout(deadlineId);

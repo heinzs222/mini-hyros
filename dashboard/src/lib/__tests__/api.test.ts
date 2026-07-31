@@ -270,3 +270,50 @@ describe("syncStripe", () => {
     expect(url).toBe(`${API_BASE}/api/stripe/sync?start_date=2026-01-01`);
   });
 });
+
+describe("report cache", () => {
+  // Switching tabs re-requests the whole report and a rebuild costs seconds, so
+  // every step back to a tab already seen used to sit on a spinner.
+  beforeEach(async () => {
+    const { clearReportCache } = await import("@/lib/api");
+    clearReportCache();
+  });
+
+  const params = { start_date: "2026-01-01", end_date: "2026-01-31", active_tab: "campaign" };
+
+  it("serves a previously fetched report without another request", async () => {
+    const { getCachedReport } = await import("@/lib/api");
+    vi.stubGlobal("fetch", vi.fn(async () => makeResponse({ rows: [{ name: "meta" }] })));
+
+    expect(getCachedReport(params)).toBeNull();
+    await fetchReport(params);
+    expect(getCachedReport(params)).toEqual({ rows: [{ name: "meta" }] });
+  });
+
+  it("keys on the params, so another tab or window is a miss", async () => {
+    const { getCachedReport } = await import("@/lib/api");
+    vi.stubGlobal("fetch", vi.fn(async () => makeResponse({ rows: [] })));
+
+    await fetchReport(params);
+    expect(getCachedReport({ ...params, active_tab: "ad_set" })).toBeNull();
+    expect(getCachedReport({ ...params, end_date: "2026-02-01" })).toBeNull();
+  });
+
+  it("lets a forced refresh reuse the cache slot", async () => {
+    const { getCachedReport } = await import("@/lib/api");
+    vi.stubGlobal("fetch", vi.fn(async () => makeResponse({ rows: [{ name: "fresh" }] })));
+
+    await fetchReport({ ...params, no_cache: true });
+    // no_cache is a transport concern, not part of the identity of the report.
+    expect(getCachedReport(params)).toEqual({ rows: [{ name: "fresh" }] });
+  });
+
+  it("clears everything when the underlying data changes", async () => {
+    const { getCachedReport, clearReportCache } = await import("@/lib/api");
+    vi.stubGlobal("fetch", vi.fn(async () => makeResponse({ rows: [] })));
+
+    await fetchReport(params);
+    clearReportCache();
+    expect(getCachedReport(params)).toBeNull();
+  });
+});
