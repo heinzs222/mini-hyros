@@ -572,6 +572,19 @@ async def health():
     except Exception:
         pass
     payload["backend"] = "postgres" if using_postgres() else "sqlite"
+    # Which build is actually serving. The dashboard and the API deploy as two
+    # separate Vercel projects from this one repo, so they can drift — an
+    # endpoint the dashboard calls can 404 simply because the API project has
+    # not redeployed. Being able to read the commit off /api/health answers
+    # "is the API running my code?" in one request.
+    commit = str(
+        os.environ.get("VERCEL_GIT_COMMIT_SHA")
+        or os.environ.get("RENDER_GIT_COMMIT")
+        or os.environ.get("GIT_COMMIT_SHA")
+        or ""
+    ).strip()
+    if commit:
+        payload["commit"] = commit[:12]
     return payload
 
 
